@@ -1,0 +1,28 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+#:schema https://www.schemastore.org/prek.json
+#
+# This is a nested (workspace-mode) config: prek runs these hooks with the working
+# directory set to this plugin folder, so commands use plain `uv run ...` (no
+# `--directory`). Repo-wide builtin checks (check-json, end-of-file-fixer,
+# trailing-whitespace) live in the root prek.toml and already cover this plugin.
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "ruff-check"
+name = "ruff check"
+entry = "uv"
+args = ["run", "ruff", "check", "."]
+language = "system"
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "pytest"
+name = "pytest"
+entry = "uv"
+args = ["run", "pytest"]
+language = "system"
+pass_filenames = false
+always_run = true

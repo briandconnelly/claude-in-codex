@@ -1,0 +1,15 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "{\"summary\": \"Off-by-one in add()\", \"verdict\": \"concerns\", \"confidence\": \"high\", \"findings\": [{\"severity\": \"high\", \"title\": \"subtraction instead of addition\", \"file\": \"app.py\", \"line\": 2, \"evidence\": \"return a - b\", \"risk\": \"wrong result\", \"recommendation\": \"use +\"}], \"questions\": [], \"assumptions\": [], \"next_steps\": [\"fix the operator\"]}",
+  "session_id": "sess-golden-1",
+  "modelUsage": {"claude-sonnet-4-6": {"inputTokens": 100, "outputTokens": 50}},
+  "total_cost_usd": 0.0123,
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 50,
+    "cache_read_input_tokens": 10,
+    "cache_creation_input_tokens": 5
+  }
+}

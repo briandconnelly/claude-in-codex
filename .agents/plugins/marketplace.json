@@ -1,0 +1,20 @@
+{
+  "name": "cc-plugin-codex",
+  "interface": {
+    "displayName": "Claude Code (for Codex)"
+  },
+  "plugins": [
+    {
+      "name": "cc-plugin-codex",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

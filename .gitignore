@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Claude Code local state
+.claude/debug/
+.claude/settings.local.json
+
+# Superpowers brainstorming/planning docs — kept locally, not committed
+docs/superpowers/
