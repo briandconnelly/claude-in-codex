@@ -28,7 +28,7 @@ hooks = [
 # --------------------------------------------------------------------------
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "v0.15.13"
+rev = "v0.15.15"
 hooks = [
   { id = "ruff-check", args = ["--fix"] },
   { id = "ruff-format" },
@@ -50,6 +50,14 @@ hooks = [
 # --------------------------------------------------------------------------
 [[repos]]
 repo = "local"
+
+[[repos.hooks]]
+id = "ty"
+name = "ty (type check)"
+language = "system"
+entry = "uv run ty check"
+pass_filenames = false
+files = '\.py$'
 
 [[repos.hooks]]
 id = "pytest"

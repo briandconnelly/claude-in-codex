@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from cc_plugin_codex.claude import contract_changed_error
@@ -33,6 +34,7 @@ from cc_plugin_codex.normalize import apply_cost_usage, normalize_envelope
 from cc_plugin_codex.schemas import (
     FINGERPRINT,
     ContextSummary,
+    ErrorCode,
     ErrorInfo,
     ErrorResult,
     Meta,
@@ -506,7 +508,9 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
     if env:
         apply_cost_usage(bmeta, env)
     return ErrorResult(
-        error=ErrorInfo(code=code, message=message, repair=repair, retryable=retryable),
+        error=ErrorInfo(
+            code=cast("ErrorCode", code), message=message, repair=repair, retryable=retryable
+        ),
         meta=bmeta,
     ).model_dump(mode="json", exclude_none=True)
 

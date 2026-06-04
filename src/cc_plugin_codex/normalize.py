@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from cc_plugin_codex import cli_contract
 from cc_plugin_codex.claude import contract_changed_error
 from cc_plugin_codex.schemas import (
+    Confidence,
     ContextSummary,
     ErrorInfo,
     ErrorResult,
     Finding,
     Meta,
     RawResponse,
+    Severity,
     SuccessResult,
     Usage,
+    Verdict,
 )
 
 _SCHEMA_INSTRUCTION = (
@@ -116,7 +119,7 @@ def _clean_findings(raw: Any) -> list[Finding]:
         line_end = f.get("line_end")
         findings.append(
             Finding(
-                severity=_clamp(f.get("severity"), _VALID_SEVERITY, "low"),
+                severity=cast("Severity", _clamp(f.get("severity"), _VALID_SEVERITY, "low")),
                 title=str(f["title"]),
                 file=str(f["file"]) if f.get("file") else None,
                 line=line if isinstance(line, int) else None,
@@ -225,8 +228,8 @@ def normalize_envelope(
     result = SuccessResult(
         tool=tool,
         summary=str(inner.get("summary", "")),
-        verdict=_clamp(inner.get("verdict"), _VALID_VERDICT, "unknown"),
-        confidence=_clamp(inner.get("confidence"), _VALID_CONFIDENCE, "low"),
+        verdict=cast("Verdict", _clamp(inner.get("verdict"), _VALID_VERDICT, "unknown")),
+        confidence=cast("Confidence", _clamp(inner.get("confidence"), _VALID_CONFIDENCE, "low")),
         findings=_clean_findings(inner.get("findings", [])),
         questions=_str_list(inner.get("questions")),
         assumptions=_str_list(inner.get("assumptions")),

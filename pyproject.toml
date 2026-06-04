@@ -26,6 +26,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=7",
     "ruff>=0.15.15",
+    "ty>=0.0.1a7",
 ]
 
 [tool.ruff]
@@ -48,6 +49,14 @@ ignore = [
 # raises, and comma-string parametrize names by design.
 "tests/**" = ["ARG", "PLR2004", "S101", "TC001", "TC002", "TC003", "PT006", "PT011", "PT018", "PLC0415", "RUF059", "SLF001"]
 
+[tool.ty.src]
+# Type-check shipped code; tests use dynamic/Optional-subscript patterns by design.
+include = ["src"]
+
+[tool.ty.rules]
+# fastmcp/anyio expose runtime shapes ty can't fully resolve; don't fail on third-party imports.
+unresolved-import = "warn"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -59,6 +68,7 @@ markers = [
 
 [tool.coverage.run]
 source = ["src/cc_plugin_codex"]
+branch = true
 
 [tool.coverage.report]
 fail_under = 95

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import anyio
+from anyio.to_thread import run_sync
 
 from cc_plugin_codex import cli_contract, preflight
 from cc_plugin_codex.config import (
@@ -162,7 +163,7 @@ async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> Cl
             return out, err, True
 
     try:
-        out, err, timed_out = await anyio.to_thread.run_sync(_wait, abandon_on_cancel=True)
+        out, err, timed_out = await run_sync(_wait, abandon_on_cancel=True)
     except anyio.get_cancelled_exc_class():
         _kill_process_tree(proc)
         raise

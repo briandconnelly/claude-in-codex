@@ -7,12 +7,12 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, cast
 from urllib.parse import unquote, urlparse
 
-import anyio
+from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 from cc_plugin_codex import __version__, cli_contract, jobs, preflight
@@ -56,10 +56,12 @@ from cc_plugin_codex.schemas import (
     STATUS_SCHEMA,
     Access,
     CapabilitiesResult,
+    Confidence,
     ConfigMode,
     Detail,
     DryRunResult,
     Effort,
+    ErrorCode,
     ErrorInfo,
     ErrorResult,
     JobStarted,
@@ -69,6 +71,7 @@ from cc_plugin_codex.schemas import (
     Scope,
     StatusResult,
     SuccessResult,
+    Verdict,
     workspace_warning_for,
 )
 
@@ -142,8 +145,8 @@ def _meta(
 ) -> Meta:
     return Meta(
         cwd=cwd,
-        config_mode=config_mode,
-        access=access,
+        config_mode=cast("ConfigMode", config_mode),
+        access=cast("Access", access),
         scope=scope,
         base=base,
         timeout_seconds=timeout,
@@ -170,7 +173,7 @@ def _err(
 ) -> dict:
     return ErrorResult(
         error=ErrorInfo(
-            code=code,
+            code=cast("ErrorCode", code),
             message=message,
             repair=repair,
             offending_param=offending,
@@ -288,7 +291,11 @@ def _validate_input_size(fields: dict[str, str | None], meta: Meta) -> dict | No
 
 
 def _empty_diff_result(
-    tool: str, meta: Meta, context_summary, verdict: str = "pass", confidence: str = "high"
+    tool: str,
+    meta: Meta,
+    context_summary,
+    verdict: Verdict = "pass",
+    confidence: Confidence = "high",
 ) -> dict:
     result = SuccessResult(
         tool=tool,
@@ -482,7 +489,7 @@ async def claude_ask(
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Ask Claude for a free-form second opinion.
 
@@ -559,7 +566,7 @@ async def claude_review_changes(
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Review a git diff with Claude and wait for the result.
 
@@ -600,9 +607,7 @@ async def claude_review_changes(
         requested_budget=r.budget,
     )
     try:
-        ctx_data = await anyio.to_thread.run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base)
-        )
+        ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
     except InvalidBaseError:
         return _result(
             _err(
@@ -724,7 +729,7 @@ async def claude_adversarial_review(
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Have Claude attack a plan, claim, or decision.
 
@@ -785,9 +790,7 @@ async def claude_adversarial_review(
             requested_budget=r.budget,
         )
         try:
-            ctx_data = await anyio.to_thread.run_sync(
-                lambda: gather_context(cwd, scope=scope, base=base)
-            )
+            ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
         except InvalidBaseError:
             return _result(
                 _err(
@@ -921,7 +924,7 @@ async def claude_review_changes_async(
         float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Launch a git diff review in the background and return a job_id.
 
@@ -965,9 +968,7 @@ async def claude_review_changes_async(
         requested_budget=r.budget,
     )
     try:
-        ctx_data = await anyio.to_thread.run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base)
-        )
+        ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
     except InvalidBaseError:
         return _result(
             _err(
@@ -1053,7 +1054,7 @@ async def claude_review_changes_async(
         requested_max_budget_usd=r.budget,
         redacted_paths=ctx_data.redacted_paths,
     )
-    job_id, started_at = await anyio.to_thread.run_sync(lambda: jobs.start_job(cmd, cwd, cfg))
+    job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg))
     started = JobStarted(
         job_id=job_id,
         kind="claude_review_changes",
@@ -1090,7 +1091,7 @@ async def claude_job_status(
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
     ] = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Check a background review job without fetching the full result.
 
@@ -1101,7 +1102,7 @@ async def claude_job_status(
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    data = await anyio.to_thread.run_sync(lambda: jobs.status(cwd, job_id))
+    data = await run_sync(lambda: jobs.status(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
         return _result(
@@ -1127,7 +1128,7 @@ async def claude_job_result(
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
     ] = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Fetch a finished background review without deleting the job record.
 
@@ -1138,7 +1139,7 @@ async def claude_job_result(
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    payload, found = await anyio.to_thread.run_sync(lambda: jobs.result(cwd, job_id, False))
+    payload, found = await run_sync(lambda: jobs.result(cwd, job_id, False))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
         return _result(
@@ -1164,7 +1165,7 @@ async def claude_job_consume_result(
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
     ] = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Fetch a finished background review and delete the stored job record.
 
@@ -1175,7 +1176,7 @@ async def claude_job_consume_result(
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    payload, found = await anyio.to_thread.run_sync(lambda: jobs.result(cwd, job_id, True))
+    payload, found = await run_sync(lambda: jobs.result(cwd, job_id, True))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
         return _result(
@@ -1201,7 +1202,7 @@ async def claude_job_cancel(
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
     ] = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Cancel a running background review job.
 
@@ -1212,7 +1213,7 @@ async def claude_job_cancel(
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    data = await anyio.to_thread.run_sync(lambda: jobs.cancel(cwd, job_id))
+    data = await run_sync(lambda: jobs.cancel(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
         return _result(
@@ -1242,7 +1243,7 @@ async def claude_review_dry_run(
             "uses the client's first MCP root, else its own cwd."
         ),
     ] = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """Preview what a diff review WOULD send, free and without calling Claude.
 
@@ -1255,9 +1256,7 @@ async def claude_review_dry_run(
         return _result(_workspace_error(ws_err, workspace_root))
     meta = _meta(cwd, "inherit", "toolless", 0, 0, None, scope, base, workspace_source=ws_source)
     try:
-        ctx_data = await anyio.to_thread.run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base)
-        )
+        ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
     except InvalidBaseError:
         return _result(
             _err(
@@ -1314,7 +1313,7 @@ async def claude_job_list(
         str | None,
         Field(description="Workspace whose jobs to list (defaults like the async tools)."),
     ] = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> ToolResult:
     """List the background review jobs known for this workspace, newest first.
 
@@ -1325,7 +1324,7 @@ async def claude_job_list(
     cwd, ws_err, _ = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    data = await anyio.to_thread.run_sync(lambda: jobs.list_jobs(cwd))
+    data = await run_sync(lambda: jobs.list_jobs(cwd))
     return _result(data)
 
 
@@ -1380,10 +1379,13 @@ def claude_status() -> ToolResult:
             )
     d = defaults()
     resolved = ResolvedDefaults(
-        config_mode=d.config_mode if d.config_mode in ("inherit", "scoped", "bare") else "inherit",
-        access=d.access if d.access in ("toolless", "readonly") else "toolless",
+        config_mode=cast(
+            "ConfigMode",
+            d.config_mode if d.config_mode in ("inherit", "scoped", "bare") else "inherit",
+        ),
+        access=cast("Access", d.access if d.access in ("toolless", "readonly") else "toolless"),
         model=d.model,
-        effort=sanitize_effort(d.effort),
+        effort=cast("Effort", sanitize_effort(d.effort)),
         max_budget_usd=clamp_budget(d.max_budget_usd),
         timeout_seconds=clamp_timeout(d.timeout_seconds),
         budget_bounds=[MIN_BUDGET_USD, MAX_BUDGET_USD],
