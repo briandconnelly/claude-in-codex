@@ -220,3 +220,119 @@ def test_failed_job_without_drift_stays_job_failed(tmp_path):
     payload, found = jobs.result(cwd, job_id)
     assert found is True
     assert payload["error"]["code"] == "job_failed"
+
+
+def test_state_root_defaults_under_home(monkeypatch):
+    monkeypatch.delenv(jobs.STATE_ENV, raising=False)
+    assert jobs._state_root().parts[-3:] == (".cache", "cc-plugin-codex", "jobs")
+
+
+def test_pid_helpers_handle_missing_pid():
+    assert jobs._pid_alive(None) is False
+    assert jobs._is_running(None) is False
+    assert jobs._kill_pid_tree(None) is None
+
+
+def test_pid_alive_permission_error_means_alive(monkeypatch):
+    def _raise(pid, sig):
+        raise PermissionError
+
+    monkeypatch.setattr(jobs.os, "kill", _raise)
+    assert jobs._pid_alive(4321) is True
+
+
+def test_pid_alive_when_signal_succeeds(monkeypatch):
+    monkeypatch.setattr(jobs.os, "kill", lambda pid, sig: None)
+    assert jobs._pid_alive(4321) is True
+
+
+def test_is_running_oserror_returns_false(monkeypatch):
+    def _raise(pid, flags):
+        raise OSError
+
+    monkeypatch.setattr(jobs.os, "waitpid", _raise)
+    assert jobs._is_running(4321) is False
+
+
+def test_kill_pid_tree_swallows_errors(monkeypatch):
+    monkeypatch.setattr(jobs.os, "getpgid", lambda p: p)
+    monkeypatch.setattr(
+        jobs.os, "killpg", lambda *a: (_ for _ in ()).throw(ProcessLookupError)
+    )
+    monkeypatch.setattr(
+        jobs.os, "waitpid", lambda *a: (_ for _ in ()).throw(ChildProcessError)
+    )
+    jobs._kill_pid_tree(4321)  # must not raise
+
+
+def test_read_envelope_missing_empty_malformed_and_nondict(tmp_path):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    assert jobs._read_envelope(jd) is None  # no result.json (OSError)
+    (jd / "result.json").write_text("")
+    assert jobs._read_envelope(jd) is None  # empty
+    (jd / "result.json").write_text("{not json")
+    assert jobs._read_envelope(jd) is None  # malformed
+    (jd / "result.json").write_text("[1, 2]")
+    assert jobs._read_envelope(jd) is None  # not a dict
+
+
+def test_stderr_tail_missing_returns_none(tmp_path):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    assert jobs._stderr_tail(jd) is None
+
+
+def test_deadline_seconds_falls_back_to_env():
+    assert jobs._deadline_seconds({}) == jobs.max_seconds()
+
+
+def test_rmtree_swallows_errors(tmp_path):
+    jobs._rmtree(tmp_path / "does-not-exist")  # iterdir raises -> swallowed
+
+
+def test_reap_and_list_skip_nondir_and_bad_meta(tmp_path):
+    cwd = str(tmp_path)
+    ws = jobs._ws_dir(cwd)
+    ws.mkdir(parents=True)
+    (ws / "loose-file").write_text("not a dir")  # non-dir entry skipped
+    bad = ws / "badjob"
+    bad.mkdir()
+    (bad / "meta.json").write_text("{not json")  # unreadable meta skipped
+    assert jobs.list_jobs(cwd)["jobs"] == []
+
+
+def test_count_cap_evicts_oldest_terminal(tmp_path, monkeypatch):
+    monkeypatch.setenv(jobs.MAX_COUNT_ENV, "1")
+    cwd = str(tmp_path)
+    first, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
+    _await_done(cwd, first)
+    second, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())  # cap check evicts `first`
+    _await_done(cwd, second)
+    ids = {j["job_id"] for j in jobs.list_jobs(cwd)["jobs"]}
+    assert second in ids
+    assert first not in ids
+
+
+def test_start_job_survives_chmod_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        jobs.os, "chmod", lambda *a, **k: (_ for _ in ()).throw(OSError)
+    )
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
+    assert job_id
+    _await_done(cwd, job_id)
+
+
+def test_terminal_nondone_result_surfaces_cost(tmp_path):
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
+    _await_done(cwd, job_id)
+    jd = jobs._job_dir(cwd, job_id)
+    meta = jobs._read_meta(jd)
+    meta["terminal_status"] = "cancelled"
+    jobs._write_meta(jd, meta)
+    payload, found = jobs.result(cwd, job_id)
+    assert found and payload["ok"] is False
+    assert payload["error"]["code"] == "job_cancelled"
+    assert payload["meta"]["cost_usd"] == 0.0123  # envelope cost surfaced
