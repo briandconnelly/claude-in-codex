@@ -23,7 +23,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -210,7 +210,7 @@ def start_job(cmd: list[str], cwd: str, cfg: JobConfig) -> tuple[str, str]:
         "kind": cfg.kind,
         "pid": proc.pid,
         "started_epoch": started,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
         "deadline_epoch": started + max_seconds(),
         "completed_epoch": None,
         "terminal_status": None,  # set by cancel/deadline reap
@@ -272,7 +272,7 @@ def _expires_at(meta: dict) -> str | None:
     completed = meta.get("completed_epoch")
     if completed is None:
         return None
-    return datetime.fromtimestamp(completed + ttl_seconds(), timezone.utc).isoformat()
+    return datetime.fromtimestamp(completed + ttl_seconds(), UTC).isoformat()
 
 
 def _reap_workspace(cwd: str) -> None:
