@@ -10,9 +10,12 @@ direction.
 
 ## What it does
 
-An MCP server wraps the `claude` CLI and exposes read-only tools to Codex. Paid tools send
-code context to Anthropic and report their cost; free tools let you check readiness and
-preflight before spending. Every result is a structured `ok`/`error` envelope — see
+An MCP server wraps the `claude` CLI and exposes read-only tools to Codex. The plugin itself
+is free and open-source — there's nothing to buy here. In the table below, **"paid"** marks
+tools that run Claude (an inference call billed to your existing `claude` login or
+`ANTHROPIC_API_KEY`, the same as running `claude` yourself) and report their cost via
+`meta.cost_usd`; **"free"** tools only read local state or preflight, so they never invoke
+Claude and never spend. Every result is a structured `ok`/`error` envelope — see
 [Result format & compatibility](#result-format--compatibility) — which is what makes the
 surface agent-friendly.
 
