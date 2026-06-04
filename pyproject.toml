@@ -24,6 +24,7 @@ dev = [
     "prek>=0.4.4",
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=7",
     "ruff>=0.15.15",
 ]
 
@@ -31,3 +32,13 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "--cov=cc_plugin_codex --cov-report=term-missing -m 'not integration'"
+markers = [
+    "integration: live tests requiring the claude CLI; opt in with `pytest -m integration --no-cov`",
+]
+
+[tool.coverage.run]
+source = ["src/cc_plugin_codex"]
+
+[tool.coverage.report]
+show_missing = true

@@ -8,8 +8,11 @@ from fastmcp import Client
 from cc_plugin_codex.server import mcp
 from tests.conftest import structured
 
-pytestmark = pytest.mark.skipif(shutil.which("claude") is None,
-                                reason="claude CLI not installed")
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(shutil.which("claude") is None,
+                       reason="claude CLI not installed"),
+]
 
 
 async def test_status_live():

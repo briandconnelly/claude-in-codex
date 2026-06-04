@@ -62,4 +62,4 @@ jobs:
       - name: Run integration tests
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: uv run pytest -q tests/test_integration.py
+        run: uv run pytest -m integration --no-cov
