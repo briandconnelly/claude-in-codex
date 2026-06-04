@@ -28,11 +28,31 @@ dev = [
     "ruff>=0.15.15",
 ]
 
+[tool.ruff]
+line-length = 100
+# Matches requires-python (>=3.10); bump alongside the floor if it moves to 3.11.
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PIE", "RUF", "PL", "PT", "TID", "TC", "ARG", "PTH"]
+ignore = [
+    "PLR0913",  # too-many-args: tool handlers legitimately take many params
+    "PLR0911",  # too-many-returns: dispatch/classify handlers branch per error case
+    "PLR0912",  # too-many-branches: same — error-path-heavy handlers
+    "PLR2004",  # magic-value: noisy for literals
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use asserts, fixtures-as-args, private access, inline literals, broad
+# raises, and comma-string parametrize names by design.
+"tests/**" = ["ARG", "PLR2004", "S101", "TC001", "TC002", "TC003", "PT006", "PT011", "PT018", "PLC0415", "RUF059", "SLF001"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=cc_plugin_codex --cov-report=term-missing -m 'not integration'"
+addopts = "--cov=cc_plugin_codex --cov-report=term-missing --strict-markers --strict-config -m 'not integration'"
 markers = [
     "integration: live tests requiring the claude CLI; opt in with `pytest -m integration --no-cov`",
 ]

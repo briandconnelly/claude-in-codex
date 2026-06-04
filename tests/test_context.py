@@ -3,7 +3,11 @@ import subprocess
 import pytest
 
 from cc_plugin_codex.context import (
-    InvalidBaseError, InvalidScopeError, ContextResult, gather_context, _diff_args,
+    ContextResult,
+    InvalidBaseError,
+    InvalidScopeError,
+    _diff_args,
+    gather_context,
 )
 
 
@@ -19,6 +23,7 @@ def test_working_tree_diff(git_repo):
 
 def test_diff_bytes_reports_full_size_when_truncated(git_repo, monkeypatch):
     import cc_plugin_codex.context as ctx
+
     monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 10)
     (git_repo / "big.py").write_text("x = 1\n" * 1000)
     subprocess.run(["git", "add", "-Nf", "big.py"], cwd=git_repo, check=True)
@@ -46,9 +51,7 @@ def test_secret_files_redacted(git_repo):
 
 def test_secret_values_in_source_are_redacted(git_repo):
     (git_repo / "app.py").write_text(
-        "def add(a, b):\n"
-        "    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n"
-        "    return a - b\n"
+        "def add(a, b):\n    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n    return a - b\n"
     )
     res = gather_context(str(git_repo), scope="working_tree", base="main")
     assert "ghp_1234567890abcdefghijklmnopqrstu" not in res.text
@@ -59,9 +62,7 @@ def test_secret_values_in_source_are_redacted(git_repo):
 def test_secret_values_in_removed_lines_are_redacted(git_repo):
     subprocess.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
     (git_repo / "app.py").write_text(
-        "def add(a, b):\n"
-        "    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n"
-        "    return a + b\n"
+        "def add(a, b):\n    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n    return a + b\n"
     )
     subprocess.run(["git", "add", "app.py"], cwd=git_repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "add token"], cwd=git_repo, check=True)
@@ -74,16 +75,12 @@ def test_secret_values_in_removed_lines_are_redacted(git_repo):
 def test_secret_values_in_context_lines_are_redacted(git_repo):
     subprocess.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
     (git_repo / "app.py").write_text(
-        "def add(a, b):\n"
-        "    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n"
-        "    return a + b\n"
+        "def add(a, b):\n    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n    return a + b\n"
     )
     subprocess.run(["git", "add", "app.py"], cwd=git_repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "add token"], cwd=git_repo, check=True)
     (git_repo / "app.py").write_text(
-        "def add(a, b):\n"
-        "    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n"
-        "    return a - b\n"
+        "def add(a, b):\n    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n    return a - b\n"
     )
     res = gather_context(str(git_repo), scope="working_tree", base="main")
     assert "ghp_1234567890abcdefghijklmnopqrstu" not in res.text
@@ -112,6 +109,7 @@ def test_git_timeout_is_bounded(monkeypatch, git_repo):
 
 def test_size_cap_truncates(git_repo, monkeypatch):
     import cc_plugin_codex.context as ctx
+
     monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 10)
     (git_repo / "big.py").write_text("x = 1\n" * 1000)
     subprocess.run(["git", "add", "-Nf", "big.py"], cwd=git_repo, check=True)

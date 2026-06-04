@@ -14,22 +14,48 @@ from cc_plugin_codex import jobs
 from cc_plugin_codex.jobs import JobConfig
 
 _INNER = {
-    "summary": "off-by-one bug", "verdict": "concerns", "confidence": "high",
-    "findings": [{"severity": "high", "title": "subtraction", "file": "app.py",
-                  "line": 2, "evidence": "a - b", "risk": "wrong", "recommendation": "use +"}],
-    "questions": [], "assumptions": [],
+    "summary": "off-by-one bug",
+    "verdict": "concerns",
+    "confidence": "high",
+    "findings": [
+        {
+            "severity": "high",
+            "title": "subtraction",
+            "file": "app.py",
+            "line": 2,
+            "evidence": "a - b",
+            "risk": "wrong",
+            "recommendation": "use +",
+        }
+    ],
+    "questions": [],
+    "assumptions": [],
 }
-_ENVELOPE = json.dumps({
-    "type": "result", "subtype": "success", "is_error": False,
-    "result": json.dumps(_INNER), "session_id": "sess-1",
-    "total_cost_usd": 0.0123, "usage": {"input_tokens": 100, "output_tokens": 50},
-})
+_ENVELOPE = json.dumps(
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": json.dumps(_INNER),
+        "session_id": "sess-1",
+        "total_cost_usd": 0.0123,
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    }
+)
 
 
 def _cfg(**over):
-    base = dict(kind="claude_review_changes", config_mode="inherit", access="toolless",
-                scope="working_tree", base="main", detail="summary",
-                timeout_seconds=1800, workspace_source="cwd", context_summary=None)
+    base = dict(
+        kind="claude_review_changes",
+        config_mode="inherit",
+        access="toolless",
+        scope="working_tree",
+        base="main",
+        detail="summary",
+        timeout_seconds=1800,
+        workspace_source="cwd",
+        context_summary=None,
+    )
     base.update(over)
     return JobConfig(**base)
 
@@ -91,8 +117,8 @@ def test_job_done_returns_normalized_result(tmp_path):
 def test_job_meta_carries_requested_budget_and_warning(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(
-        _emit_cmd(), cwd,
-        _cfg(workspace_source="cwd", requested_max_budget_usd=0.30))
+        _emit_cmd(), cwd, _cfg(workspace_source="cwd", requested_max_budget_usd=0.30)
+    )
     _await_done(cwd, job_id)
     payload, found = jobs.result(cwd, job_id)
     assert found is True
@@ -214,8 +240,7 @@ def test_failed_job_with_drift_stderr_is_cli_contract_changed(tmp_path):
 
 def test_failed_job_without_drift_stays_job_failed(tmp_path):
     cwd = str(tmp_path)
-    job_id, _ = jobs.start_job(
-        ["sh", "-c", "printf 'boom' 1>&2; exit 1"], cwd, _cfg())
+    job_id, _ = jobs.start_job(["sh", "-c", "printf 'boom' 1>&2; exit 1"], cwd, _cfg())
     _await_done(cwd, job_id)
     payload, found = jobs.result(cwd, job_id)
     assert found is True
@@ -256,12 +281,8 @@ def test_is_running_oserror_returns_false(monkeypatch):
 
 def test_kill_pid_tree_swallows_errors(monkeypatch):
     monkeypatch.setattr(jobs.os, "getpgid", lambda p: p)
-    monkeypatch.setattr(
-        jobs.os, "killpg", lambda *a: (_ for _ in ()).throw(ProcessLookupError)
-    )
-    monkeypatch.setattr(
-        jobs.os, "waitpid", lambda *a: (_ for _ in ()).throw(ChildProcessError)
-    )
+    monkeypatch.setattr(jobs.os, "killpg", lambda *a: (_ for _ in ()).throw(ProcessLookupError))
+    monkeypatch.setattr(jobs.os, "waitpid", lambda *a: (_ for _ in ()).throw(ChildProcessError))
     jobs._kill_pid_tree(4321)  # must not raise
 
 
@@ -315,9 +336,7 @@ def test_count_cap_evicts_oldest_terminal(tmp_path, monkeypatch):
 
 
 def test_start_job_survives_chmod_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        jobs.os, "chmod", lambda *a, **k: (_ for _ in ()).throw(OSError)
-    )
+    monkeypatch.setattr(jobs.os, "chmod", lambda *a, **k: (_ for _ in ()).throw(OSError))
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
     assert job_id

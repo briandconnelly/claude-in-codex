@@ -29,26 +29,29 @@ HELP_ARGS = ("--help",)
 # cli_contract_changed. Gating these on the (inherently fuzzy) --help parse could
 # silently drop a security/cost/behavioral guarantee, so we never do. All are long
 # flags (the diagnostic in claude_status checks them against parsed --help).
-ALWAYS_SEND_FLAGS = frozenset({
-    "--output-format",                       # core JSON output
-    "--no-chrome",                           # no interactive picker hanging an unattended run
-    "--append-system-prompt",                # the independent-critic guardrails
-    "--max-budget-usd",                      # best-effort spend stop threshold
-    "--tools",                               # read-only / no-tool guarantee
-    "--strict-mcp-config", "--mcp-config",   # strip the user's MCP fleet (security boundary)
-    "--setting-sources",                     # scoped-mode isolation
-    "--bare",                                # bare-mode isolation
-})
+ALWAYS_SEND_FLAGS = frozenset(
+    {
+        "--output-format",  # core JSON output
+        "--no-chrome",  # no interactive picker hanging an unattended run
+        "--append-system-prompt",  # the independent-critic guardrails
+        "--max-budget-usd",  # best-effort spend stop threshold
+        "--tools",  # read-only / no-tool guarantee
+        "--strict-mcp-config",
+        "--mcp-config",  # strip the user's MCP fleet (security boundary)
+        "--setting-sources",  # scoped-mode isolation
+        "--bare",  # bare-mode isolation
+    }
+)
 
 # HELP_GATED: dropping one only reduces depth or relies on a still-present primary
 # guard — never a safety/cost regression. The value is whether the flag takes an
 # argument (so the gate skips the value token too). These are the ONLY flags gated
 # on `claude --help`; a false negative here merely drops a harmless flag.
 HELP_GATED_FLAGS = {
-    "--effort": True,                    # reasoning depth only
-    "--model": True,                     # falls back to the configured default model
-    "--disallowed-tools": True,          # defense-in-depth; --tools is the primary allowlist
-    "--no-session-persistence": False,   # without it a session merely persists to disk
+    "--effort": True,  # reasoning depth only
+    "--model": True,  # falls back to the configured default model
+    "--disallowed-tools": True,  # defense-in-depth; --tools is the primary allowlist
+    "--no-session-persistence": False,  # without it a session merely persists to disk
 }
 
 # Cache TTL for the `claude --help` probe, so a long-lived server re-probes after
@@ -70,14 +73,26 @@ SUPPORTED_MAJORS_ENV = "CC_PLUGIN_CODEX_SUPPORTED_MAJORS"
 # here keeps the consumed surface greppable and gives the golden-envelope test a
 # canonical reference.
 SUCCESS_SUBTYPES = (None, "success")
-ENVELOPE_KEYS = frozenset({
-    "is_error", "subtype", "result", "total_cost_usd", "usage",
-    "session_id", "modelUsage", "permission_denials",
-})
-USAGE_KEYS = frozenset({
-    "input_tokens", "output_tokens",
-    "cache_read_input_tokens", "cache_creation_input_tokens",
-})
+ENVELOPE_KEYS = frozenset(
+    {
+        "is_error",
+        "subtype",
+        "result",
+        "total_cost_usd",
+        "usage",
+        "session_id",
+        "modelUsage",
+        "permission_denials",
+    }
+)
+USAGE_KEYS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    }
+)
 
 # --- Contract-drift stderr signatures -------------------------------------------
 # Phrasings a CLI prints when it rejects a flag or value we sent. Matching any

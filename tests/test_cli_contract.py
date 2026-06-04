@@ -25,8 +25,13 @@ def test_flag_classes_are_disjoint_and_nonempty():
 def test_security_flags_are_always_send():
     # Losing any of these silently would weaken a security/cost/behavioral
     # guarantee, so they must never be in the help-gated (droppable) class.
-    for flag in ("--tools", "--strict-mcp-config", "--mcp-config",
-                 "--max-budget-usd", "--append-system-prompt"):
+    for flag in (
+        "--tools",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--max-budget-usd",
+        "--append-system-prompt",
+    ):
         assert flag in cli_contract.ALWAYS_SEND_FLAGS
         assert flag not in cli_contract.HELP_GATED_FLAGS
 
