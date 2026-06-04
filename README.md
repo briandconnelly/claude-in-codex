@@ -1,48 +1,40 @@
 # cc-plugin-codex
 
-Call Claude Code from Codex for bounded, independent code review and second opinions.
-The mirror image of [`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc)'s
-review surface.
-Unlike that plugin, cc-plugin-codex is review-only: it does not delegate write-capable
-tasks. Reviews can run synchronously or as background jobs, but Claude only ever reviews.
+Ask Claude Code for an independent code review or second opinion, straight from Codex.
+
+cc-plugin-codex is **review-only**: Claude reviews, critiques, and advises — it never edits
+your code, runs shell, or delegates write tasks. Reviews can run synchronously or as
+background jobs. It's the mirror image of
+[`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc), which goes the other
+direction.
 
 ## What it does
 
-An MCP server wraps the `claude` CLI and exposes read-only tools to Codex:
-`claude_ask`, `claude_review_changes`, `claude_adversarial_review`, and `claude_status`,
-plus `claude_review_changes_async` with `claude_job_status`/`claude_job_result`/
-`claude_job_consume_result`/`claude_job_cancel`/`claude_job_list` for background reviews.
-`claude_review_dry_run` previews workspace/diff-size/redaction for free before a paid
-review, and `cc_codex_capabilities` (alias `claude_capabilities`) returns the capability
-contract. Claude reviews; it never edits your code.
+An MCP server wraps the `claude` CLI and exposes read-only tools to Codex. Paid tools send
+code context to Anthropic and report their cost; free tools let you check readiness and
+preflight before spending. Every result is a structured `ok`/`error` envelope — see
+[Result format & compatibility](#result-format--compatibility) — which is what makes the
+surface agent-friendly.
 
-Each tool publishes an output schema describing the `ok`-discriminated result
-(`{"ok": true, ...}` on success, `{"ok": false, "error": {code, message, repair}, ...}`
-on failure). Failures also set the MCP `isError` flag, so branch on either `ok` or
-`isError`. The surface is **experimental / pre-1.0**; clients should pin
-`meta.fingerprint` to detect schema changes.
-Invalid values for enum-typed parameters (`config_mode`, `access`, `scope`, `detail`)
-are rejected by the MCP framework as a schema validation error before the tool runs,
-rather than via the `ok:false` envelope; every other failure uses the envelope.
-The capability fingerprint changes whenever the agent-visible contract changes.
-Deprecated tools remain discoverable during their compatibility window, with their
-replacement named in the tool description and capability summary.
+| Tool | Purpose | Cost |
+| --- | --- | --- |
+| `claude_ask` | Free-form question / second opinion | paid |
+| `claude_review_changes` | Review the current diff, synchronously | paid |
+| `claude_adversarial_review` | Attack a plan, claim, or change for weaknesses | paid |
+| `claude_review_changes_async` | Launch a diff review as a background job | paid |
+| `claude_job_status` · `claude_job_result` · `claude_job_consume_result` · `claude_job_cancel` · `claude_job_list` | Poll, fetch, consume, cancel, or list background jobs | free |
+| `claude_status` | Readiness probes + the resolved defaults a paid call would use | free |
+| `claude_review_dry_run` | Preview workspace / diff size / redaction before a paid review | free |
+| `cc_codex_capabilities` (alias `claude_capabilities`) | Return the capability contract | free |
 
-The paid tools (`claude_ask`, `claude_review_changes`, `claude_adversarial_review`)
-**block synchronously** for up to `timeout_seconds` (default 180s, max 600s).
-They can be **cancelled** by the client, which terminates the underlying Claude process, but not resumed.
-Call `claude_status` first — it is
-free and reports the resolved defaults (`config_mode`, `access`, `model`, `effort`,
-clamped `max_budget_usd`/`timeout_seconds`, and the clamp bounds) a no-argument paid call
-would use, so you can predict cost and behavior before spending.
-It also runs free readiness probes — `claude_authenticated` (so you can catch a
-logged-out CLI before paying for a call that would only then fail auth),
-`version_supported` (whether the installed CLI matches the supported major), and a
-combined `ready` flag.
-Every paid result also reports `meta.cost_usd` and `meta.usage` (token counts) so an
-agent can track actual spend across calls.
-Diff-bearing paid results report `meta.redacted_paths` when the server withheld or
-masked content before sending it to Claude.
+Paid tools **block synchronously** for up to `timeout_seconds` (default 180s, max 600s) and
+can be cancelled (terminating the underlying Claude process) but not resumed. Each paid
+result reports `meta.cost_usd` and `meta.usage` (token counts) so you can track spend.
+
+Call the free **`claude_status`** first: it reports the resolved defaults a no-argument paid
+call would use (`config_mode`, `access`, `model`, `effort`, clamped
+`max_budget_usd`/`timeout_seconds`) plus readiness probes — `claude_authenticated` (catch a
+logged-out CLI before paying), `version_supported`, and a combined `ready` flag.
 
 ## Requirements
 
@@ -60,10 +52,30 @@ codex plugin marketplace add briandconnelly/cc-plugin-codex
 
 The bundled MCP config runs the server with `uvx` directly from this repository.
 
-## Local dev
+## Usage
 
-This v1 runs from the local checkout (not yet published to PyPI).
-`codex mcp add cc-plugin-codex -- uv run --directory "$(pwd)" cc-plugin-codex-mcp`
+Just ask Codex in plain language — it picks the right tool:
+
+- "Ask Claude to review my current diff."
+- "Have Claude attack this plan for weaknesses."
+- "Get an independent second opinion from Claude."
+
+Those map to `claude_review_changes`, `claude_adversarial_review`, and `claude_ask`. The diff
+tools take a `scope` (`working_tree`, `staged`, or `branch`) and an optional `focus`:
+
+```json
+claude_review_changes({ "scope": "staged", "focus": "security" })
+```
+
+For a long review, launch it in the background instead of blocking the turn:
+
+```json
+claude_review_changes_async({ "scope": "branch", "base": "main" })
+```
+
+It returns a job handle immediately; poll `claude_job_status(job_id)` and fetch with
+`claude_job_result(job_id)`. Run the free `claude_review_dry_run` first to see exactly what
+diff would be sent (and what gets redacted) without spending.
 
 ## Config modes (`config_mode`)
 
@@ -81,96 +93,133 @@ Known limitation: in `claude 2.1.x` there is no OAuth-preserving way to fully st
 `toolless` (default) sends Claude the diff as text; `readonly` lets Claude use `Read,Grep,Glob`
 to pull extra context. Claude never gets write or Bash tools.
 
+## Reasoning effort (`effort`)
+
+Each paid tool accepts `effort` (`low|medium|high|xhigh|max`), passed to the `claude` CLI's
+`--effort`. It defaults to `xhigh` — review depth is the whole point of this server. Lower it
+(`high`/`medium`) to trade rigor for cost on routine reviews, or set the default with
+`CC_PLUGIN_CODEX_EFFORT`. An invalid per-call value is rejected before the tool runs; an
+unrecognized env value falls back to the default.
+
 ## Workspace
 
-The diff-bearing tools operate on a workspace resolved in this order: an explicit
-`workspace_root` argument, then the client's first MCP root, then the server's own
-working directory.
-`meta.workspace_source` reports which rule applied.
-When the client provides MCP roots, an explicit `workspace_root` must be contained
-inside one of those roots; otherwise the tool returns `workspace_outside_roots`.
-Clients that do not provide roots may still pass any existing absolute directory.
-Pass `workspace_root` explicitly when launching the server from a fixed directory (e.g. a
-plugin install) so reviews target your project rather than the plugin checkout.
+The diff tools resolve their workspace in this order: an explicit `workspace_root` argument,
+then the client's first MCP root, then the server's own working directory
+(`meta.workspace_source` reports which applied). When the client provides MCP roots, an
+explicit `workspace_root` must be inside one of them, or the tool returns
+`workspace_outside_roots`. **Pass `workspace_root` explicitly when the server launches from a
+fixed directory (e.g. a plugin install)** so reviews target your project rather than the
+plugin checkout.
 
-## Safety
+## Safety & cost
 
-- Read-only: Claude is never given write or Bash tools.
-- Secret redaction combines filename-based rules (`.env`, `*.env`, `*.pem`, `*.key`,
-  key files) with conservative content scanning for high-confidence token/key patterns
-  in gathered diff lines. Treat it as defense-in-depth, not a guarantee.
-- Diff redaction only applies to the context the server gathers. With `access=readonly`,
-  Claude can read any file in the workspace directly (`Read`/`Grep`/`Glob`), so redaction
-  does NOT protect against secrets it reads itself — use `access=toolless` (the default)
+- **Read-only:** Claude is never given write or Bash tools.
+- **Paid:** each call sends code to Anthropic. `max_budget_usd` is a best-effort stop
+  threshold (enforced by the Claude CLI), not a hard cap — reported `meta.cost_usd` can exceed
+  it; `meta.requested_max_budget_usd` echoes the value sent. `timeout_seconds` bounds
+  wall-clock time per call.
+- **Secret redaction** combines filename rules (`.env`, `*.pem`, `*.key`, key files) with
+  conservative content scanning for token/key patterns in gathered diff lines — treat it as
+  defense-in-depth, not a guarantee. It only covers context the *server* gathers: with
+  `access=readonly` Claude can read files directly, so use `access=toolless` (the default)
   when the workspace may contain secrets.
-- All `config_mode`s drop your other MCP servers, but `inherit`/`scoped` still load your
-  user-level Claude hooks and settings; use `config_mode=bare` for full isolation.
-- Each call is paid and sends code to Anthropic. `max_budget_usd` is a best-effort stop
-  threshold (enforced by the Claude CLI), not a hard cap — reported `meta.cost_usd` can
-  exceed it; `meta.requested_max_budget_usd` echoes the value sent. `timeout_seconds`
-  bounds wall-clock time per call.
-- Free-form text inputs (`prompt`/`context` for `claude_ask`, `target`/`evidence` for
-  `claude_adversarial_review`) are capped before a paid call by
-  `CC_PLUGIN_CODEX_MAX_INPUT_BYTES` (default 200000 bytes).
-- Git context collection is bounded by `CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS` (default
-  60s), so preflight diff work cannot hang indefinitely.
+- **Isolation:** all `config_mode`s drop your other MCP servers, but `inherit`/`scoped` still
+  load your user-level Claude hooks and settings; use `bare` for full isolation.
+- Free-form inputs (`prompt`/`context`, `target`/`evidence`) are capped before a paid call by
+  `CC_PLUGIN_CODEX_MAX_INPUT_BYTES`; git context collection is bounded by
+  `CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS`.
 
-If a requested diff scope has no changes, the review tools return `ok:true` with a
-`pass` verdict and a "No changes in scope" summary without invoking Claude or starting
-a background job.
+If a requested diff scope has no changes, the review tools return `ok:true` with a `pass`
+verdict and a "No changes in scope" summary without invoking Claude or starting a job.
 
 ## Background reviews
 
-`claude_review_changes_async` launches a diff review as a detached job and returns a
-handle `{ok, job_id, status:"running", …}` immediately instead of blocking the Codex
-turn. Poll `claude_job_status(job_id)`, then call `claude_job_result(job_id)` once
-`result_available` is true — the result is the **same** `ok`/`verdict`/`findings`
-envelope the synchronous tool returns, with `meta.job_id` set. `claude_job_result`
-is read-only and leaves the stored record available until TTL cleanup. Use
-`claude_job_consume_result(job_id)` to fetch a finished result and delete the record.
-`claude_job_cancel` terminates a running job. The status/result/consume/cancel tools
-are free.
+`claude_review_changes_async` launches a diff review as a detached job and returns a handle
+immediately. The diff is gathered **at launch** (same redaction and budget stop threshold as
+the sync path). Poll `claude_job_status(job_id)`, then call `claude_job_result(job_id)` once
+ready — it returns the **same** envelope the sync tool does and leaves the record in place;
+`claude_job_consume_result` fetches and deletes it; `claude_job_cancel` stops a running job.
+All status/result/cancel tools are free.
 
-The diff is gathered at launch (same secret redaction and `--max-budget-usd` stop
-threshold as the sync path). Because the server drives one-shot `claude -p --output-format json`, a job's
-completion is simply "the process exited and wrote its JSON envelope" — no interactive
-log scraping. State lives on disk keyed by workspace, so status/result/cancel survive an
-MCP server restart. There is no daemon: overrunning jobs are stopped on the next status
-poll (deadline `CC_PLUGIN_CODEX_JOB_MAX_SECONDS`, default 1800s). Job start/status
-responses include `poll_after_ms`, `ttl_seconds`, and `expires_at` where known.
-Records are cleaned up after `CC_PLUGIN_CODEX_JOB_TTL` (default 24h), and the budget
-stop threshold still applies (best-effort) even for a job nobody polls. Job records (which contain the diff)
-are stored under
-`CC_PLUGIN_CODEX_STATE_DIR` (default `~/.cache/cc-plugin-codex/jobs`); anyone with access
-to that workspace's state directory can read or cancel its jobs.
-
-## Reasoning effort (`effort`)
-
-Each paid tool accepts `effort` (`low|medium|high|xhigh|max`), passed through to the
-`claude` CLI's `--effort`. It defaults to `xhigh` — review depth is the whole point of
-this server. Lower it (`high`/`medium`) to trade rigor for cost on routine reviews, or
-set the default with `CC_PLUGIN_CODEX_EFFORT`. An invalid per-call `effort` is a typed
-enum, so it is rejected as a schema validation error before the tool runs; an
-unrecognized `CC_PLUGIN_CODEX_EFFORT` env value instead falls back to the default.
+State lives **on disk keyed by workspace** (under `CC_PLUGIN_CODEX_STATE_DIR`), so jobs survive
+an MCP server restart. There is no daemon: overrunning jobs are reaped on the next status poll
+(`CC_PLUGIN_CODEX_JOB_MAX_SECONDS`) and terminal records are cleaned up after
+`CC_PLUGIN_CODEX_JOB_TTL`. Job records contain the gathered diff, so anyone with access to that
+workspace's state directory can read or cancel its jobs.
 
 ## Environment variables
 
-`CC_PLUGIN_CODEX_CLAUDE_CONFIG`, `CC_PLUGIN_CODEX_ACCESS`, `CC_PLUGIN_CODEX_MODEL`,
-`CC_PLUGIN_CODEX_EFFORT`, `CC_PLUGIN_CODEX_MAX_BUDGET_USD`,
-`CC_PLUGIN_CODEX_TIMEOUT_SECONDS`, `CC_PLUGIN_CODEX_MAX_INPUT_BYTES`,
-`CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS`, `CC_PLUGIN_CODEX_SUPPORTED_MAJORS`,
-`ANTHROPIC_API_KEY`.
+Every value below has a code-side default, so the server runs with none of these set.
+All are read at process start; they tune defaults, cost/safety bounds, and background-job
+storage.
 
-Background jobs add: `CC_PLUGIN_CODEX_STATE_DIR`, `CC_PLUGIN_CODEX_JOB_MAX_SECONDS`,
-`CC_PLUGIN_CODEX_JOB_TTL`, `CC_PLUGIN_CODEX_JOB_MAX_COUNT`.
+| Variable | Description | Default / example |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | Anthropic API key. Required only for `config_mode=bare`; ignored by `inherit`/`scoped`, which use your existing `claude` login. | _(unset)_ — e.g. `sk-ant-…` |
+| `CC_PLUGIN_CODEX_ACCESS` | Default access mode: `toolless` (diff sent as text) or `readonly` (Claude may use `Read,Grep,Glob`). | `toolless` |
+| `CC_PLUGIN_CODEX_CLAUDE_CONFIG` | Default config mode / isolation: `inherit`, `scoped`, or `bare`. | `inherit` |
+| `CC_PLUGIN_CODEX_EFFORT` | Default reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. An unrecognized value falls back to the default. | `xhigh` |
+| `CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS` | Wall-clock cap for git context collection (preflight diff work). Floored at 1s. | `60` |
+| `CC_PLUGIN_CODEX_JOB_MAX_COUNT` | Retained background-job records per workspace; oldest terminal jobs are evicted past this. | `50` |
+| `CC_PLUGIN_CODEX_JOB_MAX_SECONDS` | Wall-clock deadline for a background job; a status poll past this reaps it. | `1800` |
+| `CC_PLUGIN_CODEX_JOB_TTL` | Seconds before terminal background-job records are cleaned up. | `86400` |
+| `CC_PLUGIN_CODEX_MAX_BUDGET_USD` | Default per-call budget stop threshold (best-effort, not a hard cap). Clamped to 0.01–5.00. | `1.00` |
+| `CC_PLUGIN_CODEX_MAX_INPUT_BYTES` | Cap on free-form text inputs (`prompt`/`context`/`target`/`evidence`) before a paid call. Floored at 1000. | `200000` |
+| `CC_PLUGIN_CODEX_MODEL` | Default Claude model. Unset inherits the `claude` CLI default. | _(unset)_ — e.g. `claude-opus-4-8` |
+| `CC_PLUGIN_CODEX_STATE_DIR` | Directory for background-job state (job records contain the gathered diff). | `~/.cache/cc-plugin-codex/jobs` |
+| `CC_PLUGIN_CODEX_SUPPORTED_MAJORS` | Comma-separated `claude` CLI major versions to accept; override to opt into an untested major. | `2` |
+| `CC_PLUGIN_CODEX_TIMEOUT_SECONDS` | Default per-call wall-clock timeout. Clamped to 10–600. | `180` |
 
-## Compatibility
+### Setting them under Codex
 
-This server couples to the external `claude` CLI (and the Codex host).
-Every assumption — flags, JSON-envelope keys, subcommands, accepted effort levels,
-supported version range — is centralized in `src/cc_plugin_codex/cli_contract.py`
-and documented in [COMPATIBILITY.md](./COMPATIBILITY.md), which also covers what
-breaks on an upstream change and how to fix it.
-When a guarantee-bearing flag or the CLI contract drifts, paid tools fail loudly
-with a `cli_contract_changed` error (no silent weakening, no spend) and
-`claude_status` surfaces a version or flag warning for free.
+Codex does not expand `${VAR}` syntax in MCP config ([codex#2680](https://github.com/openai/codex/issues/2680)),
+so the bundled `.mcp.json` forwards a curated subset of these from your environment via
+`env_vars` — the common cost/safety/model knobs plus `ANTHROPIC_API_KEY`:
+
+```json
+"env_vars": [
+  "ANTHROPIC_API_KEY",
+  "CC_PLUGIN_CODEX_ACCESS",
+  "CC_PLUGIN_CODEX_CLAUDE_CONFIG",
+  "CC_PLUGIN_CODEX_EFFORT",
+  "CC_PLUGIN_CODEX_MAX_BUDGET_USD",
+  "CC_PLUGIN_CODEX_MODEL",
+  "CC_PLUGIN_CODEX_TIMEOUT_SECONDS"
+]
+```
+
+Set any of these in the environment you launch Codex from and the value is passed through;
+leave it unset and the code default above applies. To forward one of the variables not in the
+curated list (e.g. `CC_PLUGIN_CODEX_STATE_DIR`), add its name to `env_vars`, or define the
+server explicitly in `~/.codex/config.toml`.
+
+## Result format & compatibility
+
+Each tool publishes an output schema describing the `ok`-discriminated result
+(`{"ok": true, ...}` on success, `{"ok": false, "error": {code, message, repair}, ...}` on
+failure). Failures also set the MCP `isError` flag, so branch on either `ok` or `isError`.
+Invalid values for enum-typed parameters (`config_mode`, `access`, `scope`, `detail`) are
+rejected by the MCP framework as a schema validation error before the tool runs; every other
+failure uses the envelope. Diff-bearing paid results report `meta.redacted_paths` when the
+server withheld or masked content before sending it to Claude.
+
+The surface is **experimental / pre-1.0**; clients should pin `meta.fingerprint`, which
+changes whenever the agent-visible contract changes. Deprecated tools stay discoverable during
+their compatibility window, with their replacement named in the tool description and
+capability summary.
+
+This server couples to the external `claude` CLI (and the Codex host). Every assumption —
+flags, JSON-envelope keys, subcommands, accepted effort levels, supported version range — is
+centralized in `src/cc_plugin_codex/cli_contract.py` and documented in
+[COMPATIBILITY.md](./COMPATIBILITY.md), which covers what breaks on an upstream change and how
+to fix it. When a guarantee-bearing flag or the CLI contract drifts, paid tools fail loudly
+with a `cli_contract_changed` error (no silent weakening, no spend) and `claude_status`
+surfaces a version or flag warning for free.
+
+## Local dev
+
+This v1 runs from the local checkout (not yet published to PyPI):
+
+```
+codex mcp add cc-plugin-codex -- uv run --directory "$(pwd)" cc-plugin-codex-mcp
+```

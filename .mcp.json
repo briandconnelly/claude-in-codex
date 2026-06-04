@@ -6,6 +6,15 @@
         "--from",
         "git+https://github.com/briandconnelly/cc-plugin-codex.git@v0.1.3",
         "cc-plugin-codex-mcp"
+      ],
+      "env_vars": [
+        "ANTHROPIC_API_KEY",
+        "CC_PLUGIN_CODEX_ACCESS",
+        "CC_PLUGIN_CODEX_CLAUDE_CONFIG",
+        "CC_PLUGIN_CODEX_EFFORT",
+        "CC_PLUGIN_CODEX_MAX_BUDGET_USD",
+        "CC_PLUGIN_CODEX_MODEL",
+        "CC_PLUGIN_CODEX_TIMEOUT_SECONDS"
       ]
     }
   }
