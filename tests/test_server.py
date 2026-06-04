@@ -1075,3 +1075,58 @@ async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
             "claude_ask", {"prompt": "x", "workspace_root": str(tmp_path)},
             raise_on_error=False)
     assert structured(result)["ok"] is False
+
+
+async def test_file_roots_none_ctx_returns_empty():
+    from cc_plugin_codex.server import _file_roots
+    assert await _file_roots(None) == []
+
+
+def test_contained_by_value_error(monkeypatch):
+    import cc_plugin_codex.server as srv
+    monkeypatch.setattr(srv.os.path, "commonpath",
+                        lambda _paths: (_ for _ in ()).throw(ValueError("different drives")))
+    assert srv._contained_by("/a", "/b") is False
+
+
+async def test_status_version_probe_exception_keeps_version_none(monkeypatch):
+    import cc_plugin_codex.server as srv
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("cannot exec")))
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["claude_found"] is True
+    assert "claude_version" not in data            # None dropped by exclude_none
+
+
+async def test_capabilities_resource_returns_summary():
+    async with Client(mcp) as client:
+        contents = await client.read_resource("cc-plugin-codex://capabilities")
+    assert "cc-plugin-codex" in contents[0].text
+
+
+def test_main_runs_stdio(monkeypatch):
+    import cc_plugin_codex.server as srv
+    called = {}
+    monkeypatch.setattr(srv.mcp, "run", lambda **k: called.update(k))
+    srv.main()
+    assert called == {"transport": "stdio"}
+
+
+async def test_job_cancel_success_via_mcp(monkeypatch, git_repo, tmp_path):
+    import cc_plugin_codex.server as srv
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "build_command",
+                        lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool(
+            "claude_review_changes_async",
+            {"scope": "working_tree", "workspace_root": str(git_repo)}))
+        job_id = started["job_id"]
+        cancelled = structured(await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": job_id, "workspace_root": str(git_repo)}))
+    assert cancelled["status"] == "cancelled"
