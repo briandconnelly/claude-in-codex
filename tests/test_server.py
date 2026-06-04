@@ -1,4 +1,5 @@
 import json
+import types
 
 import anyio
 import pytest
@@ -980,3 +981,97 @@ async def test_adversarial_and_async_resolve_error(fake_claude, monkeypatch, git
             raise_on_error=False))
     assert adv["error"]["code"] == "unsupported_config_mode"
     assert asy["error"]["code"] == "unsupported_config_mode"
+
+
+def _fake_ctx(**over):
+    base = dict(truncated=False, truncation_hint=None, text="diff",
+                diff_bytes=4, redacted_paths=[], summary=None)
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("claude_review_changes", {"scope": "working_tree"}),
+    ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
+    ("claude_review_changes_async", {"scope": "working_tree"}),
+    ("claude_review_dry_run", {"scope": "working_tree"}),
+])
+async def test_invalid_scope_from_gather_context(tool, args, monkeypatch, git_repo, tmp_path):
+    import cc_plugin_codex.server as srv
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "gather_context",
+                        lambda *a, **k: (_ for _ in ()).throw(srv.InvalidScopeError("bad")))
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool(
+            tool, {**args, "workspace_root": str(git_repo)}, raise_on_error=False))
+    assert data["error"]["code"] == "invalid_scope"
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("claude_review_changes", {"scope": "working_tree"}),
+    ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
+    ("claude_review_changes_async", {"scope": "working_tree"}),
+    ("claude_review_dry_run", {"scope": "working_tree"}),
+])
+async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_repo, tmp_path):
+    import cc_plugin_codex.server as srv
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "gather_context",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git exploded")))
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool(
+            tool, {**args, "workspace_root": str(git_repo)}, raise_on_error=False))
+    assert data["error"]["code"] == "internal_error"
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("claude_review_changes", {"scope": "working_tree"}),
+    ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
+    ("claude_review_changes_async", {"scope": "working_tree"}),
+])
+async def test_truncated_diff_is_context_too_large(tool, args, monkeypatch, git_repo, tmp_path):
+    import cc_plugin_codex.server as srv
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "gather_context",
+                        lambda *a, **k: _fake_ctx(truncated=True, truncation_hint="too big"))
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool(
+            tool, {**args, "workspace_root": str(git_repo)}, raise_on_error=False))
+    assert data["error"]["code"] == "context_too_large"
+    assert data["meta"]["truncated"] is True
+
+
+@pytest.mark.parametrize("tool", ["claude_review_changes", "claude_review_changes_async"])
+async def test_bad_base_ref_is_invalid_base(tool, fake_claude, monkeypatch, git_repo, tmp_path):
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool(
+            tool, {"scope": "branch", "base": "-badref", "workspace_root": str(git_repo)},
+            raise_on_error=False))
+    assert data["error"]["code"] == "invalid_base"
+
+
+async def test_adversarial_with_nonempty_diff_calls_claude(fake_claude, git_repo):
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool(
+            "claude_adversarial_review",
+            {"target": "review", "scope": "working_tree",
+             "workspace_root": str(git_repo)}))
+    assert data["ok"] is True
+    assert data["verdict"] == "concerns"
+
+
+async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
+    import cc_plugin_codex.server as srv
+    from cc_plugin_codex.claude import ClaudeRun
+
+    async def fake_run(cmd, cwd, timeout_seconds):
+        return ClaudeRun(stdout="not json at all", stderr="boom",
+                         exit_code=1, elapsed_ms=5, timed_out=False)
+
+    monkeypatch.setattr(srv, "run_claude_async", fake_run)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_ask", {"prompt": "x", "workspace_root": str(tmp_path)},
+            raise_on_error=False)
+    assert structured(result)["ok"] is False
