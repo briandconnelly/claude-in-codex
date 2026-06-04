@@ -1,28 +1,61 @@
-# Configuration file for `prek`, a git hook framework written in Rust.
-#:schema https://www.schemastore.org/prek.json
-#
-# This is a nested (workspace-mode) config: prek runs these hooks with the working
-# directory set to this plugin folder, so commands use plain `uv run ...` (no
-# `--directory`). Repo-wide builtin checks (check-json, end-of-file-fixer,
-# trailing-whitespace) live in the root prek.toml and already cover this plugin.
+# prek configuration — runs on commit (and on push for the test gate).
+# Run manually with `uv run prek run --all-files`. Docs: https://prek.j178.dev/
 
+minimum_prek_version = "0.4.0"
+default_install_hook_types = ["pre-commit", "pre-push"]
+
+# --------------------------------------------------------------------------
+# Offline, zero-setup built-in hooks. The whitespace fixers skip workflow
+# files so they stay byte-identical for OIDC-based publishing.
+# --------------------------------------------------------------------------
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace", exclude = '^\.github/workflows/' },
+  { id = "end-of-file-fixer", exclude = '^\.github/workflows/' },
+  { id = "mixed-line-ending", exclude = '^\.github/workflows/' },
+  { id = "check-added-large-files" },
+  { id = "check-merge-conflict" },
+  { id = "check-yaml" },
+  { id = "check-toml" },
+  { id = "check-json" },
+  # test_context.py carries a fake private-key fixture to test diff redaction.
+  { id = "detect-private-key", exclude = '^tests/test_context\.py$' },
+]
+
+# --------------------------------------------------------------------------
+# Ruff (lint + format)
+# --------------------------------------------------------------------------
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.15.13"
+hooks = [
+  { id = "ruff-check", args = ["--fix"] },
+  { id = "ruff-format" },
+]
+
+# --------------------------------------------------------------------------
+# uv — keep uv.lock in sync with pyproject.toml
+# --------------------------------------------------------------------------
+[[repos]]
+repo = "https://github.com/astral-sh/uv-pre-commit"
+rev = "0.11.15"
+hooks = [
+  { id = "uv-lock" },
+]
+
+# --------------------------------------------------------------------------
+# Local hooks — run inside the uv venv. pytest (with the coverage gate) is
+# deferred to pre-push to keep commits fast.
+# --------------------------------------------------------------------------
 [[repos]]
 repo = "local"
 
 [[repos.hooks]]
-id = "ruff-check"
-name = "ruff check"
-entry = "uv"
-args = ["run", "ruff", "check", "."]
-language = "system"
-pass_filenames = false
-always_run = true
-
-[[repos.hooks]]
 id = "pytest"
 name = "pytest"
-entry = "uv"
-args = ["run", "pytest"]
 language = "system"
+entry = "uv run pytest"
 pass_filenames = false
 always_run = true
+stages = ["pre-push"]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -34,40 +34,59 @@ def workspace_warning_for(source: str | None, cwd: str) -> str | None:
     Shared by the sync meta builder and the background-job meta rebuild so the two
     paths cannot drift."""
     if source == "cwd":
-        return (f"workspace resolved from the server's own cwd ({cwd}); pass "
-                "workspace_root (or configure an MCP root) to be sure the review "
-                "targets the intended repository")
+        return (
+            f"workspace resolved from the server's own cwd ({cwd}); pass "
+            "workspace_root (or configure an MCP root) to be sure the review "
+            "targets the intended repository"
+        )
     return None
 
+
 ErrorCode = Literal[
-    "claude_not_found", "claude_auth_required", "api_key_missing", "api_key_invalid",
-    "unsupported_config_mode", "unsupported_access", "invalid_scope", "invalid_base",
-    "invalid_workspace_root", "workspace_outside_roots",
-    "context_too_large", "timeout", "budget_exceeded", "claude_permission_error",
-    "nonzero_exit", "invalid_json", "internal_error",
+    "claude_not_found",
+    "claude_auth_required",
+    "api_key_missing",
+    "api_key_invalid",
+    "unsupported_config_mode",
+    "unsupported_access",
+    "invalid_scope",
+    "invalid_base",
+    "invalid_workspace_root",
+    "workspace_outside_roots",
+    "context_too_large",
+    "timeout",
+    "budget_exceeded",
+    "claude_permission_error",
+    "nonzero_exit",
+    "invalid_json",
+    "internal_error",
     # The installed `claude` rejected a flag/value this plugin sends — its CLI
     # contract drifted and the plugin likely needs an update.
     "cli_contract_changed",
     # Background-job lifecycle errors (claude_job_result for a non-done job):
-    "job_not_found", "job_running", "job_cancelled", "job_timeout", "job_failed",
+    "job_not_found",
+    "job_running",
+    "job_cancelled",
+    "job_timeout",
+    "job_failed",
 ]
 
 
 class Usage(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    cache_read_input_tokens: Optional[int] = None
-    cache_creation_input_tokens: Optional[int] = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
 
 
 class Finding(BaseModel):
     model_config = ConfigDict(extra="forbid")
     severity: Severity
     title: str
-    file: Optional[str] = None
-    line: Optional[int] = None
-    line_end: Optional[int] = None   # end line when the finding spans a range (line = start)
+    file: str | None = None
+    line: int | None = None
+    line_end: int | None = None  # end line when the finding spans a range (line = start)
     evidence: str
     risk: str
     recommendation: str
@@ -75,9 +94,9 @@ class Finding(BaseModel):
 
 class RawResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    text: Optional[str] = None
-    session_id: Optional[str] = None
-    model: Optional[str] = None
+    text: str | None = None
+    session_id: str | None = None
+    model: str | None = None
 
 
 class ContextSummary(BaseModel):
@@ -90,30 +109,30 @@ class ContextSummary(BaseModel):
 class Meta(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cwd: str
-    workspace_source: Optional[str] = None   # how cwd was resolved: param|roots|cwd
-    workspace_warning: Optional[str] = None   # set when cwd was resolved from server cwd
+    workspace_source: str | None = None  # how cwd was resolved: param|roots|cwd
+    workspace_warning: str | None = None  # set when cwd was resolved from server cwd
     config_mode: ConfigMode
     access: Access
-    scope: Optional[str] = None
-    base: Optional[str] = None
+    scope: str | None = None
+    base: str | None = None
     timeout_seconds: int
     elapsed_ms: int
     # The effective (env-defaulted + clamped) value passed to claude as
     # --max-budget-usd. It is a best-effort stop threshold, not a hard cap; compare
     # against cost_usd to see how close actual spend came.
-    requested_max_budget_usd: Optional[float] = None
+    requested_max_budget_usd: float | None = None
     truncated: bool = False
-    truncation_hint: Optional[str] = None
-    command_exit_code: Optional[int] = None
-    permission_denials: Optional[list] = None
+    truncation_hint: str | None = None
+    command_exit_code: int | None = None
+    permission_denials: list | None = None
     # Optional `claude` flags this server dropped because the installed CLI did not
     # advertise them in --help (e.g. ["--effort"]). Empty in the common case;
     # informational — guarantee-bearing flags are never dropped, only depth/cosmetic ones.
     compat_warnings: list[str] = Field(default_factory=list)
     redacted_paths: list[str] = Field(default_factory=list)
-    cost_usd: Optional[float] = None
-    usage: Optional[Usage] = None
-    job_id: Optional[str] = None   # set on background-job results; None for sync calls
+    cost_usd: float | None = None
+    usage: Usage | None = None
+    job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
     fingerprint: str = FINGERPRINT
 
@@ -130,7 +149,7 @@ class SuccessResult(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     next_steps: list[str] = Field(default_factory=list)
     raw_response: RawResponse = Field(default_factory=RawResponse)
-    context_summary: Optional[ContextSummary] = None
+    context_summary: ContextSummary | None = None
     meta: Meta
 
 
@@ -139,7 +158,7 @@ class ErrorInfo(BaseModel):
     code: ErrorCode
     message: str
     repair: str
-    offending_param: Optional[str] = None
+    offending_param: str | None = None
     retryable: bool = False
 
 
@@ -154,30 +173,30 @@ class ResolvedDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
     config_mode: ConfigMode
     access: Access
-    model: Optional[str] = None
+    model: str | None = None
     effort: Effort
     max_budget_usd: float
     timeout_seconds: int
-    budget_bounds: list[float]   # [min, max] clamp range for max_budget_usd
-    timeout_bounds: list[int]    # [min, max] clamp range for timeout_seconds
+    budget_bounds: list[float]  # [min, max] clamp range for max_budget_usd
+    timeout_bounds: list[int]  # [min, max] clamp range for timeout_seconds
 
 
 class StatusResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
     claude_found: bool
-    claude_version: Optional[str] = None
+    claude_version: str | None = None
     # Readiness probes (all free — no paid Claude call):
-    claude_authenticated: Optional[bool] = None   # None = could not determine
-    auth_detail: Optional[str] = None
-    version_supported: Optional[bool] = None       # major is in supported_majors()
+    claude_authenticated: bool | None = None  # None = could not determine
+    auth_detail: str | None = None
+    version_supported: bool | None = None  # major is in supported_majors()
     # Set when version_supported is False: a major outside the tested range is
     # advisory, not fatal — tools may still work, so we warn instead of blocking.
-    version_warning: Optional[str] = None
+    version_warning: str | None = None
     # Set when `claude --help` did not list a guarantee-bearing flag this plugin
     # sends — an early, free signal that the CLI contract drifted.
-    flags_warning: Optional[str] = None
-    ready: bool = False        # found AND authenticated (version is advisory, not gating)
+    flags_warning: str | None = None
+    ready: bool = False  # found AND authenticated (version is advisory, not gating)
     config_modes_available: dict
     resolved_defaults: ResolvedDefaults
     caveat: str
@@ -196,30 +215,32 @@ class CapabilitiesResult(BaseModel):
     free_tools: list[str]
     config_modes: list[str]
     access_modes: list[str]
-    scope: list[str]            # what this server is for
-    negative_scope: list[str]   # what it deliberately does NOT do
+    scope: list[str]  # what this server is for
+    negative_scope: list[str]  # what it deliberately does NOT do
     prerequisites: list[str]
     deprecation_policy: str
 
 
 class JobStarted(BaseModel):
     """Returned by the *_async tools: a handle to poll, not a result."""
+
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
     job_id: str
-    kind: str                  # the tool the job runs, e.g. claude_review_changes
+    kind: str  # the tool the job runs, e.g. claude_review_changes
     status: JobState = "running"
-    started_at: str            # ISO-8601 UTC
-    deadline_seconds: int      # wall-clock cap after which a poll reaps the job
+    started_at: str  # ISO-8601 UTC
+    deadline_seconds: int  # wall-clock cap after which a poll reaps the job
     poll_after_ms: int = 1000
     ttl_seconds: int
-    expires_at: Optional[str] = None
+    expires_at: str | None = None
     meta: Meta
     fingerprint: str = FINGERPRINT
 
 
 class JobStatus(BaseModel):
     """Returned by claude_job_status: lifecycle state without the full result."""
+
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
     job_id: str
@@ -230,28 +251,29 @@ class JobStatus(BaseModel):
     deadline_seconds: int
     poll_after_ms: int = 1000
     ttl_seconds: int
-    expires_at: Optional[str] = None
-    result_available: bool = False   # true once status == done
-    cost_usd: Optional[float] = None  # populated for terminal jobs that spent
-    detail: Optional[str] = None      # short human hint (e.g. failure reason)
+    expires_at: str | None = None
+    result_available: bool = False  # true once status == done
+    cost_usd: float | None = None  # populated for terminal jobs that spent
+    detail: str | None = None  # short human hint (e.g. failure reason)
     fingerprint: str = FINGERPRINT
 
 
 class DryRunResult(BaseModel):
     """Free preview of what a diff review WOULD send — no Claude call, no spend."""
+
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
     tool: Literal["claude_review_dry_run"] = "claude_review_dry_run"
     cwd: str
-    workspace_source: Optional[str] = None
-    workspace_warning: Optional[str] = None
+    workspace_source: str | None = None
+    workspace_warning: str | None = None
     scope: str
-    base: Optional[str] = None
+    base: str | None = None
     context_summary: ContextSummary
-    diff_bytes: int              # full UTF-8 size of the redacted diff that would be sent
-    max_diff_bytes: int          # the server's truncation threshold
-    truncated: bool = False      # true when diff_bytes > max_diff_bytes
-    truncation_hint: Optional[str] = None
+    diff_bytes: int  # full UTF-8 size of the redacted diff that would be sent
+    max_diff_bytes: int  # the server's truncation threshold
+    truncated: bool = False  # true when diff_bytes > max_diff_bytes
+    truncation_hint: str | None = None
     redacted_paths_count: int = 0
     redacted_paths: list[str] = Field(default_factory=list)
     fingerprint: str = FINGERPRINT
@@ -265,12 +287,13 @@ class JobSummary(BaseModel):
     started_at: str
     elapsed_ms: int
     result_available: bool = False
-    expires_at: Optional[str] = None
-    cost_usd: Optional[float] = None
+    expires_at: str | None = None
+    cost_usd: float | None = None
 
 
 class JobListResult(BaseModel):
     """Returned by claude_job_list: the workspace's known jobs, newest first."""
+
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
     jobs: list[JobSummary] = Field(default_factory=list)
@@ -288,8 +311,7 @@ def _object_union_schema(adapter: TypeAdapter) -> dict:
     return {
         "type": "object",
         "properties": {
-            "ok": {"type": "boolean",
-                   "description": "true = success result, false = error result"},
+            "ok": {"type": "boolean", "description": "true = success result, false = error result"},
         },
         "required": ["ok"],
         "anyOf": union["anyOf"],

@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import anyio
 
 from cc_plugin_codex import cli_contract, preflight
 from cc_plugin_codex.config import (
-    INDEPENDENT_CRITIC_PROMPT, access_flags, config_mode_flags,
+    INDEPENDENT_CRITIC_PROMPT,
+    access_flags,
+    config_mode_flags,
 )
-from cc_plugin_codex.preflight import FlagSupport
 from cc_plugin_codex.schemas import ErrorInfo
+
+if TYPE_CHECKING:
+    from cc_plugin_codex.preflight import FlagSupport
 
 
 @dataclass
@@ -47,9 +53,15 @@ def _gate_optional(tokens: list[str], fs: FlagSupport) -> tuple[list[str], list[
     return kept, dropped
 
 
-def build_command(prompt: str, config_mode: str, access: str, model: str | None,
-                  max_budget_usd: float, effort: str | None = None,
-                  flag_support: FlagSupport | None = None) -> tuple[list[str], list[str]]:
+def build_command(
+    prompt: str,
+    config_mode: str,
+    access: str,
+    model: str | None,
+    max_budget_usd: float,
+    effort: str | None = None,
+    flag_support: FlagSupport | None = None,
+) -> tuple[list[str], list[str]]:
     """Build the `claude` invocation. Returns (cmd, dropped_optional_flags).
 
     Guarantee-bearing flags are sent unconditionally; HELP_GATED (depth/cosmetic)
@@ -86,13 +98,21 @@ def auth_status(timeout_seconds: int = 10) -> tuple[bool | None, str | None]:
     into shared logs/transcripts. The boolean already carries the machine-readable
     truth, so we deliberately drop the raw text."""
     try:
-        proc = subprocess.run([cli_contract.CLAUDE_BIN, *cli_contract.AUTH_STATUS_ARGS],
-                              capture_output=True, text=True, timeout=timeout_seconds)
+        proc = subprocess.run(
+            [cli_contract.CLAUDE_BIN, *cli_contract.AUTH_STATUS_ARGS],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError):
         return None, None
     logged_in = proc.returncode == 0
-    detail = ("Claude CLI reports an authenticated session." if logged_in
-              else "Claude CLI reports no authenticated session; run `claude /login`.")
+    detail = (
+        "Claude CLI reports an authenticated session."
+        if logged_in
+        else "Claude CLI reports no authenticated session; run `claude /login`."
+    )
     return logged_in, detail
 
 
@@ -108,10 +128,8 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
         else:  # pragma: no cover - non-POSIX fallback
             proc.kill()
     except (ProcessLookupError, PermissionError):
-        try:
+        with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        except ProcessLookupError:
-            pass
 
 
 async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> ClaudeRun:
@@ -123,8 +141,12 @@ async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> Cl
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
-            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
     except OSError:
         elapsed = int((time.monotonic() - start) * 1000)
@@ -140,8 +162,7 @@ async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> Cl
             return out, err, True
 
     try:
-        out, err, timed_out = await anyio.to_thread.run_sync(
-            _wait, abandon_on_cancel=True)
+        out, err, timed_out = await anyio.to_thread.run_sync(_wait, abandon_on_cancel=True)
     except anyio.get_cancelled_exc_class():
         _kill_process_tree(proc)
         raise
@@ -153,73 +174,94 @@ async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> Cl
 
 def classify_failure(run: ClaudeRun) -> ErrorInfo:
     env = None
-    try:
+    with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
     if run.stderr == "claude_not_found":
-        return ErrorInfo(code="claude_not_found",
-                         message="The `claude` CLI was not found on PATH.",
-                         repair="Install Claude Code and ensure `claude` is on PATH.")
+        return ErrorInfo(
+            code="claude_not_found",
+            message="The `claude` CLI was not found on PATH.",
+            repair="Install Claude Code and ensure `claude` is on PATH.",
+        )
     if run.timed_out:
-        return ErrorInfo(code="timeout", message="claude exceeded the timeout.",
-                         repair="Narrow the scope/focus or raise timeout_seconds.",
-                         retryable=True)
+        return ErrorInfo(
+            code="timeout",
+            message="claude exceeded the timeout.",
+            repair="Narrow the scope/focus or raise timeout_seconds.",
+            retryable=True,
+        )
     if isinstance(env, dict) and env.get("is_error"):
         subtype = str(env.get("subtype") or "").lower()
         result = str(env.get("result") or "")
         structured_blob = f"{subtype}\n{result}".lower()
         if "api_key" in structured_blob or "invalid api key" in structured_blob:
-            return ErrorInfo(code="api_key_invalid",
-                             message="ANTHROPIC_API_KEY is invalid.",
-                             repair="Set a valid ANTHROPIC_API_KEY, or use config_mode "
-                                    "inherit/scoped to use your existing login.")
+            return ErrorInfo(
+                code="api_key_invalid",
+                message="ANTHROPIC_API_KEY is invalid.",
+                repair="Set a valid ANTHROPIC_API_KEY, or use config_mode "
+                "inherit/scoped to use your existing login.",
+            )
         if "auth" in structured_blob or "login" in structured_blob:
-            return ErrorInfo(code="claude_auth_required",
-                             message="claude is not authenticated.",
-                             repair="Run `claude /login`.")
+            return ErrorInfo(
+                code="claude_auth_required",
+                message="claude is not authenticated.",
+                repair="Run `claude /login`.",
+            )
         if "budget" in structured_blob:
-            return ErrorInfo(code="budget_exceeded",
-                             message="claude reached the max-budget stop threshold "
-                                     "(a best-effort limit, not a hard cap).",
-                             repair="Raise max_budget_usd or reduce context.",
-                             retryable=True)
+            return ErrorInfo(
+                code="budget_exceeded",
+                message="claude reached the max-budget stop threshold "
+                "(a best-effort limit, not a hard cap).",
+                repair="Raise max_budget_usd or reduce context.",
+                retryable=True,
+            )
         if "permission" in structured_blob or "denied" in structured_blob:
-            return ErrorInfo(code="claude_permission_error",
-                             message="claude was denied a requested permission.",
-                             repair="Use access=toolless, or allow the needed read-only tools.")
+            return ErrorInfo(
+                code="claude_permission_error",
+                message="claude was denied a requested permission.",
+                repair="Use access=toolless, or allow the needed read-only tools.",
+            )
         if "rate" in structured_blob or "overloaded" in structured_blob:
-            return ErrorInfo(code="nonzero_exit",
-                             message=f"claude reported a retryable error: {result[:200]}",
-                             repair="Retry later, or reduce request size.",
-                             retryable=True)
+            return ErrorInfo(
+                code="nonzero_exit",
+                message=f"claude reported a retryable error: {result[:200]}",
+                repair="Retry later, or reduce request size.",
+                retryable=True,
+            )
 
     extra = ""
     if isinstance(env, dict):
         extra = f"{env.get('subtype', '')} {env.get('result', '')}"
     blob = f"{extra}\n{run.stdout}\n{run.stderr}".lower()
     if "invalid api key" in blob:
-        return ErrorInfo(code="api_key_invalid",
-                         message="ANTHROPIC_API_KEY is invalid.",
-                         repair="Set a valid ANTHROPIC_API_KEY, or use config_mode "
-                                "inherit/scoped to use your existing login.")
+        return ErrorInfo(
+            code="api_key_invalid",
+            message="ANTHROPIC_API_KEY is invalid.",
+            repair="Set a valid ANTHROPIC_API_KEY, or use config_mode "
+            "inherit/scoped to use your existing login.",
+        )
     if "not logged in" in blob or "/login" in blob:
-        return ErrorInfo(code="claude_auth_required",
-                         message="claude is not authenticated.",
-                         repair="Run `claude /login`.")
+        return ErrorInfo(
+            code="claude_auth_required",
+            message="claude is not authenticated.",
+            repair="Run `claude /login`.",
+        )
     if "budget" in blob:
-        return ErrorInfo(code="budget_exceeded",
-                         message="claude reached the max-budget stop threshold "
-                                 "(a best-effort limit, not a hard cap).",
-                         repair="Raise max_budget_usd or reduce context.",
-                         retryable=True)
+        return ErrorInfo(
+            code="budget_exceeded",
+            message="claude reached the max-budget stop threshold "
+            "(a best-effort limit, not a hard cap).",
+            repair="Raise max_budget_usd or reduce context.",
+            retryable=True,
+        )
     # An unknown flag / invalid value means the CLI contract drifted from what this
     # plugin sends. Check last so an auth/budget message is never misread as drift.
     if cli_contract.is_contract_drift(run.stderr, run.stdout):
         return contract_changed_error()
-    return ErrorInfo(code="nonzero_exit",
-                     message=f"claude exited {run.exit_code}: {run.stderr.strip()[:200]}",
-                     repair="Inspect the error; retry with a smaller request.")
+    return ErrorInfo(
+        code="nonzero_exit",
+        message=f"claude exited {run.exit_code}: {run.stderr.strip()[:200]}",
+        repair="Inspect the error; retry with a smaller request.",
+    )
 
 
 def contract_changed_error() -> ErrorInfo:
@@ -229,7 +271,7 @@ def contract_changed_error() -> ErrorInfo:
     return ErrorInfo(
         code="cli_contract_changed",
         message="claude rejected a flag or value this plugin sent — its CLI "
-                "contract likely changed for your installed version.",
+        "contract likely changed for your installed version.",
         repair="Update cc-plugin-codex (or pin claude to a supported version); "
-               "run claude_status to check the version.",
+        "run claude_status to check the version.",
     )

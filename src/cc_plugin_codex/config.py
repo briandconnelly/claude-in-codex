@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 
 from cc_plugin_codex import cli_contract
+
 # Re-exported so existing `from ...config import VALID_EFFORTS` callers keep
 # working; the canonical definition lives in cli_contract.
 from cc_plugin_codex.cli_contract import DEFAULT_EFFORT, VALID_EFFORTS
@@ -18,7 +19,7 @@ MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS = 10, 600
 DEFAULT_MAX_INPUT_BYTES = 200_000
 DEFAULT_GIT_TIMEOUT_SECONDS = 60
 
-__all__ = ["VALID_EFFORTS", "DEFAULT_EFFORT"]  # re-exports; silence unused-import lints
+__all__ = ["DEFAULT_EFFORT", "VALID_EFFORTS"]  # re-exports; silence unused-import lints
 
 INDEPENDENT_CRITIC_PROMPT = (
     "You are being asked for an independent critique of Codex's work.\n"
@@ -129,8 +130,7 @@ def max_input_bytes() -> int:
 
 
 def git_timeout_seconds() -> int:
-    return max(1, _env_int("CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS",
-                           DEFAULT_GIT_TIMEOUT_SECONDS))
+    return max(1, _env_int("CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS", DEFAULT_GIT_TIMEOUT_SECONDS))
 
 
 def bare_available() -> bool:
@@ -141,15 +141,24 @@ def config_mode_flags(mode: str) -> list[str]:
     # All modes drop the user's MCP fleet (a reviewer never needs it, and it is a
     # side-effect vector). inherit/scoped keep the user's login; bare needs an API key.
     if mode == "inherit":
-        return ["--no-session-persistence",
-                "--strict-mcp-config", "--mcp-config", EMPTY_MCP]
+        return ["--no-session-persistence", "--strict-mcp-config", "--mcp-config", EMPTY_MCP]
     if mode == "scoped":
-        return ["--setting-sources", "project",
-                "--strict-mcp-config", "--mcp-config", EMPTY_MCP,
-                "--no-session-persistence"]
+        return [
+            "--setting-sources",
+            "project",
+            "--strict-mcp-config",
+            "--mcp-config",
+            EMPTY_MCP,
+            "--no-session-persistence",
+        ]
     if mode == "bare":
-        return ["--bare", "--no-session-persistence",
-                "--strict-mcp-config", "--mcp-config", EMPTY_MCP]
+        return [
+            "--bare",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--mcp-config",
+            EMPTY_MCP,
+        ]
     raise ValueError(f"unsupported config_mode: {mode}")
 
 
@@ -159,6 +168,5 @@ def access_flags(access: str) -> list[str]:
     if access == "readonly":
         # --tools is the PRIMARY allowlist (read-only guarantee); --disallowed-tools is
         # defense-in-depth only. Never widen --tools to include write/Bash tools.
-        return ["--tools", "Read,Grep,Glob",
-                "--disallowed-tools", "Edit,Write,NotebookEdit,Bash"]
+        return ["--tools", "Read,Grep,Glob", "--disallowed-tools", "Edit,Write,NotebookEdit,Bash"]
     raise ValueError(f"unsupported access: {access}")

@@ -25,7 +25,7 @@ _LONG_FLAG_RE = re.compile(r"--[a-z][a-z0-9-]+")
 @dataclass(frozen=True)
 class FlagSupport:
     supported: frozenset[str]
-    help_parsed: bool   # False => probe failed; callers must fail open
+    help_parsed: bool  # False => probe failed; callers must fail open
 
 
 # Process-level cache: (monotonic_timestamp, FlagSupport). A long-lived MCP server
@@ -38,7 +38,10 @@ def _probe_help() -> str:
     try:
         proc = subprocess.run(
             [cli_contract.CLAUDE_BIN, *cli_contract.HELP_ARGS],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -54,7 +57,7 @@ def _parse_supported(help_text: str) -> frozenset[str]:
 def flag_support(force: bool = False) -> FlagSupport:
     """Cached FlagSupport for the installed `claude`. force=True bypasses the cache
     (used by tests / diagnostics)."""
-    global _cache
+    global _cache  # noqa: PLW0603 — intentional process-level memoization of the help probe
     now = time.monotonic()
     if not force and _cache is not None:
         stamped, value = _cache
@@ -71,7 +74,7 @@ def flag_support(force: bool = False) -> FlagSupport:
 
 def reset_cache() -> None:
     """Drop the cached probe (used by tests)."""
-    global _cache
+    global _cache  # noqa: PLW0603 — resets the intentional module-level cache
     _cache = None
 
 

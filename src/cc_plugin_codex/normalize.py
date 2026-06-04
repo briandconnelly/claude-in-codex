@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 from cc_plugin_codex import cli_contract
 from cc_plugin_codex.claude import contract_changed_error
@@ -22,8 +22,8 @@ _SCHEMA_INSTRUCTION = (
     "Respond with ONLY a single JSON object (no prose, no code fence) with keys: "
     '"summary" (string), "verdict" (one of pass|concerns|fail|unknown), '
     '"confidence" (one of low|medium|high), "findings" (array of objects with '
-    'severity[critical|high|medium|low|nit], title, file, line, line_end (optional '
-    'end line for multi-line findings), evidence, risk, recommendation), '
+    "severity[critical|high|medium|low|nit], title, file, line, line_end (optional "
+    "end line for multi-line findings), evidence, risk, recommendation), "
     '"questions" (array of strings), "assumptions" (array of strings), '
     '"next_steps" (array of strings: concrete actions to take next).'
 )
@@ -31,9 +31,9 @@ _SCHEMA_INSTRUCTION = (
 _LEAD = {
     "claude_ask": "Give an independent second opinion on the following question.",
     "claude_review_changes": "Review the following code changes for correctness, "
-        "regressions, security, and missing tests.",
+    "regressions, security, and missing tests.",
     "claude_adversarial_review": "Attack the following plan/claim. Find the strongest "
-        "counterarguments, failure modes, and risks.",
+    "counterarguments, failure modes, and risks.",
 }
 
 _VALID_VERDICT = {"pass", "concerns", "fail", "unknown"}
@@ -65,10 +65,10 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
     return "\n".join(parts)
 
 
-def extract_json(text: str) -> Optional[dict]:
+def extract_json(text: str) -> dict | None:
     decoder = json.JSONDecoder()
 
-    def scan(candidate: str) -> Optional[dict]:
+    def scan(candidate: str) -> dict | None:
         for idx, char in enumerate(candidate):
             if char != "{":
                 continue
@@ -91,7 +91,7 @@ def extract_json(text: str) -> Optional[dict]:
         end = text.find("```", body_start + 1)
         if end < 0:
             break
-        parsed = scan(text[body_start + 1:end])
+        parsed = scan(text[body_start + 1 : end])
         if parsed is not None:
             return parsed
         fence_start = end + 3
@@ -114,16 +114,18 @@ def _clean_findings(raw: Any) -> list[Finding]:
             continue  # drop incomplete findings rather than fabricate fields
         line = f.get("line")
         line_end = f.get("line_end")
-        findings.append(Finding(
-            severity=_clamp(f.get("severity"), _VALID_SEVERITY, "low"),
-            title=str(f["title"]),
-            file=str(f["file"]) if f.get("file") else None,
-            line=line if isinstance(line, int) else None,
-            line_end=line_end if isinstance(line_end, int) else None,
-            evidence=str(f["evidence"]),
-            risk=str(f["risk"]),
-            recommendation=str(f["recommendation"]),
-        ))
+        findings.append(
+            Finding(
+                severity=_clamp(f.get("severity"), _VALID_SEVERITY, "low"),
+                title=str(f["title"]),
+                file=str(f["file"]) if f.get("file") else None,
+                line=line if isinstance(line, int) else None,
+                line_end=line_end if isinstance(line_end, int) else None,
+                evidence=str(f["evidence"]),
+                risk=str(f["risk"]),
+                recommendation=str(f["recommendation"]),
+            )
+        )
     return findings
 
 

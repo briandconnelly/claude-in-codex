@@ -14,8 +14,14 @@ _GOLDEN = (Path(__file__).parent / "golden" / "claude_envelope.json").read_text(
 
 
 def _meta():
-    return Meta(cwd="/repo", config_mode="inherit", access="toolless",
-                timeout_seconds=180, elapsed_ms=10, fingerprint=FINGERPRINT)
+    return Meta(
+        cwd="/repo",
+        config_mode="inherit",
+        access="toolless",
+        timeout_seconds=180,
+        elapsed_ms=10,
+        fingerprint=FINGERPRINT,
+    )
 
 
 def test_golden_envelope_parses_to_success_with_cost():
