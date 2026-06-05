@@ -22,6 +22,12 @@ from cc_plugin_codex.config import (
 )
 from cc_plugin_codex.schemas import ErrorInfo
 
+_BUDGET_REPAIR = (
+    "Raise max_budget_usd or reduce context. For small prompts, try at least "
+    "$0.10-$0.20; lower best-effort budgets can spend and still stop before a "
+    "useful answer."
+)
+
 if TYPE_CHECKING:
     from cc_plugin_codex.preflight import FlagSupport
 
@@ -212,7 +218,7 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
                 code="budget_exceeded",
                 message="claude reached the max-budget stop threshold "
                 "(a best-effort limit, not a hard cap).",
-                repair="Raise max_budget_usd or reduce context.",
+                repair=_BUDGET_REPAIR,
                 retryable=True,
             )
         if "permission" in structured_blob or "denied" in structured_blob:
@@ -251,7 +257,7 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
             code="budget_exceeded",
             message="claude reached the max-budget stop threshold "
             "(a best-effort limit, not a hard cap).",
-            repair="Raise max_budget_usd or reduce context.",
+            repair=_BUDGET_REPAIR,
             retryable=True,
         )
     # An unknown flag / invalid value means the CLI contract drifted from what this

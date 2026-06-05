@@ -32,7 +32,7 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 - `claude_status` — free readiness check: reports whether `claude` is installed, authenticated (`claude_authenticated`), version-compatible (`version_supported`), and overall `ready`, plus the resolved defaults a no-arg call would use. Run it first if a call fails, or to confirm readiness before spending.
 - `claude_review_dry_run` — free preview of what a diff review would send: resolved workspace, diff byte size, whether it would be truncated, and which paths would be redacted. No paid call. Run it before a large review to confirm scope and workspace.
 - `claude_job_list` — free list of this workspace's background jobs (id, status, cost), newest first. Use it to recover a `job_id` lost across context compaction or interruption.
-- `cc_codex_capabilities` (alias `claude_capabilities`) — free capability contract: tool inventory, scope, prerequisites, and the fingerprint to pin.
+- `cc_codex_capabilities` (alias `claude_capabilities`) — free capability contract: tool inventory, compact per-tool routing metadata, scope, prerequisites, and the fingerprint to pin.
 
 ## Reading results
 
@@ -43,7 +43,7 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 
 ## Guardrails
 
-- Each call is PAID and sends your code/diff to Anthropic. Call deliberately. Even a one-sentence `claude_ask` costs roughly `$0.02`; a real review costs more, so budgets below ~`$0.05` will usually trip `budget_exceeded`.
+- Each call is PAID and sends your code/diff to Anthropic. Call deliberately. Very low budgets are mostly useful as failure tests: even small asks often need roughly `$0.10-$0.20`, and real reviews cost more. Lower best-effort budgets can still spend and return `budget_exceeded` without a useful answer.
 - `max_budget_usd` is a best-effort stop threshold enforced by the Claude CLI, NOT a hard cap — reported `meta.cost_usd` can exceed it. `meta.requested_max_budget_usd` echoes the value sent so you can compare requested vs actual.
 - The server redacts `.env`/secret-looking files and high-confidence token/key patterns in gathered diff lines before sending context. Treat this as best-effort defense-in-depth, not a guarantee; paid results expose affected paths in `meta.redacted_paths`.
 - Diff redaction only covers the context the server gathers. With `access=readonly`, Claude can `Read`/`Grep`/`Glob` any file in the workspace directly, so redaction does NOT protect against secrets it reads itself — use `access=toolless` (the default) when the workspace may contain secrets.

@@ -151,6 +151,11 @@ def test_diff_args_bad_base_raises_invalid_base():
         _diff_args("branch", "-badref")
 
 
+def test_branch_base_rejects_nonexistent_ref(git_repo):
+    with pytest.raises(InvalidBaseError):
+        gather_context(str(git_repo), scope="branch", base="definitely-not-a-real-branch")
+
+
 def test_diff_args_bad_scope_raises_invalid_scope():
     with pytest.raises(InvalidScopeError):
         _diff_args("nonsense", "main")

@@ -209,6 +209,7 @@ async def test_status_reports_config_modes(monkeypatch):
     data = structured(result)
     assert "config_modes_available" in data
     assert data["config_modes_available"]["bare"] is False
+    assert "$0.10-$0.20" in data["resolved_defaults"]["practical_min_budget_hint"]
 
 
 async def test_claude_ask_returns_normalized(fake_claude):
@@ -217,7 +218,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-11"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-12"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -740,7 +741,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-11"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-12"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -756,6 +757,15 @@ async def test_capabilities_tool_returns_structured_contract():
         "claude_job_cancel",
     ):
         assert lifecycle in data["free_tools"]
+    details = {item["name"]: item for item in data["tool_details"]}
+    assert set(details) == set(data["paid_tools"]) | set(data["free_tools"]) - {
+        "cc_codex_capabilities",
+        "claude_capabilities",
+    }
+    assert details["claude_review_changes"]["cost"] == "paid"
+    assert details["claude_review_changes"]["required_params"] == ["scope"]
+    assert "max_budget_usd" in details["claude_ask"]["key_optional_params"]
+    assert details["claude_status"]["cost"] == "free"
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
     assert "fingerprint" in data["deprecation_policy"]
@@ -916,6 +926,24 @@ async def test_dry_run_bad_base_is_structured_error(git_repo):
     assert data["error"]["code"] == "invalid_base"
 
 
+async def test_dry_run_nonexistent_base_is_invalid_base(git_repo):
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run",
+                {
+                    "scope": "branch",
+                    "base": "definitely-not-a-real-branch",
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_base"
+    assert data["error"]["offending_param"] == "base"
+
+
 async def test_cwd_resolution_sets_workspace_warning(fake_claude, monkeypatch, git_repo):
     # When the workspace falls back to cwd (no param, no roots), the success meta
     # must carry workspace_warning so an agent can notice the footgun.
@@ -1055,6 +1083,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "budget_exceeded"
+    assert "$0.10-$0.20" in data["error"]["repair"]
     assert data["meta"]["cost_usd"] == 0.05
     assert data["meta"]["usage"]["input_tokens"] == 10
 
@@ -1226,6 +1255,35 @@ async def test_bad_base_ref_is_invalid_base(tool, fake_claude, monkeypatch, git_
             )
         )
     assert data["error"]["code"] == "invalid_base"
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_review_changes", {"scope": "branch"}),
+        ("claude_review_changes_async", {"scope": "branch"}),
+        ("claude_adversarial_review", {"target": "review", "scope": "branch"}),
+    ],
+)
+async def test_nonexistent_base_ref_is_invalid_base(
+    tool, args, fake_claude, monkeypatch, git_repo, tmp_path
+):
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                tool,
+                {
+                    **args,
+                    "base": "definitely-not-a-real-branch",
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_base"
+    assert data["error"]["offending_param"] == "base"
 
 
 async def test_adversarial_with_nonempty_diff_calls_claude(fake_claude, git_repo):

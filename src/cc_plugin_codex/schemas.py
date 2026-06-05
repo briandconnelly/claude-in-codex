@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-11"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-12"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -179,6 +179,7 @@ class ResolvedDefaults(BaseModel):
     timeout_seconds: int
     budget_bounds: list[float]  # [min, max] clamp range for max_budget_usd
     timeout_bounds: list[int]  # [min, max] clamp range for timeout_seconds
+    practical_min_budget_hint: str
 
 
 class StatusResult(BaseModel):
@@ -203,6 +204,16 @@ class StatusResult(BaseModel):
     fingerprint: str = FINGERPRINT
 
 
+class ToolCapability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    cost: Literal["free", "paid"]
+    use_when: str
+    required_params: list[str] = Field(default_factory=list)
+    key_optional_params: list[str] = Field(default_factory=list)
+    returns: str
+
+
 class CapabilitiesResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
@@ -213,6 +224,7 @@ class CapabilitiesResult(BaseModel):
     stability: str
     paid_tools: list[str]
     free_tools: list[str]
+    tool_details: list[ToolCapability] = Field(default_factory=list)
     config_modes: list[str]
     access_modes: list[str]
     scope: list[str]  # what this server is for

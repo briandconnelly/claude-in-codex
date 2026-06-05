@@ -7,10 +7,10 @@ TUI scraping. That makes background mode far simpler and more robust here than i
 a harness that tails an interactive CLI.
 
 State lives on disk (keyed by workspace), so status/result/cancel keep working
-across MCP server restarts. There is no daemon: reaping (deadline-kill of
-overrunning jobs, TTL cleanup, count cap) happens lazily on each lifecycle call,
-and ``--max-budget-usd`` still applies its best-effort spend stop threshold (not a
-hard cap) even for a job nobody polls.
+across MCP server restarts. There is no daemon: single-job lifecycle calls refresh
+and TTL-clean the requested job, list calls clean the workspace, and the count cap
+is enforced when jobs start. ``--max-budget-usd`` still applies its best-effort
+spend stop threshold (not a hard cap) even for a job nobody polls.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,6 +52,7 @@ DEFAULT_MAX_SECONDS = 1_800  # wall-clock cap; a poll past this reaps the job
 DEFAULT_MAX_COUNT = 50  # retained jobs per workspace; evict oldest terminal
 
 _TERMINAL = {"done", "failed", "cancelled", "timeout"}
+_JOBS_LOCK = threading.RLock()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -295,6 +297,31 @@ def _reap_workspace(cwd: str) -> None:
                 _rmtree(jd)
 
 
+def _expired(meta: dict) -> bool:
+    completed = meta.get("completed_epoch")
+    if completed is None:
+        return False
+    return time.time() - completed > ttl_seconds()
+
+
+def _read_live_job(cwd: str, job_id: str) -> tuple[Path, dict, str] | None:
+    """Read and refresh a single job record.
+
+    Status/result/cancel are commonly called in tight polling loops. Refreshing
+    only the requested record avoids unrelated jobs causing latency or waitpid
+    races while still preserving the TTL contract for that record.
+    """
+    jd = _job_dir(cwd, job_id)
+    meta = _read_meta(jd)
+    if meta is None:
+        return None
+    state = _status_of(jd, meta)
+    if state in _TERMINAL and _expired(meta):
+        _rmtree(jd)
+        return None
+    return jd, meta, state
+
+
 def _enforce_count_cap(cwd: str) -> None:
     ws = _ws_dir(cwd)
     cap = _int_env(MAX_COUNT_ENV, DEFAULT_MAX_COUNT)
@@ -358,19 +385,22 @@ def _terminal_cost(jd: Path, state: str) -> float | None:
 
 def status(cwd: str, job_id: str) -> dict | None:
     """Return a JobStatus dict, or None if the job does not exist."""
-    _reap_workspace(cwd)
-    jd = _job_dir(cwd, job_id)
-    meta = _read_meta(jd)
-    if meta is None:
-        return None
-    state = _status_of(jd, meta)
+    with _JOBS_LOCK:
+        live = _read_live_job(cwd, job_id)
+        if live is None:
+            return None
+        jd, meta, state = live
+        return _status_dict(jd, meta, state)
+
+
+def _status_dict(jd: Path, meta: dict, state: str) -> dict:
     cost = _terminal_cost(jd, state)
     detail = None
     if state == "failed":
         detail = _stderr_tail(jd)
     return {
         "ok": True,
-        "job_id": job_id,
+        "job_id": meta.get("job_id", jd.name),
         "kind": meta.get("kind", ""),
         "status": state,
         "started_at": meta.get("started_at", ""),
@@ -391,34 +421,35 @@ def list_jobs(cwd: str) -> dict:
 
     Reaps first (like the other lifecycle calls), so listing can refresh statuses
     and delete expired records — it is not strictly read-only."""
-    _reap_workspace(cwd)
-    ws = _ws_dir(cwd)
-    summaries = []
-    if ws.is_dir():
-        for jd in ws.iterdir():
-            if not jd.is_dir():
-                continue
-            meta = _read_meta(jd)
-            if meta is None:
-                continue
-            state = _status_of(jd, meta)
-            summaries.append(
-                {
-                    "_epoch": meta.get("started_epoch", 0.0),
-                    "job_id": meta.get("job_id", jd.name),
-                    "kind": meta.get("kind", ""),
-                    "status": state,
-                    "started_at": meta.get("started_at", ""),
-                    "elapsed_ms": _elapsed_ms(meta),
-                    "result_available": state == "done",
-                    "expires_at": _expires_at(meta),
-                    "cost_usd": _terminal_cost(jd, state),
-                }
-            )
-    summaries.sort(key=lambda s: s["_epoch"], reverse=True)  # newest first
-    for s in summaries:
-        s.pop("_epoch", None)
-    return {"ok": True, "jobs": summaries, "fingerprint": FINGERPRINT}
+    with _JOBS_LOCK:
+        _reap_workspace(cwd)
+        ws = _ws_dir(cwd)
+        summaries = []
+        if ws.is_dir():
+            for jd in ws.iterdir():
+                if not jd.is_dir():
+                    continue
+                meta = _read_meta(jd)
+                if meta is None:
+                    continue
+                state = _status_of(jd, meta)
+                summaries.append(
+                    {
+                        "_epoch": meta.get("started_epoch", 0.0),
+                        "job_id": meta.get("job_id", jd.name),
+                        "kind": meta.get("kind", ""),
+                        "status": state,
+                        "started_at": meta.get("started_at", ""),
+                        "elapsed_ms": _elapsed_ms(meta),
+                        "result_available": state == "done",
+                        "expires_at": _expires_at(meta),
+                        "cost_usd": _terminal_cost(jd, state),
+                    }
+                )
+        summaries.sort(key=lambda s: s["_epoch"], reverse=True)  # newest first
+        for s in summaries:
+            s.pop("_epoch", None)
+        return {"ok": True, "jobs": summaries, "fingerprint": FINGERPRINT}
 
 
 def _stderr_tail(jd: Path, limit: int = 200) -> str | None:
@@ -432,29 +463,28 @@ def _stderr_tail(jd: Path, limit: int = 200) -> str | None:
 def result(cwd: str, job_id: str, consume: bool = False):
     """Return (payload, found). payload is the normalized SuccessResult|ErrorResult
     dict; found is False when no such job exists."""
-    _reap_workspace(cwd)
-    jd = _job_dir(cwd, job_id)
-    meta = _read_meta(jd)
-    if meta is None:
-        return None, False
-    state = _status_of(jd, meta)
-    if state == "done":
-        env_text = (jd / "result.json").read_text()
-        summary = meta.get("context_summary")
-        ctx_summary = ContextSummary(**summary) if summary else None
-        payload = normalize_envelope(
-            meta.get("kind", "claude_review_changes"),
-            env_text,
-            _build_meta(meta),
-            detail=meta.get("config", {}).get("detail", "summary"),
-            context_summary=ctx_summary,
-        )
-        if consume:
-            _rmtree(jd)
+    with _JOBS_LOCK:
+        live = _read_live_job(cwd, job_id)
+        if live is None:
+            return None, False
+        jd, meta, state = live
+        if state == "done":
+            env_text = (jd / "result.json").read_text()
+            summary = meta.get("context_summary")
+            ctx_summary = ContextSummary(**summary) if summary else None
+            payload = normalize_envelope(
+                meta.get("kind", "claude_review_changes"),
+                env_text,
+                _build_meta(meta),
+                detail=meta.get("config", {}).get("detail", "summary"),
+                context_summary=ctx_summary,
+            )
+            if consume:
+                _rmtree(jd)
+            return payload, True
+        # Non-done states map to an error envelope so the contract stays ok-discriminated.
+        payload = _job_error(meta, state, jd)
         return payload, True
-    # Non-done states map to an error envelope so the contract stays ok-discriminated.
-    payload = _job_error(meta, state, jd)
-    return payload, True
 
 
 _STATE_TO_ERROR = {
@@ -517,15 +547,15 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
 
 def cancel(cwd: str, job_id: str) -> dict | None:
     """Kill a running job and mark it cancelled. Returns a JobStatus dict or None."""
-    _reap_workspace(cwd)
-    jd = _job_dir(cwd, job_id)
-    meta = _read_meta(jd)
-    if meta is None:
-        return None
-    state = _status_of(jd, meta)
-    if state not in _TERMINAL:
-        _kill_pid_tree(meta.get("pid"))
-        meta["terminal_status"] = "cancelled"
-        meta["completed_epoch"] = time.time()
-        _write_meta(jd, meta)
-    return status(cwd, job_id)
+    with _JOBS_LOCK:
+        live = _read_live_job(cwd, job_id)
+        if live is None:
+            return None
+        jd, meta, state = live
+        if state not in _TERMINAL:
+            _kill_pid_tree(meta.get("pid"))
+            meta["terminal_status"] = "cancelled"
+            meta["completed_epoch"] = time.time()
+            _write_meta(jd, meta)
+            state = "cancelled"
+        return _status_dict(jd, meta, state)

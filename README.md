@@ -28,7 +28,7 @@ surface agent-friendly.
 | `claude_job_status` · `claude_job_result` · `claude_job_consume_result` · `claude_job_cancel` · `claude_job_list` | Poll, fetch, consume, cancel, or list background jobs | free |
 | `claude_status` | Readiness probes + the resolved defaults a paid call would use | free |
 | `claude_review_dry_run` | Preview workspace / diff size / redaction before a paid review | free |
-| `cc_codex_capabilities` (alias `claude_capabilities`) | Return the capability contract | free |
+| `cc_codex_capabilities` (alias `claude_capabilities`) | Return the capability contract, including compact per-tool routing metadata | free |
 
 Paid tools **block synchronously** for up to `timeout_seconds` (default 180s, max 600s) and
 can be cancelled (terminating the underlying Claude process) but not resumed. Each paid
@@ -36,8 +36,9 @@ result reports `meta.cost_usd` and `meta.usage` (token counts) so you can track 
 
 Call the free **`claude_status`** first: it reports the resolved defaults a no-argument paid
 call would use (`config_mode`, `access`, `model`, `effort`, clamped
-`max_budget_usd`/`timeout_seconds`) plus readiness probes — `claude_authenticated` (catch a
-logged-out CLI before paying), `version_supported`, and a combined `ready` flag.
+`max_budget_usd`/`timeout_seconds`, and a practical minimum-budget hint) plus readiness
+probes — `claude_authenticated` (catch a logged-out CLI before paying),
+`version_supported`, and a combined `ready` flag.
 
 ## Requirements
 
@@ -119,8 +120,10 @@ plugin checkout.
 - **Read-only:** Claude is never given write or Bash tools.
 - **Paid:** each call sends code to Anthropic. `max_budget_usd` is a best-effort stop
   threshold (enforced by the Claude CLI), not a hard cap — reported `meta.cost_usd` can exceed
-  it; `meta.requested_max_budget_usd` echoes the value sent. `timeout_seconds` bounds
-  wall-clock time per call.
+  it; `meta.requested_max_budget_usd` echoes the value sent. Very low budgets are mostly
+  useful as failure tests: even small asks often need roughly `$0.10-$0.20`, and real
+  reviews cost more. Lower best-effort budgets can still spend and return
+  `budget_exceeded` without a useful answer. `timeout_seconds` bounds wall-clock time per call.
 - **Secret redaction** combines filename rules (`.env`, `*.pem`, `*.key`, key files) with
   conservative content scanning for token/key patterns in gathered diff lines — treat it as
   defense-in-depth, not a guarantee. It only covers context the *server* gathers: with
@@ -145,10 +148,13 @@ ready — it returns the **same** envelope the sync tool does and leaves the rec
 All status/result/cancel tools are free.
 
 State lives **on disk keyed by workspace** (under `CC_PLUGIN_CODEX_STATE_DIR`), so jobs survive
-an MCP server restart. There is no daemon: overrunning jobs are reaped on the next status poll
-(`CC_PLUGIN_CODEX_JOB_MAX_SECONDS`) and terminal records are cleaned up after
-`CC_PLUGIN_CODEX_JOB_TTL`. Job records contain the gathered diff, so anyone with access to that
-workspace's state directory can read or cancel its jobs.
+an MCP server restart. There is no daemon: single-job lifecycle calls refresh and TTL-clean the
+requested job, `claude_job_list` cleans the workspace, and the count cap is enforced when jobs
+start. Overrunning jobs are reaped when that job is polled or listed
+(`CC_PLUGIN_CODEX_JOB_MAX_SECONDS`), and terminal records are cleaned up after
+`CC_PLUGIN_CODEX_JOB_TTL` on the same lazy-maintenance schedule. Job records contain the
+gathered diff, so anyone with access to that workspace's state directory can read or cancel its
+jobs.
 
 ## Environment variables
 

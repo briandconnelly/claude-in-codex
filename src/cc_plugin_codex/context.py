@@ -73,6 +73,28 @@ def _git(cwd: str, *args: str) -> str:
     return proc.stdout
 
 
+def _base_exists(cwd: str, base: str) -> bool:
+    """Whether base resolves to a commit.
+
+    Syntactically safe but nonexistent refs should be reported as invalid_base,
+    not as a generic git/internal failure. This keeps branch-diff tools
+    repairable for agents.
+    """
+    timeout = git_timeout_seconds()
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git rev-parse timed out after {timeout}s") from exc
+    return proc.returncode == 0
+
+
 def _diff_args(scope: str, base: str) -> list[str]:
     # --no-ext-diff + --no-textconv prevent configured external/textconv diff drivers
     # from executing commands during our own git call.
@@ -162,6 +184,8 @@ def _redact(diff: str) -> tuple[str, list[str]]:
 
 def gather_context(cwd: str, scope: str, base: str) -> ContextResult:
     diff_args = _diff_args(scope, base)  # raises InvalidScopeError / InvalidBaseError
+    if scope == "branch" and not _base_exists(cwd, base):
+        raise InvalidBaseError(f"base ref does not resolve to a commit: {base!r}")
     summary = _summary(cwd, diff_args)
     raw = _git(cwd, *diff_args)
     text, redacted = _redact(raw)

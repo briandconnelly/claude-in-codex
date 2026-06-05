@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from urllib.parse import unquote, urlparse
 
 from anyio.to_thread import run_sync
@@ -71,6 +71,7 @@ from cc_plugin_codex.schemas import (
     Scope,
     StatusResult,
     SuccessResult,
+    ToolCapability,
     Verdict,
     workspace_warning_for,
 )
@@ -88,6 +89,12 @@ CAPABILITY_SUMMARY = (
     "lets Claude read files directly, bypassing server-gathered diff redaction. "
     "Free-form input is capped by CC_PLUGIN_CODEX_MAX_INPUT_BYTES. "
     "Experimental; pin fingerprint from cc_codex_capabilities."
+)
+
+PRACTICAL_MIN_BUDGET_HINT = (
+    "The configured clamp allows $0.01+, but real paid calls usually need about "
+    "$0.10-$0.20 even for small prompts; lower budgets may spend and still return "
+    "budget_exceeded."
 )
 
 mcp = FastMCP(name="cc-plugin-codex", instructions=CAPABILITY_SUMMARY)
@@ -1390,6 +1397,7 @@ def claude_status() -> ToolResult:
         timeout_seconds=clamp_timeout(d.timeout_seconds),
         budget_bounds=[MIN_BUDGET_USD, MAX_BUDGET_USD],
         timeout_bounds=[MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS],
+        practical_min_budget_hint=PRACTICAL_MIN_BUDGET_HINT,
     )
     status = StatusResult(
         claude_found=found,
@@ -1420,6 +1428,24 @@ def claude_status() -> ToolResult:
 def _capabilities_payload() -> dict:
     """Build the capability contract. Shared by cc_codex_capabilities and its
     claude_capabilities alias so the two tools cannot drift."""
+
+    def tool_detail(
+        name: str,
+        cost: Literal["free", "paid"],
+        use_when: str,
+        returns: str,
+        required: list[str] | None = None,
+        optional: list[str] | None = None,
+    ) -> ToolCapability:
+        return ToolCapability(
+            name=name,
+            cost=cost,
+            use_when=use_when,
+            required_params=required or [],
+            key_optional_params=optional or [],
+            returns=returns,
+        )
+
     result = CapabilitiesResult(
         name="cc-plugin-codex",
         version=__version__,
@@ -1441,6 +1467,120 @@ def _capabilities_payload() -> dict:
             "claude_job_consume_result",
             "claude_job_cancel",
             "claude_job_list",
+        ],
+        tool_details=[
+            tool_detail(
+                "claude_status",
+                "free",
+                "Check CLI readiness, auth, version warnings, defaults, and budget guidance.",
+                "readiness booleans plus resolved defaults and practical budget hint",
+            ),
+            tool_detail(
+                "claude_review_dry_run",
+                "free",
+                "Preview diff workspace, size, truncation, and redaction before paying.",
+                "diff byte count, context summary, truncation state, and redacted paths",
+                required=["scope"],
+                optional=["base", "workspace_root"],
+            ),
+            tool_detail(
+                "claude_ask",
+                "paid",
+                "Ask for a second opinion on a question or design choice.",
+                "structured verdict, findings, questions, assumptions, next steps, cost, and usage",
+                required=["prompt"],
+                optional=[
+                    "context",
+                    "workspace_root",
+                    "effort",
+                    "max_budget_usd",
+                    "timeout_seconds",
+                ],
+            ),
+            tool_detail(
+                "claude_review_changes",
+                "paid",
+                "Review working_tree, staged, or branch git diff synchronously.",
+                "structured review result; empty diffs return without spending",
+                required=["scope"],
+                optional=[
+                    "base",
+                    "focus",
+                    "workspace_root",
+                    "effort",
+                    "max_budget_usd",
+                    "timeout_seconds",
+                ],
+            ),
+            tool_detail(
+                "claude_adversarial_review",
+                "paid",
+                "Pressure-test a plan, claim, or decision; optionally attach a diff.",
+                "structured counterarguments, risks, questions, assumptions, cost, and usage",
+                required=["target"],
+                optional=[
+                    "evidence",
+                    "scope",
+                    "base",
+                    "workspace_root",
+                    "effort",
+                    "max_budget_usd",
+                    "timeout_seconds",
+                ],
+            ),
+            tool_detail(
+                "claude_review_changes_async",
+                "paid",
+                "Start a background diff review for long-running reviews.",
+                "job_id, status, polling hint, deadline, TTL, and resolved meta",
+                required=["scope"],
+                optional=[
+                    "base",
+                    "focus",
+                    "workspace_root",
+                    "effort",
+                    "max_budget_usd",
+                ],
+            ),
+            tool_detail(
+                "claude_job_status",
+                "free",
+                "Poll a background job without fetching the full result.",
+                "job state, result_available, elapsed time, expiry, cost when terminal",
+                required=["job_id"],
+                optional=["workspace_root"],
+            ),
+            tool_detail(
+                "claude_job_result",
+                "free",
+                "Fetch a finished background job result without deleting it.",
+                "same structured envelope as claude_review_changes, with meta.job_id",
+                required=["job_id"],
+                optional=["workspace_root"],
+            ),
+            tool_detail(
+                "claude_job_consume_result",
+                "free",
+                "Fetch and delete a finished background job record.",
+                "same structured envelope as claude_job_result; removes terminal state",
+                required=["job_id"],
+                optional=["workspace_root"],
+            ),
+            tool_detail(
+                "claude_job_cancel",
+                "free",
+                "Cancel a running background review job.",
+                "job status after cancellation or terminal-state refresh",
+                required=["job_id"],
+                optional=["workspace_root"],
+            ),
+            tool_detail(
+                "claude_job_list",
+                "free",
+                "Recover job IDs or inspect known jobs for a workspace.",
+                "compact job summaries newest first",
+                optional=["workspace_root"],
+            ),
         ],
         config_modes=["inherit", "scoped", "bare"],
         access_modes=["toolless", "readonly"],

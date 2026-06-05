@@ -8,6 +8,7 @@ exercised deterministically and for free.
 import json
 import time
 
+import anyio
 import pytest
 
 from cc_plugin_codex import jobs
@@ -67,6 +68,10 @@ def _emit_cmd(envelope=_ENVELOPE):
 
 def _sleep_cmd(seconds=30):
     return ["sh", "-c", f"sleep {seconds}"]
+
+
+def _emit_after_cmd(seconds=0.1, envelope=_ENVELOPE):
+    return ["sh", "-c", f"sleep {seconds}; printf '%s' \"$0\"", envelope]
 
 
 def _drift_cmd(message="error: unknown option '--effort'"):
@@ -213,6 +218,58 @@ def test_result_preserves_record_by_default(tmp_path):
     payload, found = jobs.result(cwd, job_id)
     assert found is True and payload["ok"] is True
     assert jobs.status(cwd, job_id)["status"] == "done"
+
+
+async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_after_cmd(), cwd, _cfg())
+
+    async def poll_status():
+        seen = []
+        for _ in range(20):
+            st = await anyio.to_thread.run_sync(lambda: jobs.status(cwd, job_id))
+            if st:
+                seen.append(st["status"])
+                if st["status"] == "done":
+                    return seen
+            await anyio.sleep(0.02)
+        return seen
+
+    async def poll_result():
+        last = None
+        for _ in range(20):
+            payload, found = await anyio.to_thread.run_sync(lambda: jobs.result(cwd, job_id))
+            assert found is True
+            last = payload
+            if payload["ok"] is True:
+                return payload
+            assert payload["error"]["code"] == "job_running"
+            await anyio.sleep(0.02)
+        return last
+
+    async def poll_list():
+        last = None
+        for _ in range(20):
+            last = await anyio.to_thread.run_sync(lambda: jobs.list_jobs(cwd))
+            assert last["ok"] is True
+            await anyio.sleep(0.02)
+        return last
+
+    outputs = {}
+
+    async def store(key, fn):
+        outputs[key] = await fn()
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store, "statuses", poll_status)
+            tg.start_soon(store, "result", poll_result)
+            tg.start_soon(store, "listing", poll_list)
+
+    assert "done" in outputs["statuses"]
+    assert outputs["result"]["ok"] is True
+    assert outputs["result"]["meta"]["job_id"] == job_id
+    assert any(j["job_id"] == job_id for j in outputs["listing"]["jobs"])
 
 
 def test_consume_deletes_record(tmp_path):
