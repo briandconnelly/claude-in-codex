@@ -2,12 +2,37 @@
 name = "cc-plugin-codex"
 version = "0.1.3"
 description = "Call Claude Code from Codex for bounded, independent code review and second opinions"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Brian Connelly" },
+]
+keywords = ["claude", "code-review", "codex", "mcp", "plugin"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+]
 dependencies = [
     "anyio>=4",
     "fastmcp>=3.4",
     "pydantic>=2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/briandconnelly/cc-plugin-codex"
+Repository = "https://github.com/briandconnelly/cc-plugin-codex"
+Issues = "https://github.com/briandconnelly/cc-plugin-codex/issues"
+Changelog = "https://github.com/briandconnelly/cc-plugin-codex/blob/main/CHANGELOG.md"
+Security = "https://github.com/briandconnelly/cc-plugin-codex/blob/main/SECURITY.md"
 
 [project.scripts]
 cc-plugin-codex-mcp = "cc_plugin_codex.server:main"
