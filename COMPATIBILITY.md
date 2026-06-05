@@ -68,11 +68,10 @@ testing. The drift detection only catches rejection.
 
 ## Versioning & release (lockstep)
 
-The bundled `.mcp.json` pins the server to a **plugin-scoped release tag**
-(`cc-plugin-codex-vX.Y.Z`) instead of tracking the default branch, so a breaking
-change no longer auto-ships to installed users — they update deliberately. The
-trade-off is that fixes (including resilience fixes) only reach users on the next
-tagged release.
+The bundled `.mcp.json` pins the server to a **versioned release tag**
+(`vX.Y.Z`) instead of tracking the default branch, so a breaking change no longer
+auto-ships to installed users — they update deliberately. The trade-off is that
+fixes (including resilience fixes) only reach users on the next tagged release.
 
 When cutting a release, bump these **together**:
 
@@ -81,8 +80,8 @@ When cutting a release, bump these **together**:
 3. `FINGERPRINT` in `src/cc_plugin_codex/schemas.py` — **only** when the
    agent-visible surface changed (tool names, input/output schemas, the
    `ErrorCode` set, the value enums, or the capability summary)
-4. the `@cc-plugin-codex-vX.Y.Z` ref in `.mcp.json`
-5. create and push the matching `cc-plugin-codex-vX.Y.Z` git tag
+4. the `@vX.Y.Z` ref in `.mcp.json`
+5. create and push the matching `vX.Y.Z` git tag
 
 The `.mcp.json` ref and the git tag must match, or a bundled install fails to
 resolve.
