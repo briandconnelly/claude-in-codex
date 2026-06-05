@@ -22,4 +22,3 @@ Include:
 The plugin shells out to the Claude Code CLI and may send gathered context to
 Anthropic for paid tools. Secret redaction is best-effort defense in depth, not
 a guarantee. Use `access=toolless` when a workspace may contain sensitive data.
-

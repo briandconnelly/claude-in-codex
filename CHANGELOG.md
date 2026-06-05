@@ -13,4 +13,3 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   background job tools for Codex.
 - Added local quality gates for linting, formatting, type checking, tests, and
   coverage.
-

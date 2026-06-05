@@ -39,6 +39,18 @@ Restart Codex after installing. Then ask Codex:
 `claude_status` is free. It checks whether the `claude` CLI is installed, authenticated, and
 compatible, and shows the defaults a paid call would use.
 
+## Distribution
+
+The Codex plugin install path is the primary user-facing path. The bundled MCP config pins the
+server to a versioned Git tag so installed users update deliberately.
+
+The Python package publishes the MCP server entry point for direct use and release provenance.
+After a PyPI release, the server can also be launched with:
+
+```sh
+uvx --from cc-plugin-codex==0.1.3 cc-plugin-codex-mcp
+```
+
 ## Use it
 
 Once `claude_status` reports `ready: true`, ask Codex in plain language:
