@@ -1,5 +1,9 @@
 # cc-plugin-codex
 
+[![CI](https://github.com/briandconnelly/cc-plugin-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/briandconnelly/cc-plugin-codex/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](./pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Ask Claude Code for an independent code review or second opinion, straight from Codex.
 
 `cc-plugin-codex` is review-only: Claude reviews, critiques, and advises. It does not edit
@@ -7,12 +11,20 @@ your code, run shell commands, or get write tools. It is the mirror image of
 [`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc), which lets Claude call
 Codex.
 
+## What it does
+
+- Lets Codex call the Claude Code CLI through MCP.
+- Sends Claude bounded context for reviews, critiques, and second opinions.
+- Returns structured findings Codex can summarize or act on.
+- Keeps Codex as the actor and Claude as a read-only reviewer.
+
 ## Quickstart
 
 You need:
 
 - Codex
 - the `claude` CLI, installed and authenticated
+- Python 3.11 or newer
 - `uvx`
 - `git`
 
@@ -39,18 +51,6 @@ Restart Codex after installing. Then ask Codex:
 `claude_status` is free. It checks whether the `claude` CLI is installed, authenticated, and
 compatible, and shows the defaults a paid call would use.
 
-## Distribution
-
-The Codex plugin install path is the primary user-facing path. The bundled MCP config pins the
-server to a versioned Git tag so installed users update deliberately.
-
-The Python package publishes the MCP server entry point for direct use and release provenance.
-After a PyPI release, the server can also be launched with:
-
-```sh
-uvx --from cc-plugin-codex==0.1.4 cc-plugin-codex-mcp
-```
-
 ## Use it
 
 Once `claude_status` reports `ready: true`, ask Codex in plain language:
@@ -67,6 +67,9 @@ Other useful prompts:
 - "Get an independent second opinion from Claude on this design."
 - "Start a background Claude review of this branch against main."
 
+Use this when you want a second model to look for bugs, regressions, missing tests, security
+issues, or weak assumptions before you merge or commit to a design.
+
 Codex uses the plugin skill to choose the right tool and arguments. Direct MCP calls are also
 available:
 
@@ -81,11 +84,13 @@ available:
 
 Diff review scopes are `working_tree`, `staged`, and `branch`.
 
+Review staged changes with a test-coverage focus:
+
 ```json
 claude_review_changes({
   "workspace_root": "/absolute/path/to/your/repo",
   "scope": "staged",
-  "focus": "security"
+  "focus": "tests"
 })
 ```
 
@@ -118,6 +123,13 @@ Poll with `claude_job_status`, then fetch the result with `claude_job_result`.
 
 If a requested diff scope has no changes, the review tools return a passing result without
 invoking Claude.
+
+## Mental model
+
+Codex remains responsible for deciding what to do with Claude's feedback. Claude receives only
+the context the plugin provides, or read-only file access when you explicitly allow
+`access=readonly`. The plugin does not give Claude write tools, shell access, or permission to
+modify your workspace.
 
 ## Common knobs
 
@@ -154,6 +166,18 @@ Then:
 - If a background job id is lost, use `claude_job_list`.
 - If `config_mode=bare` fails, confirm `ANTHROPIC_API_KEY` is set in the environment that
   launches Codex.
+
+## Distribution
+
+The Codex plugin install path is the primary user-facing path. The bundled MCP config pins the
+server to a versioned Git tag so installed users update deliberately.
+
+The Python package publishes the MCP server entry point for direct use and release provenance.
+After a PyPI release, the server can also be launched with:
+
+```sh
+uvx --from cc-plugin-codex==0.1.4 cc-plugin-codex-mcp
+```
 
 ## Advanced reference
 
