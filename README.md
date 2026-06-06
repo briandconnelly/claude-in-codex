@@ -48,7 +48,7 @@ The Python package publishes the MCP server entry point for direct use and relea
 After a PyPI release, the server can also be launched with:
 
 ```sh
-uvx --from cc-plugin-codex==0.1.3 cc-plugin-codex-mcp
+uvx --from cc-plugin-codex==0.1.4 cc-plugin-codex-mcp
 ```
 
 ## Use it
