@@ -96,7 +96,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build distributions
-        run: uv build
+        run: uv build --no-sources
 
       - name: Check distributions
         run: uvx twine check dist/*
