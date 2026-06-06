@@ -9,14 +9,41 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: Ruff, ty, pytest (py${{ matrix.python }})
+    uses: ./.github/workflows/test.yml
+
+  release-lockstep:
+    name: Release lockstep
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate release metadata consistency
+        run: |
+          set -euo pipefail
+
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)"
+          tag="v${version}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "pyproject.toml version must be X.Y.Z; got ${version}" >&2
+            exit 1
+          fi
+
+          grep -Fq "\"version\": \"${version}\"" .codex-plugin/plugin.json
+          grep -Fq "@${tag}" .mcp.json
+          grep -Fq "cc-plugin-codex==${version}" README.md
+          grep -Fq "## ${version} -" CHANGELOG.md
+
+  package:
+    name: Package checks
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -30,22 +57,40 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.12"
 
       - name: Sync dependencies
-        run: uv sync --locked --python ${{ matrix.python }} --group dev
+        run: uv sync --locked --python 3.12 --group dev
 
-      - name: Lint
-        run: uv run ruff check src tests
+      - name: Build distributions
+        run: uv build
 
-      - name: Format check
-        run: uv run ruff format --check src tests
+      - name: Check distributions
+        run: uvx twine check dist/*
 
-      - name: Type check
-        run: uv run ty check
+      - name: Smoke test installed wheel
+        run: |
+          set -euo pipefail
 
-      - name: Test
-        run: uv run pytest -q
+          python -m venv .smoke
+          .smoke/bin/python -m pip install --upgrade pip
+          .smoke/bin/python -m pip install dist/cc_plugin_codex-*.whl
+          .smoke/bin/python - <<'PY'
+          from importlib.metadata import distribution
+
+          import cc_plugin_codex
+
+          dist = distribution("cc-plugin-codex")
+          scripts = [
+              ep
+              for ep in dist.entry_points
+              if ep.group == "console_scripts" and ep.name == "cc-plugin-codex-mcp"
+          ]
+
+          assert cc_plugin_codex.__version__ == dist.version
+          assert scripts, "cc-plugin-codex-mcp console script is missing"
+          scripts[0].load()
+          PY
 
   live-integration:
     name: Live Claude integration
