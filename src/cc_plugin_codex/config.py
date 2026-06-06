@@ -149,7 +149,8 @@ def hooks_disabled(mode: str) -> bool:
 
 
 def hooks_disabled_available(mode: str) -> bool:
-    return hooks_disabled(mode) and (mode != "bare" or bare_available())
+    # hooks_disabled() is only true for "bare", which additionally needs an API key.
+    return hooks_disabled(mode) and bare_available()
 
 
 def workspace_hook_settings(cwd: str) -> list[str]:
@@ -164,7 +165,8 @@ def workspace_hook_settings(cwd: str) -> list[str]:
         path = root / rel
         try:
             text = path.read_text()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # Advisory only: unreadable or non-UTF8 files count as "no hooks detected".
             continue
         if re.search(r'"hooks"\s*:', text):
             found.append(rel)

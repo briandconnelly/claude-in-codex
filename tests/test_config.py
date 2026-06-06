@@ -65,6 +65,14 @@ def test_workspace_hook_settings_detects_hooks(tmp_path):
     assert cfg.workspace_hook_settings(str(tmp_path)) == [".claude/settings.json"]
 
 
+def test_workspace_hook_settings_ignores_undecodable_file(tmp_path):
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    # Non-UTF8 / binary content must not crash the advisory scan.
+    (settings_dir / "settings.json").write_bytes(b"\xff\xfe\x00\x01")
+    assert cfg.workspace_hook_settings(str(tmp_path)) == []
+
+
 def test_hook_security_warnings_skip_bare(tmp_path):
     settings_dir = tmp_path / ".claude"
     settings_dir.mkdir()
