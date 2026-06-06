@@ -1,6 +1,12 @@
 name: Publish
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, with or without leading v
+        required: true
+        type: string
   push:
     tags: ["v*.*.*"]
 
@@ -8,8 +14,63 @@ permissions:
   contents: read
 
 jobs:
+  release-metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate version references
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "Manual releases must run from main; got $GITHUB_REF" >&2
+              exit 1
+            fi
+            version="${INPUT_VERSION#v}"
+            tag="v${version}"
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "Tag ${tag} already exists" >&2
+              exit 1
+            fi
+          else
+            tag="$REF_NAME"
+            version="${tag#v}"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be X.Y.Z; got ${version}" >&2
+            exit 1
+          fi
+
+          grep -Fq "version = \"${version}\"" pyproject.toml
+          grep -Fq "\"version\": \"${version}\"" .codex-plugin/plugin.json
+          grep -Fq "@${tag}" .mcp.json
+          grep -Fq "cc-plugin-codex==${version}" README.md
+          grep -Fq "## ${version} -" CHANGELOG.md
+
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
   test:
     name: Ruff, ty, pytest (py${{ matrix.python }})
+    needs: release-metadata
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -94,3 +155,53 @@ jobs:
 
       - name: Publish distributions
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub Release
+    needs: [release-metadata, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create tag if needed
+        env:
+          TAG: ${{ needs.release-metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "cc-plugin-codex ${TAG}" "$GITHUB_SHA"
+          git push origin "$TAG"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} already exists."
+            exit 0
+          fi
+
+          gh release create "$TAG" dist/* \
+            --title "cc-plugin-codex ${TAG}" \
+            --notes "See CHANGELOG.md for release notes."

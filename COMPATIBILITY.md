@@ -81,7 +81,14 @@ When cutting a release, bump these **together**:
    agent-visible surface changed (tool names, input/output schemas, the
    `ErrorCode` set, the value enums, or the capability summary)
 4. the `@vX.Y.Z` ref in `.mcp.json`
-5. create and push the matching `vX.Y.Z` git tag
+
+After the release commit is on `main`, run the `Publish` GitHub Actions workflow
+manually with version `X.Y.Z`. The workflow validates the lockstep references,
+runs the test matrix, builds and checks the distributions, publishes to PyPI,
+then creates the matching `vX.Y.Z` git tag and GitHub Release.
+
+Pushing a matching `vX.Y.Z` tag manually is still supported as an escape hatch;
+it runs the same validation and publishing workflow.
 
 The `.mcp.json` ref and the git tag must match, or a bundled install fails to
 resolve.
