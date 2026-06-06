@@ -32,10 +32,13 @@ from cc_plugin_codex.config import (
     clamp_budget,
     clamp_timeout,
     defaults,
+    hook_security_warnings,
+    hooks_disabled_available,
     max_input_bytes,
     sanitize_effort,
     supported_majors,
     version_supported,
+    workspace_hook_settings,
 )
 from cc_plugin_codex.context import (
     MAX_DIFF_BYTES,
@@ -77,18 +80,18 @@ from cc_plugin_codex.schemas import (
 )
 
 CAPABILITY_SUMMARY = (
-    "cc-plugin-codex lets Codex ask Claude Code for bounded, independent critique: "
-    "diff reviews, adversarial plan review, and second opinions. It never edits code, "
-    "runs shell, or proxies Claude MCP tools. Paid tools send code context to "
-    "Anthropic; call claude_status before spending. claude_review_changes blocks; "
+    "cc-plugin-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
+    "adversarial plan review, and second opinions. It never edits code, grants "
+    "Bash/write tools, or proxies Claude MCP tools; Claude Code hooks may still run "
+    "unless config_mode=bare is used. Paid tools send context to Anthropic; call "
+    "claude_status before spending. claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
     "claude_review_dry_run previews workspace/diff-size/redaction for free. Findings "
     "are advisory claims to verify. Pass workspace_root explicitly: it defaults to "
-    "the first MCP root, else the server cwd (likely NOT your repo); when roots "
-    "exist it must be inside one. access=toolless is the default; access=readonly "
-    "lets Claude read files directly, bypassing server-gathered diff redaction. "
-    "Free-form input is capped by CC_PLUGIN_CODEX_MAX_INPUT_BYTES. "
-    "Experimental; pin fingerprint from cc_codex_capabilities."
+    "the first MCP root, else server cwd; when roots exist it must be inside one. "
+    "access=toolless is default; access=readonly lets Claude read files directly, "
+    "bypassing server-gathered diff redaction. Free-form input is capped by "
+    "CC_PLUGIN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
 PRACTICAL_MIN_BUDGET_HINT = (
@@ -149,6 +152,7 @@ def _meta(
     requested_budget: float | None = None,
     redacted_paths: list[str] | None = None,
     compat_warnings: list[str] | None = None,
+    security_warnings: list[str] | None = None,
 ) -> Meta:
     return Meta(
         cwd=cwd,
@@ -167,6 +171,7 @@ def _meta(
         requested_max_budget_usd=requested_budget,
         redacted_paths=redacted_paths or [],
         compat_warnings=compat_warnings or [],
+        security_warnings=security_warnings or [],
     )
 
 
@@ -407,6 +412,7 @@ def _resolve(
         base,
         workspace_source=workspace_source,
         requested_budget=budget,
+        security_warnings=hook_security_warnings(cwd, cm),
     )
     if cm == "bare" and not bare_available():
         return None, _err(
@@ -447,6 +453,7 @@ async def _execute(
         requested_budget=r.budget,
         redacted_paths=redacted_paths,
         compat_warnings=dropped,
+        security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
     if run.exit_code != 0 or run.timed_out:
         # A non-zero exit can still carry a cost-bearing JSON envelope (e.g.
@@ -680,6 +687,7 @@ async def claude_review_changes(
         workspace_source=ws_source,
         requested_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
+        security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         return _result(_empty_diff_result("claude_review_changes", meta, ctx_data.summary))
@@ -1060,6 +1068,7 @@ async def claude_review_changes_async(
         context_summary=ctx_data.summary,
         requested_max_budget_usd=r.budget,
         redacted_paths=ctx_data.redacted_paths,
+        security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
     job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg))
     started = JobStarted(
@@ -1082,6 +1091,7 @@ async def claude_review_changes_async(
             requested_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             compat_warnings=dropped,
+            security_warnings=hook_security_warnings(cwd, r.config_mode),
         ),
     )
     return _result(started.model_dump(mode="json", exclude_none=True))
@@ -1293,6 +1303,8 @@ async def claude_review_dry_run(
                 meta,
             )
         )
+    d = defaults()
+    dry_config_mode = d.config_mode if d.config_mode in ("inherit", "scoped", "bare") else "inherit"
     result = DryRunResult(
         cwd=cwd,
         workspace_source=ws_source,
@@ -1306,6 +1318,10 @@ async def claude_review_dry_run(
         truncation_hint=ctx_data.truncation_hint,
         redacted_paths_count=len(ctx_data.redacted_paths),
         redacted_paths=ctx_data.redacted_paths,
+        resolved_config_mode=cast("ConfigMode", dry_config_mode),
+        hooks_disabled=hooks_disabled_available(dry_config_mode),
+        workspace_hook_settings=workspace_hook_settings(cwd),
+        security_warnings=hook_security_warnings(cwd, dry_config_mode),
     )
     return _result(result.model_dump(mode="json", exclude_none=True))
 
@@ -1416,10 +1432,11 @@ def claude_status() -> ToolResult:
             "scoped": True,
             "bare": bare_available(),
         },
+        hooks_disabled=hooks_disabled_available(resolved.config_mode),
         resolved_defaults=resolved,
         caveat=(
-            "OAuth-preserving + CLAUDE.md-free is impossible in claude 2.1.x; "
-            "config_mode=bare needs ANTHROPIC_API_KEY."
+            "OAuth-preserving + CLAUDE.md/hook-free is impossible in claude 2.1.x; "
+            "only config_mode=bare disables hooks and it needs ANTHROPIC_API_KEY."
         ),
     )
     return _result(status.model_dump(mode="json", exclude_none=True))
@@ -1592,7 +1609,8 @@ def _capabilities_payload() -> dict:
             "a free dry-run preview of workspace, diff size, and redaction before paying",
         ],
         negative_scope=[
-            "does NOT edit code or run shell",
+            "does NOT grant write or Bash tools; Claude Code hooks can run outside the "
+            "tool allowlist in inherit/scoped, so use bare for untrusted workspaces",
             "does NOT act as a general Claude chat",
             "does NOT proxy Claude's own MCP tools",
             "does NOT resume a call once it ends or is cancelled",

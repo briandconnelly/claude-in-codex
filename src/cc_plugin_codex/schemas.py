@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-12"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-13"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -129,6 +129,10 @@ class Meta(BaseModel):
     # advertise them in --help (e.g. ["--effort"]). Empty in the common case;
     # informational — guarantee-bearing flags are never dropped, only depth/cosmetic ones.
     compat_warnings: list[str] = Field(default_factory=list)
+    # Advisory security posture warnings detected before launching Claude. Example:
+    # workspace Claude Code hooks can run outside the tool allowlist unless
+    # config_mode=bare disables hooks.
+    security_warnings: list[str] = Field(default_factory=list)
     redacted_paths: list[str] = Field(default_factory=list)
     cost_usd: float | None = None
     usage: Usage | None = None
@@ -199,6 +203,7 @@ class StatusResult(BaseModel):
     flags_warning: str | None = None
     ready: bool = False  # found AND authenticated (version is advisory, not gating)
     config_modes_available: dict
+    hooks_disabled: bool
     resolved_defaults: ResolvedDefaults
     caveat: str
     fingerprint: str = FINGERPRINT
@@ -288,6 +293,10 @@ class DryRunResult(BaseModel):
     truncation_hint: str | None = None
     redacted_paths_count: int = 0
     redacted_paths: list[str] = Field(default_factory=list)
+    resolved_config_mode: ConfigMode
+    hooks_disabled: bool
+    workspace_hook_settings: list[str] = Field(default_factory=list)
+    security_warnings: list[str] = Field(default_factory=list)
     fingerprint: str = FINGERPRINT
 
 

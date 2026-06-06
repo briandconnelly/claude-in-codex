@@ -37,13 +37,14 @@ guarantee:
 | Binary on PATH | `CLAUDE_BIN` | `claude_status.claude_found = false` | install Claude Code |
 | `-p --output-format json` (core) | `CORE_INVOCATION` | every call errors → `cli_contract_changed`; golden-envelope test | update `CORE_INVOCATION` + `normalize.py` |
 | `--no-chrome` (no interactive picker) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` at run time | update the constant |
+| `--no-session-persistence` (avoid storing review sessions on disk) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update the constant |
 | `--append-system-prompt` (critic guardrails) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update the constant; the prompt is `config.INDEPENDENT_CRITIC_PROMPT` |
 | `--max-budget-usd` (spend cap) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update the constant |
 | `--tools` (read-only / no-tool guarantee) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update the constant in `config.access_flags` |
 | `--strict-mcp-config` / `--mcp-config` (drop user MCP fleet) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update `config.config_mode_flags` |
 | `--setting-sources` / `--bare` (mode isolation) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update `config.config_mode_flags` |
 | `--effort` + accepted levels | `HELP_GATED_FLAGS`, `VALID_EFFORTS` | dropped with `compat_warnings`; a removed *level* → `cli_contract_changed` | update `VALID_EFFORTS` |
-| `--model`, `--disallowed-tools`, `--no-session-persistence` | `HELP_GATED_FLAGS` | dropped with `compat_warnings` | update the constant |
+| `--model`, `--disallowed-tools` | `HELP_GATED_FLAGS` | dropped with `compat_warnings` | update the constant |
 | JSON envelope keys (`is_error`, `subtype`, `result`, `total_cost_usd`, `usage.*`, `session_id`, `modelUsage`, `permission_denials`) | `ENVELOPE_KEYS`, `USAGE_KEYS`, `SUCCESS_SUBTYPES` | golden-envelope test (`tests/test_golden_envelope.py`); cost silently null if renamed | update `normalize.py` + the golden sample |
 | `claude --version` format (`MAJOR.MINOR.PATCH`) | `VERSION_ARGS`, `SUPPORTED_MAJORS` | `claude_status.version_supported = null` | adjust the regex in `config.version_supported` |
 | `claude auth status --text` exit code | `AUTH_STATUS_ARGS` | `claude_status.claude_authenticated = null` | update `claude.auth_status` |

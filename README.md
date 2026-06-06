@@ -111,7 +111,9 @@ Poll with `claude_job_status`, then fetch the result with `claude_job_result`.
 - Paid tools run Claude and send code or prompts to Anthropic, billed through your existing
   `claude` login or `ANTHROPIC_API_KEY`.
 - Free tools only inspect local state, preflight a request, or manage background jobs.
-- Claude never receives write or Bash tools from this plugin.
+- Claude never receives write or Bash tools from this plugin. Claude Code hooks are not
+  tools and may run in `config_mode=inherit`/`scoped`; use `config_mode=bare` for
+  untrusted workspaces.
 - `access=toolless` is the default: Claude receives gathered context as text and cannot read
   more files. `access=readonly` lets Claude use `Read`, `Grep`, and `Glob` for extra context.
 - Secret redaction is best-effort defense in depth. Use `access=toolless` when a workspace may
@@ -128,8 +130,9 @@ invoking Claude.
 
 Codex remains responsible for deciding what to do with Claude's feedback. Claude receives only
 the context the plugin provides, or read-only file access when you explicitly allow
-`access=readonly`. The plugin does not give Claude write tools, shell access, or permission to
-modify your workspace.
+`access=readonly`. The plugin does not give Claude write tools, Bash tools, or permission to
+modify your workspace. In `inherit` and `scoped`, Claude Code may still load workspace hooks
+from `.claude/settings*.json`; those hooks execute outside the tool allowlist.
 
 ## Common knobs
 
@@ -149,8 +152,8 @@ Set these in the environment you launch Codex from. The bundled MCP config forwa
 cost, safety, model, timeout, and API-key variables to the server.
 
 `config_mode=inherit` uses your normal Claude environment without persisting a session.
-`scoped` drops user-global settings and user MCP servers but keeps `CLAUDE.md`. `bare` strips
-`CLAUDE.md`, memory, and hooks, and requires `ANTHROPIC_API_KEY`.
+`scoped` drops user-global settings and user MCP servers but keeps `CLAUDE.md` and workspace
+hooks. `bare` strips `CLAUDE.md`, memory, and hooks, and requires `ANTHROPIC_API_KEY`.
 
 ## Troubleshooting
 
@@ -176,7 +179,7 @@ The Python package publishes the MCP server entry point for direct use and relea
 After a PyPI release, the server can also be launched with:
 
 ```sh
-uvx --from cc-plugin-codex==0.1.4 cc-plugin-codex-mcp
+uvx --from cc-plugin-codex==0.2.0 cc-plugin-codex-mcp
 ```
 
 ## Advanced reference

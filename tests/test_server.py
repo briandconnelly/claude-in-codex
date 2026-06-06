@@ -209,7 +209,18 @@ async def test_status_reports_config_modes(monkeypatch):
     data = structured(result)
     assert "config_modes_available" in data
     assert data["config_modes_available"]["bare"] is False
+    assert data["hooks_disabled"] is False
     assert "$0.10-$0.20" in data["resolved_defaults"]["practical_min_budget_hint"]
+
+
+async def test_status_does_not_claim_hooks_disabled_when_bare_unavailable(monkeypatch):
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["resolved_defaults"]["config_mode"] == "bare"
+    assert data["config_modes_available"]["bare"] is False
+    assert data["hooks_disabled"] is False
 
 
 async def test_claude_ask_returns_normalized(fake_claude):
@@ -218,7 +229,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-12"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-13"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -741,7 +752,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-12"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-13"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -823,6 +834,36 @@ async def test_dry_run_reports_redaction_count(monkeypatch, git_repo):
     assert any(".env" in p for p in data["redacted_paths"])
 
 
+async def test_dry_run_reports_workspace_hooks(monkeypatch, git_repo):
+    monkeypatch.delenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", raising=False)
+    settings_dir = git_repo / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text('{"hooks":{"SessionStart":[]}}')
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            )
+        )
+    assert data["resolved_config_mode"] == "inherit"
+    assert data["hooks_disabled"] is False
+    assert data["workspace_hook_settings"] == [".claude/settings.json"]
+    assert any("hooks" in warning for warning in data["security_warnings"])
+
+
+async def test_dry_run_does_not_claim_hooks_disabled_when_bare_unavailable(monkeypatch, git_repo):
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            )
+        )
+    assert data["resolved_config_mode"] == "bare"
+    assert data["hooks_disabled"] is False
+
+
 async def test_review_result_reports_redacted_paths(fake_claude, git_repo):
     import subprocess as _sp
 
@@ -836,6 +877,21 @@ async def test_review_result_reports_redacted_paths(fake_claude, git_repo):
         )
     assert data["ok"] is True
     assert any(".env" in p for p in data["meta"]["redacted_paths"])
+
+
+async def test_paid_result_reports_workspace_hooks(fake_claude, git_repo):
+    settings_dir = git_repo / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.local.json").write_text('{"hooks":{"SessionStart":[]}}')
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            )
+        )
+    assert any(
+        ".claude/settings.local.json" in warning for warning in data["meta"]["security_warnings"]
+    )
 
 
 async def test_async_empty_diff_skips_job_start(monkeypatch, git_repo, tmp_path):

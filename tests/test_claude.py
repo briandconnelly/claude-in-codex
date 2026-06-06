@@ -124,10 +124,9 @@ def test_build_command_always_send_flags_survive_when_probe_lists_them():
     assert "--tools" in cmd  # guarantee-bearing: always sent
     assert "--max-budget-usd" in cmd
     assert "--append-system-prompt" in cmd
+    assert "--no-session-persistence" in cmd
     assert "--effort" in cmd  # listed by the probe -> kept
-    # --no-session-persistence is HELP_GATED and absent from this probe -> dropped
-    assert "--no-session-persistence" not in cmd
-    assert "--no-session-persistence" in dropped
+    assert "--no-session-persistence" not in dropped
 
 
 def test_build_command_drops_unsupported_help_gated_flag():

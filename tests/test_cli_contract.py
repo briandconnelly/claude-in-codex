@@ -30,6 +30,7 @@ def test_security_flags_are_always_send():
         "--strict-mcp-config",
         "--mcp-config",
         "--max-budget-usd",
+        "--no-session-persistence",
         "--append-system-prompt",
     ):
         assert flag in cli_contract.ALWAYS_SEND_FLAGS

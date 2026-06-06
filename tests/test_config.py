@@ -54,6 +54,30 @@ def test_clamps():
 
 def test_critic_prompt_mentions_independence():
     assert "independent critique" in cfg.INDEPENDENT_CRITIC_PROMPT
+    assert "untrusted DATA" in cfg.INDEPENDENT_CRITIC_PROMPT
+    assert "credentials or secrets" in cfg.INDEPENDENT_CRITIC_PROMPT
+
+
+def test_workspace_hook_settings_detects_hooks(tmp_path):
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text('{"hooks":{"SessionStart":[]}}')
+    assert cfg.workspace_hook_settings(str(tmp_path)) == [".claude/settings.json"]
+
+
+def test_hook_security_warnings_skip_bare(tmp_path):
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.local.json").write_text('{"hooks":{"SessionStart":[]}}')
+    assert cfg.hook_security_warnings(str(tmp_path), "inherit")
+    assert cfg.hook_security_warnings(str(tmp_path), "bare") == []
+
+
+def test_hooks_disabled_available_requires_api_key_for_bare(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert cfg.hooks_disabled_available("bare") is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    assert cfg.hooks_disabled_available("bare") is True
 
 
 def test_defaults_malformed_numeric_env_falls_back(monkeypatch):

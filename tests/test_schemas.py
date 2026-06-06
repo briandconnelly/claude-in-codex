@@ -47,6 +47,20 @@ def test_meta_carries_redacted_paths():
     assert m.model_dump(mode="json", exclude_none=True)["redacted_paths"] == ["app.py"]
 
 
+def test_meta_carries_security_warnings():
+    m = Meta(
+        cwd="/x",
+        config_mode="inherit",
+        access="toolless",
+        timeout_seconds=10,
+        elapsed_ms=1,
+        security_warnings=["workspace hooks present"],
+    )
+    assert m.model_dump(mode="json", exclude_none=True)["security_warnings"] == [
+        "workspace hooks present"
+    ]
+
+
 def test_finding_supports_line_range():
     from cc_plugin_codex.schemas import Finding
 
@@ -79,7 +93,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-12"
+    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-13"
 
 
 def test_success_result_dump_omits_none():

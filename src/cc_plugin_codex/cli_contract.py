@@ -35,6 +35,7 @@ ALWAYS_SEND_FLAGS = frozenset(
         "--no-chrome",  # no interactive picker hanging an unattended run
         "--append-system-prompt",  # the independent-critic guardrails
         "--max-budget-usd",  # best-effort spend stop threshold
+        "--no-session-persistence",  # avoid storing sensitive review prompts/results on disk
         "--tools",  # read-only / no-tool guarantee
         "--strict-mcp-config",
         "--mcp-config",  # strip the user's MCP fleet (security boundary)
@@ -51,7 +52,6 @@ HELP_GATED_FLAGS = {
     "--effort": True,  # reasoning depth only
     "--model": True,  # falls back to the configured default model
     "--disallowed-tools": True,  # defense-in-depth; --tools is the primary allowlist
-    "--no-session-persistence": False,  # without it a session merely persists to disk
 }
 
 # Cache TTL for the `claude --help` probe, so a long-lived server re-probes after

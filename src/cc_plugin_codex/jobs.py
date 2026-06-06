@@ -187,6 +187,7 @@ class JobConfig:
     context_summary: ContextSummary | None
     requested_max_budget_usd: float | None = None
     redacted_paths: list[str] | None = None
+    security_warnings: list[str] | None = None
 
 
 def start_job(cmd: list[str], cwd: str, cfg: JobConfig) -> tuple[str, str]:
@@ -227,6 +228,7 @@ def start_job(cmd: list[str], cwd: str, cfg: JobConfig) -> tuple[str, str]:
             "cwd": cwd,
             "requested_max_budget_usd": cfg.requested_max_budget_usd,
             "redacted_paths": cfg.redacted_paths or [],
+            "security_warnings": cfg.security_warnings or [],
         },
         "context_summary": summary,
     }
@@ -364,6 +366,7 @@ def _build_meta(meta: dict) -> Meta:
         timeout_seconds=c.get("timeout_seconds", max_seconds()),
         requested_max_budget_usd=c.get("requested_max_budget_usd"),
         redacted_paths=c.get("redacted_paths") or [],
+        security_warnings=c.get("security_warnings") or [],
         elapsed_ms=_elapsed_ms(meta),
         job_id=meta.get("job_id"),
     )
