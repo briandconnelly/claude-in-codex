@@ -77,14 +77,17 @@ uv run pytest tests/test_jobs.py --no-cov
 - Claude CLI compatibility assumptions belong in
   `src/cc_plugin_codex/cli_contract.py`. Keep guarantee-bearing flags fail-closed
   rather than silently weakening cost, access, isolation, or behavior guarantees.
-- Optional second-opinion review through this plugin is appropriate for
-  security-sensitive, MCP-contract, release, or compatibility changes, but it is
-  a paid external call. Do not send secrets or sensitive workspace contents to
-  Claude.
-- `.agents/skills` is the canonical repo-owned skill location. `.claude/skills`
-  may be a local or committed symlink to it for Claude compatibility; edit the
-  canonical `.agents/skills` files and do not commit machine-local `.claude`
-  state.
+- `.agents/skills` is the canonical repo-owned skill location. Edit skill files
+  there, not through tool-specific adapters.
+
+## Tool-Specific Notes
+
+- Agents with access to `cc-plugin-codex` may request optional second-opinion
+  review for security-sensitive, MCP-contract, release, or compatibility changes,
+  but it is a paid external call. Do not send secrets or sensitive workspace
+  contents to Claude.
+- For Claude Code compatibility, `.claude/skills` may be a local or committed
+  symlink to `.agents/skills`. Do not commit machine-local `.claude` state.
 
 ## Security Reports
 
