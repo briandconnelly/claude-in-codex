@@ -8,6 +8,16 @@ __pycache__/
 .coverage.*
 htmlcov/
 
+# Local secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+credentials
+credentials.*
+*.credentials
+
 # macOS
 .DS_Store
 
