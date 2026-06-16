@@ -1211,12 +1211,18 @@ async def test_dry_run_bad_base_is_structured_error(git_repo):
         data = structured(
             await client.call_tool(
                 "claude_review_dry_run",
-                {"scope": "branch", "base": "-badref", "workspace_root": str(git_repo)},
+                {
+                    "scope": "branch",
+                    "base": "-badref",
+                    "config_mode": "safe",
+                    "workspace_root": str(git_repo),
+                },
                 raise_on_error=False,
             )
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
+    assert data["meta"]["config_mode"] == "safe"
 
 
 async def test_dry_run_nonexistent_base_is_invalid_base(git_repo):

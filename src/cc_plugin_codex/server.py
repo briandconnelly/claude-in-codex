@@ -1357,13 +1357,15 @@ async def claude_review_dry_run(
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    meta = _meta(cwd, "inherit", "toolless", 0, 0, None, scope, base, workspace_source=ws_source)
     dry_config_mode, cm_err = _resolve_config_mode_only(
         config_mode, cwd, scope=scope, base=base, workspace_source=ws_source
     )
     if cm_err:
         return _result(cm_err)
     assert dry_config_mode is not None
+    meta = _meta(
+        cwd, dry_config_mode, "toolless", 0, 0, None, scope, base, workspace_source=ws_source
+    )
     try:
         ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
     except InvalidBaseError:
