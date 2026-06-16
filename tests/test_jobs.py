@@ -119,6 +119,13 @@ def test_job_done_returns_normalized_result(tmp_path):
     assert payload["meta"]["cost_usd"] == 0.0123
 
 
+def test_start_job_spawn_failure_cleans_partial_record(tmp_path):
+    cwd = str(tmp_path)
+    with pytest.raises(OSError):
+        jobs.start_job(["definitely-no-such-claude-binary-xyz"], cwd, _cfg())
+    assert jobs.list_jobs(cwd)["jobs"] == []
+
+
 def test_job_meta_carries_requested_budget_and_warning(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(

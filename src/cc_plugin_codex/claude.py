@@ -234,6 +234,14 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
                 repair="Retry later, or reduce request size.",
                 retryable=True,
             )
+        if cli_contract.is_contract_drift(result, subtype):
+            return contract_changed_error()
+        detail = result.strip() or subtype or "unknown error"
+        return ErrorInfo(
+            code="nonzero_exit",
+            message=f"claude reported an error: {detail[:200]}",
+            repair="Inspect the error; retry with a smaller or corrected request.",
+        )
 
     extra = ""
     if isinstance(env, dict):

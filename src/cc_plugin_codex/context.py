@@ -29,7 +29,7 @@ def _valid_ref(ref: str) -> bool:
 
 
 SECRET_PATH_RE = re.compile(
-    r"(^|/)(\.env(\.|$)|.*\.env$|.*\.pem$|.*\.key$|id_rsa|id_ed25519|.*\.p12$)",
+    r"(^|/)(\.env(\.|$)|\.envrc$|\.netrc$|\.pypirc$|.*\.env$|.*\.pem$|.*\.key$|id_rsa|id_ed25519|.*\.p12$)",
     re.IGNORECASE,
 )
 
@@ -39,7 +39,7 @@ SECRET_VALUE_PATTERNS = [
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),
     re.compile(r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/=-]{16,}"),
     re.compile(
-        r"(?i)((?:api|access|secret|private)?_?(?:key|token|secret)\s*[:=]\s*['\"]?)[A-Za-z0-9._~+/=-]{16,}"
+        r"(?i)((?:(?:api|access|secret|private)?_?(?:key|token|secret)|passw(?:or)?d|pwd)\s*[:=]\s*['\"]?)[A-Za-z0-9._~+/=-]{16,}"
     ),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 ]
@@ -112,7 +112,12 @@ def _diff_args(scope: str, base: str) -> list[str]:
 
 
 def _summary(cwd: str, diff_args: list[str]) -> ContextSummary:
-    numstat = _git(cwd, *diff_args, "--numstat")
+    summary_args = list(diff_args)
+    if "--end-of-options" in summary_args:
+        summary_args.insert(summary_args.index("--end-of-options"), "--numstat")
+    else:
+        summary_args.append("--numstat")
+    numstat = _git(cwd, *summary_args)
     files = added = removed = 0
     for line in numstat.splitlines():
         parts = line.split("\t")
@@ -163,7 +168,7 @@ def _redact(diff: str) -> tuple[str, list[str]]:
         if line.startswith("diff --git "):
             spec = line[len("diff --git ") :]  # "a/<path> b/<path>" (paths may be quoted)
             current_path = _diff_path_from_header(line)
-            skipping = bool(SECRET_PATH_RE.search(spec))
+            skipping = bool(SECRET_PATH_RE.search(spec) or SECRET_PATH_RE.search(current_path))
             if skipping:
                 redacted.append(current_path or spec)
                 out_lines.append(line)  # keep the real header so reviewers see the file

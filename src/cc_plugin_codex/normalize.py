@@ -6,7 +6,7 @@ import json
 from typing import Any, cast
 
 from cc_plugin_codex import cli_contract
-from cc_plugin_codex.claude import contract_changed_error
+from cc_plugin_codex.claude import ClaudeRun, classify_failure
 from cc_plugin_codex.schemas import (
     Confidence,
     ContextSummary,
@@ -173,20 +173,29 @@ def normalize_envelope(
             meta,
         )
 
+    if not isinstance(env, dict):
+        return _error(
+            ErrorInfo(
+                code="invalid_json",
+                message="claude did not return a JSON object.",
+                repair="Retry; if it persists, update Claude Code or reduce context size.",
+            ),
+            meta,
+        )
+
     # Plumb cost and usage onto meta regardless of success/error path.
     apply_cost_usage(meta, env)
 
     if env.get("is_error") or env.get("subtype") not in cli_contract.SUCCESS_SUBTYPES:
-        detail = (env.get("result") or "").strip() or (env.get("subtype") or "unknown error")
-        # A drift signature can arrive as a zero-exit is_error envelope (not just a
-        # nonzero exit), so classify it the same way here.
-        if cli_contract.is_contract_drift(env.get("result"), env.get("subtype")):
-            return _error(contract_changed_error(), meta)
         return _error(
-            ErrorInfo(
-                code="nonzero_exit",
-                message=f"claude reported an error: {detail[:200]}",
-                repair="Inspect the error; retry with a smaller or corrected request.",
+            classify_failure(
+                ClaudeRun(
+                    stdout=stdout,
+                    stderr="",
+                    exit_code=0,
+                    elapsed_ms=meta.elapsed_ms,
+                    timed_out=False,
+                )
             ),
             meta,
         )
