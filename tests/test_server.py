@@ -19,7 +19,7 @@ def _patch_full_flag_support(monkeypatch):
     import cc_plugin_codex.server as srv
 
     fs = FlagSupport(
-        supported=frozenset(ALWAYS_SEND_FLAGS) | set(HELP_GATED_FLAGS), help_parsed=True
+        supported=frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS), help_parsed=True
     )
     monkeypatch.setattr(srv.preflight, "flag_support", lambda *a, **k: fs)
 
@@ -252,8 +252,12 @@ async def test_status_does_not_claim_safe_available_when_help_omits_flag(monkeyp
 
     monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: _Ver())
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
-    supported = (frozenset(ALWAYS_SEND_FLAGS) | set(HELP_GATED_FLAGS)) - {"--safe-mode"}
-    monkeypatch.setattr(srv.preflight, "flag_support", lambda *a, **k: FlagSupport(supported, True))
+    supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--safe-mode"})
+    monkeypatch.setattr(
+        srv.preflight,
+        "flag_support",
+        lambda *a, **k: FlagSupport(supported=supported, help_parsed=True),
+    )
     monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -282,8 +286,12 @@ async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
 
-    supported = (frozenset(ALWAYS_SEND_FLAGS) | set(HELP_GATED_FLAGS)) - {"--safe-mode"}
-    monkeypatch.setattr(srv.preflight, "flag_support", lambda *a, **k: FlagSupport(supported, True))
+    supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--safe-mode"})
+    monkeypatch.setattr(
+        srv.preflight,
+        "flag_support",
+        lambda *a, **k: FlagSupport(supported=supported, help_parsed=True),
+    )
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
     async with Client(mcp) as client:
         result = await client.call_tool(

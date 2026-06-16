@@ -14,7 +14,7 @@ from cc_plugin_codex.preflight import FlagSupport
 _NO_PROBE = FlagSupport(supported=frozenset(), help_parsed=False)
 # A successful probe that lists every flag this plugin knows about.
 _ALL_FLAGS = FlagSupport(
-    supported=frozenset(ALWAYS_SEND_FLAGS) | set(HELP_GATED_FLAGS), help_parsed=True
+    supported=frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS), help_parsed=True
 )
 
 
@@ -146,7 +146,7 @@ def test_build_command_always_send_flags_survive_when_probe_lists_them():
 
 def test_build_command_drops_unsupported_help_gated_flag():
     # Probe lists everything EXCEPT --effort -> --effort (and its value) dropped.
-    supported = (frozenset(ALWAYS_SEND_FLAGS) | set(HELP_GATED_FLAGS)) - {"--effort"}
+    supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--effort"})
     cmd, dropped = build_command(
         prompt="hi",
         config_mode="inherit",

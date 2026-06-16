@@ -1425,8 +1425,8 @@ def claude_status() -> ToolResult:
         if missing:
             flags_warning = (
                 "claude --help did not list expected flags: "
-                f"{', '.join(missing)}; the plugin may need an update for your "
-                "claude version"
+                f"{', '.join(missing)}; update Claude Code, or update this plugin "
+                "if the warning persists"
             )
     else:
         fs = preflight.FlagSupport(supported=frozenset(), help_parsed=False)
