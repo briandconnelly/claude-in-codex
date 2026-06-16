@@ -25,5 +25,6 @@ a guarantee. Use `access=toolless` when a workspace may contain sensitive data.
 
 The tool allowlist does not govern Claude Code hooks. In `config_mode=inherit`
 or `scoped`, workspace `.claude/settings*.json` hooks may run shell before or
-during a review. Use `config_mode=bare` for untrusted workspaces; it disables
-hooks but requires `ANTHROPIC_API_KEY`.
+during a review. Use `config_mode=safe` or `config_mode=bare` for untrusted
+workspaces. Prefer `safe` when you want to preserve normal Claude
+authentication; use `bare` when API-key-backed maximum isolation is desired.
