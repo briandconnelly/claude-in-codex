@@ -226,6 +226,7 @@ def start_job(
                 stdout=rf,
                 stderr=ef,
                 text=True,
+                encoding="utf-8",
                 start_new_session=True,
             )
             if stdin_text is not None:

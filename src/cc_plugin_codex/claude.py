@@ -156,6 +156,7 @@ async def run_claude_async(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             start_new_session=True,
         )
     except OSError:
