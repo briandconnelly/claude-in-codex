@@ -153,7 +153,9 @@ async def test_paid_tool_output_schema_describes_both_outcomes():
 async def test_fixed_value_inputs_use_enums():
     # F2: choices are JSON Schema enums, not prose like "inherit|scoped|safe|bare".
     props = (await _tools_by_name())["claude_review_changes"].inputSchema["properties"]
+    dry_props = (await _tools_by_name())["claude_review_dry_run"].inputSchema["properties"]
     assert props["scope"]["enum"] == ["working_tree", "staged", "branch"]
+    assert dry_props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert props["detail"]["enum"] == ["summary", "full"]
 
     def _enum_in_anyof(prop):
@@ -164,6 +166,7 @@ async def test_fixed_value_inputs_use_enums():
 
     assert _enum_in_anyof(props["config_mode"]) == ["inherit", "scoped", "safe", "bare"]
     assert _enum_in_anyof(props["access"]) == ["toolless", "readonly"]
+    assert _enum_in_anyof(dry_props["config_mode"]) == ["inherit", "scoped", "safe", "bare"]
 
 
 async def test_tools_have_titles():
@@ -219,13 +222,20 @@ async def test_status_reports_config_modes(monkeypatch):
 
 
 async def test_status_does_not_claim_hooks_disabled_when_bare_unavailable(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
     monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
+    assert data["ready"] is False
     assert data["resolved_defaults"]["config_mode"] == "bare"
     assert data["config_modes_available"]["bare"] is False
     assert data["hooks_disabled"] is False
+    assert data["default_errors"][0]["code"] == "api_key_missing"
 
 
 async def test_status_claims_hooks_disabled_for_safe_without_api_key(monkeypatch):
@@ -261,8 +271,10 @@ async def test_status_does_not_claim_safe_available_when_help_omits_flag(monkeyp
     monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
+    assert data["ready"] is False
     assert data["config_modes_available"]["safe"] is False
     assert data["hooks_disabled"] is False
+    assert data["default_errors"][0]["code"] == "unsupported_config_mode"
     assert "--safe-mode" in data["flags_warning"]
 
 
@@ -274,8 +286,32 @@ async def test_status_does_not_claim_safe_available_when_claude_missing(monkeypa
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
     assert data["claude_found"] is False
+    assert data["config_modes_available"]["inherit"] is False
+    assert data["config_modes_available"]["scoped"] is False
     assert data["config_modes_available"]["safe"] is False
+    assert data["config_modes_available"]["bare"] is False
     assert data["hooks_disabled"] is False
+
+
+async def test_status_reports_invalid_env_defaults(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "sideways")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["ready"] is False
+    assert data["raw_defaults"]["config_mode"] == "bogus"
+    assert data["raw_defaults"]["access"] == "sideways"
+    assert data["resolved_defaults"]["config_mode"] == "inherit"
+    assert data["resolved_defaults"]["access"] == "toolless"
+    assert {err["code"] for err in data["default_errors"]} == {
+        "unsupported_config_mode",
+        "unsupported_access",
+    }
 
 
 async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
@@ -311,7 +347,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-14"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-15"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -888,7 +924,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-14"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-15"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -911,7 +947,13 @@ async def test_capabilities_tool_returns_structured_contract():
     }
     assert details["claude_review_changes"]["cost"] == "paid"
     assert details["claude_review_changes"]["required_params"] == ["scope"]
-    assert "max_budget_usd" in details["claude_ask"]["key_optional_params"]
+    assert {"config_mode", "access", "model", "max_budget_usd"} <= set(
+        details["claude_ask"]["key_optional_params"]
+    )
+    assert {"config_mode", "access", "model", "timeout_seconds"} <= set(
+        details["claude_review_changes"]["key_optional_params"]
+    )
+    assert "config_mode" in details["claude_review_dry_run"]["key_optional_params"]
     assert details["claude_status"]["cost"] == "free"
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
@@ -1012,6 +1054,51 @@ async def test_dry_run_claims_hooks_disabled_for_safe_without_api_key(monkeypatc
         )
     assert data["resolved_config_mode"] == "safe"
     assert data["hooks_disabled"] is True
+
+
+async def test_dry_run_accepts_per_call_safe_config(monkeypatch, git_repo):
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    _patch_full_flag_support(monkeypatch)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "config_mode": "safe",
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["resolved_config_mode"] == "safe"
+    assert data["hooks_disabled"] is True
+
+
+async def test_dry_run_rejects_safe_when_help_omits_flag(monkeypatch, git_repo):
+    import cc_plugin_codex.server as srv
+
+    supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--safe-mode"})
+    monkeypatch.setattr(
+        srv.preflight,
+        "flag_support",
+        lambda *a, **k: FlagSupport(supported=supported, help_parsed=True),
+    )
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "config_mode": "safe",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "unsupported_config_mode"
+    assert data["error"]["offending_param"] == "config_mode"
 
 
 async def test_review_result_reports_redacted_paths(fake_claude, git_repo):
@@ -1119,17 +1206,24 @@ async def test_async_result_reports_redacted_paths(monkeypatch, git_repo, tmp_pa
     assert ".env" in result["meta"]["redacted_paths"]
 
 
-async def test_dry_run_bad_base_is_structured_error(git_repo):
+async def test_dry_run_bad_base_is_structured_error(monkeypatch, git_repo):
+    _patch_full_flag_support(monkeypatch)
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
                 "claude_review_dry_run",
-                {"scope": "branch", "base": "-badref", "workspace_root": str(git_repo)},
+                {
+                    "scope": "branch",
+                    "base": "-badref",
+                    "config_mode": "safe",
+                    "workspace_root": str(git_repo),
+                },
                 raise_on_error=False,
             )
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
+    assert data["meta"]["config_mode"] == "safe"
 
 
 async def test_dry_run_nonexistent_base_is_invalid_base(git_repo):

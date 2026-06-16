@@ -22,7 +22,7 @@ from fastmcp import Client
 from cc_plugin_codex import schemas
 from cc_plugin_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "31ca44b852a2c933ad37bdb0f353e32a41eda632dd0c6d4d66d01990e3e74327"
+EXPECTED_CONTRACT_DIGEST = "a915da33a6542bf25ce372bda2e9926f39f590c79f94803c2f8904c5698c13de"
 
 
 async def _contract_surface() -> dict:

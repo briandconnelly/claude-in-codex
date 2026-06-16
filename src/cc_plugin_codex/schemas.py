@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-14"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-15"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -186,6 +186,16 @@ class ResolvedDefaults(BaseModel):
     practical_min_budget_hint: str
 
 
+class RawDefaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    config_mode: str
+    access: str
+    model: str | None = None
+    effort: str
+    max_budget_usd: float
+    timeout_seconds: int
+
+
 class StatusResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
@@ -204,7 +214,9 @@ class StatusResult(BaseModel):
     ready: bool = False  # found AND authenticated (version is advisory, not gating)
     config_modes_available: dict
     hooks_disabled: bool
+    raw_defaults: RawDefaults
     resolved_defaults: ResolvedDefaults
+    default_errors: list[ErrorInfo] = Field(default_factory=list)
     caveat: str
     fingerprint: str = FINGERPRINT
 
