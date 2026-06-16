@@ -32,4 +32,5 @@ def _env_vars(path: Path) -> list[str]:
 def test_bundled_mcp_configs_forward_supported_env_vars():
     all_env_vars = [_env_vars(path) for path in MCP_CONFIGS]
     assert all(env_vars == all_env_vars[0] for env_vars in all_env_vars)
+    assert len(all_env_vars[0]) == len(set(all_env_vars[0]))
     assert set(all_env_vars[0]) == EXPECTED_ENV_VARS
