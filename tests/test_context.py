@@ -49,6 +49,23 @@ def test_secret_files_redacted(git_repo):
     assert ".env" in res.redacted_paths
 
 
+@pytest.mark.parametrize(
+    ("filename", "secret"),
+    [
+        (".netrc", "machine api.example.com login alice password supersecretpassword"),
+        (".pypirc", "[pypi]\nusername = __token__\npassword = pypi-1234567890abcdefghijklmnop"),
+        (".envrc", "export TOKEN=supersecretpassword123456"),
+    ],
+)
+def test_common_credential_files_are_redacted(git_repo, filename, secret):
+    (git_repo / filename).write_text(f"{secret}\n")
+    subprocess.run(["git", "add", "-Nf", filename], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert secret not in res.text
+    assert filename in res.text
+    assert filename in res.redacted_paths
+
+
 def test_secret_values_in_source_are_redacted(git_repo):
     (git_repo / "app.py").write_text(
         "def add(a, b):\n    token = 'ghp_1234567890abcdefghijklmnopqrstu'\n    return a - b\n"
@@ -57,6 +74,25 @@ def test_secret_values_in_source_are_redacted(git_repo):
     assert "ghp_1234567890abcdefghijklmnopqrstu" not in res.text
     assert "[redacted: secret value]" in res.text
     assert "app.py" in res.redacted_paths
+
+
+def test_password_style_values_in_source_are_redacted(git_repo):
+    (git_repo / "config.ini").write_text(
+        "password = supersecretpassword123456\n"
+        "passwd = anothersecret12345678\n"
+        "pwd = shortsecretvalue123456\n"
+        "passphrase = sshkeypassphrase123456\n"
+        "secret = shouldredact12345678\n"
+    )
+    subprocess.run(["git", "add", "-Nf", "config.ini"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert "supersecretpassword123456" not in res.text
+    assert "anothersecret12345678" not in res.text
+    assert "shortsecretvalue123456" not in res.text
+    assert "sshkeypassphrase123456" not in res.text
+    assert "shouldredact12345678" not in res.text
+    assert res.text.count("[redacted: secret value]") == 5
+    assert "config.ini" in res.redacted_paths
 
 
 def test_secret_values_in_removed_lines_are_redacted(git_repo):
@@ -154,6 +190,24 @@ def test_diff_args_bad_base_raises_invalid_base():
 def test_branch_base_rejects_nonexistent_ref(git_repo):
     with pytest.raises(InvalidBaseError):
         gather_context(str(git_repo), scope="branch", base="definitely-not-a-real-branch")
+
+
+def test_branch_scope_diff_summarizes_valid_branch(git_repo):
+    base = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)
+    (git_repo / "branch.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "branch.py"], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "branch change"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="branch", base=base)
+    assert "branch.py" in res.text
+    assert res.summary.files_changed == 1
+    assert res.summary.lines_added == 1
 
 
 def test_diff_args_bad_scope_raises_invalid_scope():

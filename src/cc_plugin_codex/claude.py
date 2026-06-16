@@ -196,7 +196,9 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
             repair="Narrow the scope/focus or raise timeout_seconds.",
             retryable=True,
         )
-    if isinstance(env, dict) and env.get("is_error"):
+    if isinstance(env, dict) and (
+        env.get("is_error") or env.get("subtype") not in cli_contract.SUCCESS_SUBTYPES
+    ):
         subtype = str(env.get("subtype") or "").lower()
         result = str(env.get("result") or "")
         structured_blob = f"{subtype}\n{result}".lower()
@@ -234,6 +236,14 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
                 repair="Retry later, or reduce request size.",
                 retryable=True,
             )
+        if cli_contract.is_contract_drift(result, subtype):
+            return contract_changed_error()
+        detail = result.strip() or subtype or "unknown error"
+        return ErrorInfo(
+            code="nonzero_exit",
+            message=f"claude reported an error: {detail[:200]}",
+            repair="Inspect the error; retry with a smaller or corrected request.",
+        )
 
     extra = ""
     if isinstance(env, dict):

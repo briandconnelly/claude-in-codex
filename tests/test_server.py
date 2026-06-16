@@ -757,6 +757,60 @@ async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
     assert res["meta"]["job_id"] == job_id
 
 
+async def test_review_changes_async_spawn_failure_is_structured(monkeypatch, git_repo, tmp_path):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        srv,
+        "build_command",
+        lambda *a, **k: (["definitely-no-such-claude-binary-xyz"], []),
+    )
+
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+        jobs = structured(
+            await client.call_tool("claude_job_list", {"workspace_root": str(git_repo)})
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "claude_not_found"
+    assert jobs["jobs"] == []
+
+
+async def test_review_changes_async_other_oserror_is_internal_error(
+    monkeypatch, git_repo, tmp_path
+):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["claude"], []))
+
+    def fake_start_job(*a, **k):
+        raise OSError("boom")
+
+    monkeypatch.setattr(srv.jobs, "start_job", fake_start_job)
+
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "internal_error"
+    assert "Failed to start async job" in result["error"]["message"]
+
+
 async def test_job_result_not_found_is_structured_error(tmp_path, monkeypatch, git_repo):
     monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
     async with Client(mcp) as client:

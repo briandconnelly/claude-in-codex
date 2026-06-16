@@ -5,6 +5,21 @@ All notable changes to `cc-plugin-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
+## 0.3.1 - 2026-06-16
+
+- Expanded best-effort diff redaction for common credential files and
+  password-style keys, including `.netrc`, `.pypirc`, `.envrc`, `password`,
+  `passwd`, `pwd`, and `passphrase` patterns.
+- Fixed branch-scope diff summaries so `--numstat` is passed before the branch
+  revision range.
+- Hardened Claude envelope normalization so valid non-object JSON returns a
+  structured `invalid_json` error instead of escaping as an exception.
+- Classified zero-exit Claude `is_error` and non-success-subtype envelopes with
+  the shared failure classifier so budget, auth, permission, rate-limit, API-key,
+  and CLI-contract errors get consistent structured codes and retryability.
+- Fixed async review startup failures so an unspawnable `claude` command returns
+  a structured `claude_not_found` envelope and cleans up partial job records.
+
 ## 0.3.0 - 2026-06-16
 
 - Added `config_mode=safe`, backed by Claude Code `--safe-mode`, to disable

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from cc_plugin_codex.normalize import build_prompt, extract_json, normalize_envelope
 from cc_plugin_codex.schemas import FINGERPRINT, Meta
 
@@ -157,6 +159,14 @@ def test_normalize_invalid_outer_json():
     assert res["error"]["code"] == "invalid_json"
 
 
+@pytest.mark.parametrize("stdout", ["[]", '"hello"', "123", "true", "null"])
+def test_normalize_valid_non_object_json_returns_structured_error(stdout):
+    res = normalize_envelope("claude_ask", stdout, _meta(), detail="summary")
+    assert res["ok"] is False
+    assert res["error"]["code"] == "invalid_json"
+    assert "JSON object" in res["error"]["message"]
+
+
 def test_normalize_unstructured_inner_falls_back():
     res = normalize_envelope("claude_ask", _env("I think this is fine."), _meta(), detail="full")
     assert res["ok"] is True
@@ -185,8 +195,43 @@ def test_normalize_is_error_uses_result_text_not_subtype():
     res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "nonzero_exit"
+    assert res["error"]["retryable"] is True
     assert "Rate limited" in res["error"]["message"]
     assert "success" not in res["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_code", "retryable"),
+    [
+        ("Budget stop threshold reached.", "budget_exceeded", True),
+        ("Authentication required; run claude /login.", "claude_auth_required", False),
+        ("Permission denied for tool Read.", "claude_permission_error", False),
+        ("Rate limited; try later.", "nonzero_exit", True),
+        ("Invalid API key.", "api_key_invalid", False),
+    ],
+)
+def test_zero_exit_is_error_uses_failure_classifier(result, expected_code, retryable):
+    env = _env("", is_error=True, subtype="error", result=result)
+    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert res["ok"] is False
+    assert res["error"]["code"] == expected_code
+    assert res["error"].get("retryable", False) is retryable
+
+
+def test_non_success_subtype_without_is_error_uses_result_text():
+    env = _env("", is_error=False, subtype="error", result="the model declined to answer")
+    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert res["ok"] is False
+    assert res["error"]["code"] == "nonzero_exit"
+    assert "the model declined" in res["error"]["message"]
+    assert "exited 0" not in res["error"]["message"]
+
+
+def test_non_success_subtype_without_is_error_detects_contract_drift():
+    env = _env("", is_error=False, subtype="error", result="error: unknown option '--effort'")
+    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert res["ok"] is False
+    assert res["error"]["code"] == "cli_contract_changed"
 
 
 def test_normalize_string_questions_not_exploded():

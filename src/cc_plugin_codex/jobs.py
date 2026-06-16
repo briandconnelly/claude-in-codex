@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -203,10 +204,14 @@ def start_job(cmd: list[str], cwd: str, cfg: JobConfig) -> tuple[str, str]:
     started = time.time()
     result_path = jd / "result.json"
     stderr_path = jd / "stderr.log"
-    with result_path.open("w") as rf, stderr_path.open("w") as ef:
-        proc = subprocess.Popen(
-            cmd, cwd=cwd, stdout=rf, stderr=ef, text=True, start_new_session=True
-        )
+    try:
+        with result_path.open("w") as rf, stderr_path.open("w") as ef:
+            proc = subprocess.Popen(
+                cmd, cwd=cwd, stdout=rf, stderr=ef, text=True, start_new_session=True
+            )
+    except OSError:
+        shutil.rmtree(jd, ignore_errors=True)
+        raise
     summary = cfg.context_summary.model_dump() if cfg.context_summary else None
     meta = {
         "job_id": job_id,
