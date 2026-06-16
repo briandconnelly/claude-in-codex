@@ -25,6 +25,15 @@ async def test_run_claude_async_returns_output():
     assert run.timed_out is False
 
 
+async def test_run_claude_async_sends_stdin():
+    run = await run_claude_async(
+        ["sh", "-c", "cat"], cwd=".", timeout_seconds=10, stdin_text="prompt body"
+    )
+    assert run.exit_code == 0
+    assert run.stdout == "prompt body"
+    assert run.timed_out is False
+
+
 async def test_run_claude_async_times_out_and_kills(tmp_path):
     marker = tmp_path / "marker"
     cmd = ["sh", "-c", f"sleep 5; touch {marker}"]
@@ -65,8 +74,7 @@ def test_build_command_toolless_inherit():
     assert "--no-session-persistence" in cmd
     assert "--tools" in cmd
     assert "--append-system-prompt" in cmd
-    assert cmd[-2] == "--"
-    assert cmd[-1] == "hi"  # prompt is the final positional arg
+    assert "hi" not in cmd  # prompt is sent over stdin, never argv
     assert dropped == []
 
 
@@ -163,8 +171,8 @@ def test_build_command_drops_unsupported_help_gated_flag():
 
 
 def test_build_command_separates_prompt_even_if_prompt_looks_like_flag():
-    # The prompt is appended AFTER gating, so a prompt that contains a gated flag
-    # name is never mistaken for one.
+    # The prompt is sent over stdin, so a prompt that contains a gated flag name
+    # is never visible to argv parsing or local process listings.
     cmd, _ = build_command(
         prompt="--effort evil",
         config_mode="inherit",
@@ -173,8 +181,7 @@ def test_build_command_separates_prompt_even_if_prompt_looks_like_flag():
         max_budget_usd=1.0,
         flag_support=FlagSupport(supported=frozenset(), help_parsed=True),
     )
-    assert cmd[-2] == "--"
-    assert cmd[-1] == "--effort evil"
+    assert "--effort evil" not in cmd
 
 
 def test_classify_not_logged_in():
@@ -280,8 +287,7 @@ def test_build_command_separates_prompt_with_double_dash():
         max_budget_usd=1.0,
         flag_support=_NO_PROBE,
     )
-    assert cmd[-2] == "--"
-    assert cmd[-1] == "--model evil"  # flag-looking prompt stays a positional
+    assert "--model evil" not in cmd
 
 
 def test_classify_unknown_flag_is_cli_contract_changed():

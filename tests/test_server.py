@@ -1277,6 +1277,47 @@ async def test_meta_echoes_requested_budget(fake_claude, monkeypatch, git_repo):
     assert data["meta"]["requested_max_budget_usd"] == 0.25
 
 
+async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
+    import cc_plugin_codex.server as srv
+    from cc_plugin_codex.claude import ClaudeRun
+
+    captured = {}
+    envelope = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps(
+                {
+                    "summary": "ok",
+                    "verdict": "pass",
+                    "confidence": "high",
+                    "findings": [],
+                    "questions": [],
+                    "assumptions": [],
+                }
+            ),
+        }
+    )
+
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
+        captured["cmd"] = cmd
+        captured["stdin_text"] = stdin_text
+        return ClaudeRun(stdout=envelope, stderr="", exit_code=0, elapsed_ms=1, timed_out=False)
+
+    monkeypatch.setattr(srv, "run_claude_async", fake_run)
+    prompt = "sensitive prompt --model should-not-be-argv"
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_ask", {"prompt": prompt, "workspace_root": str(tmp_path)}
+            )
+        )
+    assert data["ok"] is True
+    assert all(prompt not in arg for arg in captured["cmd"])
+    assert prompt in captured["stdin_text"]
+
+
 async def test_status_auth_detail_is_redacted(monkeypatch):
     # claude_status must not leak the account email/org from `claude auth status`.
     import cc_plugin_codex.claude as cl
@@ -1374,7 +1415,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
         }
     )
 
-    async def fake_run(cmd, cwd, timeout_seconds):
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
         return ClaudeRun(stdout=envelope, stderr="", exit_code=1, elapsed_ms=5, timed_out=False)
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
@@ -1602,7 +1643,7 @@ async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
     import cc_plugin_codex.server as srv
     from cc_plugin_codex.claude import ClaudeRun
 
-    async def fake_run(cmd, cwd, timeout_seconds):
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
         return ClaudeRun(
             stdout="not json at all", stderr="boom", exit_code=1, elapsed_ms=5, timed_out=False
         )

@@ -119,6 +119,17 @@ def test_job_done_returns_normalized_result(tmp_path):
     assert payload["meta"]["cost_usd"] == 0.0123
 
 
+def test_start_job_sends_stdin_without_argv_prompt(tmp_path):
+    cwd = str(tmp_path)
+    cmd = ["sh", "-c", "cat"]
+    job_id, _ = jobs.start_job(cmd, cwd, _cfg(), stdin_text=_ENVELOPE)
+    _await_done(cwd, job_id)
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["ok"] is True
+    assert _ENVELOPE not in cmd
+
+
 def test_start_job_spawn_failure_cleans_partial_record(tmp_path):
     cwd = str(tmp_path)
     with pytest.raises(OSError):

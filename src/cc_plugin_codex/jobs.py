@@ -191,7 +191,20 @@ class JobConfig:
     security_warnings: list[str] | None = None
 
 
-def start_job(cmd: list[str], cwd: str, cfg: JobConfig) -> tuple[str, str]:
+def _write_stdin(proc: subprocess.Popen, stdin_text: str) -> None:
+    if proc.stdin is None:
+        return
+    try:
+        proc.stdin.write(stdin_text)
+        proc.stdin.close()
+    except (BrokenPipeError, OSError, ValueError):
+        with contextlib.suppress(OSError, ValueError):
+            proc.stdin.close()
+
+
+def start_job(
+    cmd: list[str], cwd: str, cfg: JobConfig, stdin_text: str | None = None
+) -> tuple[str, str]:
     """Spawn the claude command detached and persist its record.
 
     Returns (job_id, started_at_iso)."""
@@ -207,8 +220,17 @@ def start_job(cmd: list[str], cwd: str, cfg: JobConfig) -> tuple[str, str]:
     try:
         with result_path.open("w") as rf, stderr_path.open("w") as ef:
             proc = subprocess.Popen(
-                cmd, cwd=cwd, stdout=rf, stderr=ef, text=True, start_new_session=True
+                cmd,
+                cwd=cwd,
+                stdin=subprocess.PIPE if stdin_text is not None else None,
+                stdout=rf,
+                stderr=ef,
+                text=True,
+                encoding="utf-8",
+                start_new_session=True,
             )
+            if stdin_text is not None:
+                threading.Thread(target=_write_stdin, args=(proc, stdin_text), daemon=True).start()
     except OSError:
         shutil.rmtree(jd, ignore_errors=True)
         raise

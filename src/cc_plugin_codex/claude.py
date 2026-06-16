@@ -89,9 +89,9 @@ def build_command(
     if model:
         tokens += ["--model", model]
     cmd, dropped = _gate_optional(tokens, fs)
-    # Gate BEFORE appending the prompt so a prompt that contains "--effort" etc.
-    # can never be mistaken for a flag.
-    cmd += [cli_contract.END_OF_OPTIONS, prompt]
+    # The prompt is supplied over stdin by the runner. Keeping it out of argv
+    # avoids exposing gathered diffs/context through local process listings.
+    _ = prompt
     return cmd, dropped
 
 
@@ -139,7 +139,9 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             proc.kill()
 
 
-async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> ClaudeRun:
+async def run_claude_async(
+    cmd: list[str], cwd: str, timeout_seconds: int, stdin_text: str | None = None
+) -> ClaudeRun:
     """Run `claude` as a subprocess, returning a ClaudeRun.
 
     The subprocess is started in its own session (process group) so that, on a
@@ -150,9 +152,11 @@ async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> Cl
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             start_new_session=True,
         )
     except OSError:
@@ -161,7 +165,7 @@ async def run_claude_async(cmd: list[str], cwd: str, timeout_seconds: int) -> Cl
 
     def _wait() -> tuple[str, str, bool]:
         try:
-            out, err = proc.communicate(timeout=timeout_seconds)
+            out, err = proc.communicate(input=stdin_text, timeout=timeout_seconds)
             return out, err, False
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)

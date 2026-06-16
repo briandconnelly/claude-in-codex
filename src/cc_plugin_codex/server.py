@@ -505,7 +505,7 @@ async def _execute(
 ) -> dict:
     prompt = build_prompt(tool, payload, context_text)
     cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
-    run = await run_claude_async(cmd, cwd=cwd, timeout_seconds=r.timeout)
+    run = await run_claude_async(cmd, cwd=cwd, timeout_seconds=r.timeout, stdin_text=prompt)
     meta = _meta(
         cwd,
         r.config_mode,
@@ -1137,7 +1137,7 @@ async def claude_review_changes_async(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
     try:
-        job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg))
+        job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
     except (FileNotFoundError, PermissionError):
         return _result(
             _err(
