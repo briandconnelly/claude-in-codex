@@ -15,6 +15,14 @@ def test_scoped_flags():
     assert '{"mcpServers":{}}' in f
 
 
+def test_safe_flags():
+    f = cfg.config_mode_flags("safe")
+    assert "--safe-mode" in f
+    assert "--no-session-persistence" in f
+    assert "--strict-mcp-config" in f
+    assert '{"mcpServers":{}}' in f
+
+
 def test_bare_flags():
     f = cfg.config_mode_flags("bare")
     assert "--bare" in f
@@ -78,11 +86,15 @@ def test_hook_security_warnings_skip_bare(tmp_path):
     settings_dir.mkdir()
     (settings_dir / "settings.local.json").write_text('{"hooks":{"SessionStart":[]}}')
     assert cfg.hook_security_warnings(str(tmp_path), "inherit")
+    assert cfg.hook_security_warnings(str(tmp_path), "safe") == []
     assert cfg.hook_security_warnings(str(tmp_path), "bare") == []
 
 
 def test_hooks_disabled_available_requires_api_key_for_bare(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert cfg.hooks_disabled_available("safe") is True
+    assert cfg.hooks_disabled_available("safe", True, frozenset()) is False
+    assert cfg.safe_available(True, frozenset({"--safe-mode"})) is True
     assert cfg.hooks_disabled_available("bare") is False
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
     assert cfg.hooks_disabled_available("bare") is True

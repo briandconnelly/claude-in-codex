@@ -10,12 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-13"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-14"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
 Confidence = Literal["low", "medium", "high"]
-ConfigMode = Literal["inherit", "scoped", "bare"]
+ConfigMode = Literal["inherit", "scoped", "safe", "bare"]
 Access = Literal["toolless", "readonly"]
 Scope = Literal["working_tree", "staged", "branch"]
 Detail = Literal["summary", "full"]
@@ -131,7 +131,7 @@ class Meta(BaseModel):
     compat_warnings: list[str] = Field(default_factory=list)
     # Advisory security posture warnings detected before launching Claude. Example:
     # workspace Claude Code hooks can run outside the tool allowlist unless
-    # config_mode=bare disables hooks.
+    # config_mode=safe/bare disables hooks.
     security_warnings: list[str] = Field(default_factory=list)
     redacted_paths: list[str] = Field(default_factory=list)
     cost_usd: float | None = None

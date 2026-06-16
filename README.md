@@ -112,8 +112,8 @@ Poll with `claude_job_status`, then fetch the result with `claude_job_result`.
   `claude` login or `ANTHROPIC_API_KEY`.
 - Free tools only inspect local state, preflight a request, or manage background jobs.
 - Claude never receives write or Bash tools from this plugin. Claude Code hooks are not
-  tools and may run in `config_mode=inherit`/`scoped`; use `config_mode=bare` for
-  untrusted workspaces.
+  tools and may run in `config_mode=inherit`/`scoped`; use `config_mode=safe` or
+  `config_mode=bare` for untrusted workspaces.
 - `access=toolless` is the default: Claude receives gathered context as text and cannot read
   more files. `access=readonly` lets Claude use `Read`, `Grep`, and `Glob` for extra context.
 - Secret redaction is best-effort defense in depth. Use `access=toolless` when a workspace may
@@ -141,7 +141,7 @@ Every setting is optional. These are the knobs most users are likely to change:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CC_PLUGIN_CODEX_ACCESS` | `toolless` | `toolless` or `readonly` |
-| `CC_PLUGIN_CODEX_CLAUDE_CONFIG` | `inherit` | `inherit`, `scoped`, or `bare` |
+| `CC_PLUGIN_CODEX_CLAUDE_CONFIG` | `inherit` | `inherit`, `scoped`, `safe`, or `bare` |
 | `CC_PLUGIN_CODEX_EFFORT` | `xhigh` | `low`, `medium`, `high`, `xhigh`, or `max` |
 | `CC_PLUGIN_CODEX_MAX_BUDGET_USD` | `1.00` | best-effort per-call budget threshold |
 | `CC_PLUGIN_CODEX_MODEL` | unset | Claude model; unset uses the CLI default |
@@ -153,7 +153,9 @@ cost, safety, model, timeout, and API-key variables to the server.
 
 `config_mode=inherit` uses your normal Claude environment without persisting a session.
 `scoped` drops user-global settings and user MCP servers but keeps `CLAUDE.md` and workspace
-hooks. `bare` strips `CLAUDE.md`, memory, and hooks, and requires `ANTHROPIC_API_KEY`.
+hooks. `safe` disables Claude Code customizations and hooks while preserving normal
+authentication. `bare` strips `CLAUDE.md`, memory, and hooks, and requires
+`ANTHROPIC_API_KEY`.
 
 ## Troubleshooting
 
@@ -179,7 +181,7 @@ The Python package publishes the MCP server entry point for direct use and relea
 After a PyPI release, the server can also be launched with:
 
 ```sh
-uvx --from cc-plugin-codex==0.2.0 cc-plugin-codex-mcp
+uvx --from cc-plugin-codex==0.3.0 cc-plugin-codex-mcp
 ```
 
 ## Advanced reference

@@ -42,7 +42,7 @@ guarantee:
 | `--max-budget-usd` (spend cap) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update the constant |
 | `--tools` (read-only / no-tool guarantee) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update the constant in `config.access_flags` |
 | `--strict-mcp-config` / `--mcp-config` (drop user MCP fleet) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update `config.config_mode_flags` |
-| `--setting-sources` / `--bare` (mode isolation) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update `config.config_mode_flags` |
+| `--setting-sources` / `--safe-mode` / `--bare` (mode isolation) ⚠️ | `ALWAYS_SEND_FLAGS` | `cli_contract_changed` | update `config.config_mode_flags` |
 | `--effort` + accepted levels | `HELP_GATED_FLAGS`, `VALID_EFFORTS` | dropped with `compat_warnings`; a removed *level* → `cli_contract_changed` | update `VALID_EFFORTS` |
 | `--model`, `--disallowed-tools` | `HELP_GATED_FLAGS` | dropped with `compat_warnings` | update the constant |
 | JSON envelope keys (`is_error`, `subtype`, `result`, `total_cost_usd`, `usage.*`, `session_id`, `modelUsage`, `permission_denials`) | `ENVELOPE_KEYS`, `USAGE_KEYS`, `SUCCESS_SUBTYPES` | golden-envelope test (`tests/test_golden_envelope.py`); cost silently null if renamed | update `normalize.py` + the golden sample |

@@ -35,6 +35,7 @@ from cc_plugin_codex.config import (
     hook_security_warnings,
     hooks_disabled_available,
     max_input_bytes,
+    safe_available,
     sanitize_effort,
     supported_majors,
     version_supported,
@@ -83,7 +84,7 @@ CAPABILITY_SUMMARY = (
     "cc-plugin-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. It never edits code, grants "
     "Bash/write tools, or proxies Claude MCP tools; Claude Code hooks may still run "
-    "unless config_mode=bare is used. Paid tools send context to Anthropic; call "
+    "unless config_mode=safe or bare is used. Paid tools send context to Anthropic; call "
     "claude_status before spending. claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
     "claude_review_dry_run previews workspace/diff-size/redaction for free. Findings "
@@ -360,7 +361,7 @@ def _resolve(
 
     # Validate before building Meta (Meta uses Literal types — invalid values
     # would raise Pydantic errors before we can return a structured response).
-    if cm not in ("inherit", "scoped", "bare"):
+    if cm not in ("inherit", "scoped", "safe", "bare"):
         safe_meta = _meta(
             cwd,
             "inherit",
@@ -376,7 +377,7 @@ def _resolve(
         return None, _err(
             "unsupported_config_mode",
             f"Unknown config_mode '{cm}'.",
-            "Use one of: inherit, scoped, bare.",
+            "Use one of: inherit, scoped, safe, bare.",
             safe_meta,
             offending="config_mode",
         )
@@ -401,6 +402,29 @@ def _resolve(
             offending="access",
         )
 
+    if cm == "safe":
+        fs = preflight.flag_support()
+        if not safe_available(fs.help_parsed, fs.supported):
+            safe_meta = _meta(
+                cwd,
+                "safe",
+                ac,
+                timeout,
+                0,
+                None,
+                scope,
+                base,
+                workspace_source=workspace_source,
+                requested_budget=budget,
+            )
+            return None, _err(
+                "unsupported_config_mode",
+                "config_mode=safe requires a Claude CLI with --safe-mode support.",
+                "Update Claude Code, or use config_mode inherit/scoped/bare.",
+                safe_meta,
+                offending="config_mode",
+            )
+
     meta = _meta(
         cwd,
         cm,
@@ -418,7 +442,7 @@ def _resolve(
         return None, _err(
             "api_key_missing",
             "config_mode=bare requires ANTHROPIC_API_KEY, which is unset.",
-            "Set ANTHROPIC_API_KEY, or use config_mode inherit/scoped.",
+            "Set ANTHROPIC_API_KEY, or use config_mode inherit/scoped/safe.",
             meta,
             offending="config_mode",
         )
@@ -484,7 +508,7 @@ async def claude_ask(
             "the server uses the client's first MCP root, else its own cwd."
         ),
     ] = None,
-    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|bare")] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
     access: Annotated[Access | None, Field(description="toolless|readonly")] = None,
     model: Annotated[
         str | None, Field(description="Claude model override; omit for configured default.")
@@ -561,7 +585,7 @@ async def claude_review_changes(
             "the server uses the client's first MCP root, else its own cwd."
         ),
     ] = None,
-    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|bare")] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
     access: Annotated[Access | None, Field(description="toolless|readonly")] = None,
     model: Annotated[
         str | None, Field(description="Claude model override; omit for configured default.")
@@ -725,7 +749,7 @@ async def claude_adversarial_review(
             "the server uses the client's first MCP root, else its own cwd."
         ),
     ] = None,
-    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|bare")] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
     access: Annotated[Access | None, Field(description="toolless|readonly")] = None,
     model: Annotated[
         str | None, Field(description="Claude model override; omit for configured default.")
@@ -927,7 +951,7 @@ async def claude_review_changes_async(
             "the server uses the client's first MCP root, else its own cwd."
         ),
     ] = None,
-    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|bare")] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
     access: Annotated[Access | None, Field(description="toolless|readonly")] = None,
     model: Annotated[
         str | None, Field(description="Claude model override; omit for configured default.")
@@ -1304,7 +1328,10 @@ async def claude_review_dry_run(
             )
         )
     d = defaults()
-    dry_config_mode = d.config_mode if d.config_mode in ("inherit", "scoped", "bare") else "inherit"
+    dry_config_mode = (
+        d.config_mode if d.config_mode in ("inherit", "scoped", "safe", "bare") else "inherit"
+    )
+    fs = preflight.flag_support()
     result = DryRunResult(
         cwd=cwd,
         workspace_source=ws_source,
@@ -1319,7 +1346,7 @@ async def claude_review_dry_run(
         redacted_paths_count=len(ctx_data.redacted_paths),
         redacted_paths=ctx_data.redacted_paths,
         resolved_config_mode=cast("ConfigMode", dry_config_mode),
-        hooks_disabled=hooks_disabled_available(dry_config_mode),
+        hooks_disabled=hooks_disabled_available(dry_config_mode, fs.help_parsed, fs.supported),
         workspace_hook_settings=workspace_hook_settings(cwd),
         security_warnings=hook_security_warnings(cwd, dry_config_mode),
     )
@@ -1393,18 +1420,21 @@ def claude_status() -> ToolResult:
         authenticated, auth_detail = auth_status()
         # Free flag-contract probe: warn if a guarantee-bearing flag is missing
         # from `claude --help` (an early drift signal), without gating execution.
-        missing = preflight.missing_expected_flags(preflight.flag_support())
+        fs = preflight.flag_support()
+        missing = preflight.missing_expected_flags(fs)
         if missing:
             flags_warning = (
                 "claude --help did not list expected flags: "
-                f"{', '.join(missing)}; the plugin may need an update for your "
-                "claude version"
+                f"{', '.join(missing)}; update Claude Code, or update this plugin "
+                "if the warning persists"
             )
+    else:
+        fs = preflight.FlagSupport(supported=frozenset(), help_parsed=False)
     d = defaults()
     resolved = ResolvedDefaults(
         config_mode=cast(
             "ConfigMode",
-            d.config_mode if d.config_mode in ("inherit", "scoped", "bare") else "inherit",
+            d.config_mode if d.config_mode in ("inherit", "scoped", "safe", "bare") else "inherit",
         ),
         access=cast("Access", d.access if d.access in ("toolless", "readonly") else "toolless"),
         model=d.model,
@@ -1430,14 +1460,13 @@ def claude_status() -> ToolResult:
         config_modes_available={
             "inherit": True,
             "scoped": True,
+            "safe": found and safe_available(fs.help_parsed, fs.supported),
             "bare": bare_available(),
         },
-        hooks_disabled=hooks_disabled_available(resolved.config_mode),
+        hooks_disabled=found
+        and hooks_disabled_available(resolved.config_mode, fs.help_parsed, fs.supported),
         resolved_defaults=resolved,
-        caveat=(
-            "OAuth-preserving + CLAUDE.md/hook-free is impossible in claude 2.1.x; "
-            "only config_mode=bare disables hooks and it needs ANTHROPIC_API_KEY."
-        ),
+        caveat="config_mode=safe disables Claude Code customizations/hooks while preserving OAuth.",
     )
     return _result(status.model_dump(mode="json", exclude_none=True))
 
@@ -1599,7 +1628,7 @@ def _capabilities_payload() -> dict:
                 optional=["workspace_root"],
             ),
         ],
-        config_modes=["inherit", "scoped", "bare"],
+        config_modes=["inherit", "scoped", "safe", "bare"],
         access_modes=["toolless", "readonly"],
         scope=[
             "independent code review of a git diff",
@@ -1610,7 +1639,7 @@ def _capabilities_payload() -> dict:
         ],
         negative_scope=[
             "does NOT grant write or Bash tools; Claude Code hooks can run outside the "
-            "tool allowlist in inherit/scoped, so use bare for untrusted workspaces",
+            "tool allowlist in inherit/scoped, so use safe or bare for untrusted workspaces",
             "does NOT act as a general Claude chat",
             "does NOT proxy Claude's own MCP tools",
             "does NOT resume a call once it ends or is cancelled",

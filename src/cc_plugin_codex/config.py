@@ -144,13 +144,28 @@ def bare_available() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def safe_available(help_parsed: bool, supported_flags: set[str] | frozenset[str]) -> bool:
+    """Whether the installed Claude CLI appears to support --safe-mode.
+
+    Fails open when help parsing failed, matching the preflight philosophy: do not
+    claim an unavailable mode when we have a real help snapshot, but do not block a
+    working CLI just because the probe could not run.
+    """
+    return (not help_parsed) or ("--safe-mode" in supported_flags)
+
+
 def hooks_disabled(mode: str) -> bool:
-    return mode == "bare"
+    return mode in ("safe", "bare")
 
 
-def hooks_disabled_available(mode: str) -> bool:
-    # hooks_disabled() is only true for "bare", which additionally needs an API key.
-    return hooks_disabled(mode) and bare_available()
+def hooks_disabled_available(
+    mode: str, help_parsed: bool = False, supported_flags: set[str] | frozenset[str] = frozenset()
+) -> bool:
+    if mode == "safe":
+        return safe_available(help_parsed, supported_flags)
+    # bare additionally needs an API key because Claude Code's bare mode does not
+    # use OAuth/keychain auth.
+    return mode == "bare" and bare_available()
 
 
 def workspace_hook_settings(cwd: str) -> list[str]:
@@ -182,14 +197,14 @@ def hook_security_warnings(cwd: str, mode: str) -> list[str]:
     return [
         "Workspace Claude settings define hooks "
         f"({', '.join(hook_files)}). Claude Code hooks are outside the tool allowlist "
-        "and may run shell in config_mode=inherit/scoped; use config_mode=bare for "
-        "untrusted workspaces."
+        "and may run shell in config_mode=inherit/scoped; use config_mode=safe or "
+        "config_mode=bare for untrusted workspaces."
     ]
 
 
 def config_mode_flags(mode: str) -> list[str]:
     # All modes drop the user's MCP fleet (a reviewer never needs it, and it is a
-    # side-effect vector). inherit/scoped keep the user's login; bare needs an API key.
+    # side-effect vector). inherit/scoped/safe keep the user's login; bare needs an API key.
     if mode == "inherit":
         return ["--no-session-persistence", "--strict-mcp-config", "--mcp-config", EMPTY_MCP]
     if mode == "scoped":
@@ -200,6 +215,14 @@ def config_mode_flags(mode: str) -> list[str]:
             "--mcp-config",
             EMPTY_MCP,
             "--no-session-persistence",
+        ]
+    if mode == "safe":
+        return [
+            "--safe-mode",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--mcp-config",
+            EMPTY_MCP,
         ]
     if mode == "bare":
         return [

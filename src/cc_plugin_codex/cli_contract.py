@@ -41,6 +41,7 @@ ALWAYS_SEND_FLAGS = frozenset(
         "--mcp-config",  # strip the user's MCP fleet (security boundary)
         "--setting-sources",  # scoped-mode isolation
         "--bare",  # bare-mode isolation
+        "--safe-mode",  # OAuth-preserving customization/hook isolation
     }
 )
 

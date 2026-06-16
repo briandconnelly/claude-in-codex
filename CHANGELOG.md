@@ -5,6 +5,18 @@ All notable changes to `cc-plugin-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
+## 0.3.0 - 2026-06-16
+
+- Added `config_mode=safe`, backed by Claude Code `--safe-mode`, to disable
+  Claude Code customizations and hooks while preserving normal authentication.
+- Added compatibility detection for `--safe-mode` so older Claude CLIs report
+  `safe` as unavailable and reject `config_mode=safe` locally before a paid call.
+- Added an opt-in live integration test for the `config_mode=safe` path that
+  skips when the installed Claude CLI does not advertise `--safe-mode`.
+- Updated status, dry-run, capabilities, and documentation to describe the new
+  safe mode and its hook posture.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-14`.
+
 ## 0.2.0 - 2026-06-06
 
 - Added prompt-injection guardrails that tell Claude to treat reviewed diffs,

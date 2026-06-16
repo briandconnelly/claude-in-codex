@@ -43,7 +43,7 @@ def test_every_emitted_flag_is_classified():
     # like values and the empty --tools argument.)
     known = set(cli_contract.ALWAYS_SEND_FLAGS) | set(cli_contract.HELP_GATED_FLAGS)
     emitted = []
-    for mode in ("inherit", "scoped", "bare"):
+    for mode in ("inherit", "scoped", "safe", "bare"):
         emitted += config_mode_flags(mode)
     for access in ("toolless", "readonly"):
         emitted += access_flags(access)

@@ -93,7 +93,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-13"
+    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-14"
 
 
 def test_success_result_dump_omits_none():

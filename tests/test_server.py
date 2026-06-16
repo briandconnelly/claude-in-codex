@@ -19,7 +19,7 @@ def _patch_full_flag_support(monkeypatch):
     import cc_plugin_codex.server as srv
 
     fs = FlagSupport(
-        supported=frozenset(ALWAYS_SEND_FLAGS) | set(HELP_GATED_FLAGS), help_parsed=True
+        supported=frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS), help_parsed=True
     )
     monkeypatch.setattr(srv.preflight, "flag_support", lambda *a, **k: fs)
 
@@ -151,7 +151,7 @@ async def test_paid_tool_output_schema_describes_both_outcomes():
 
 
 async def test_fixed_value_inputs_use_enums():
-    # F2: choices are JSON Schema enums, not prose like "inherit|scoped|bare".
+    # F2: choices are JSON Schema enums, not prose like "inherit|scoped|safe|bare".
     props = (await _tools_by_name())["claude_review_changes"].inputSchema["properties"]
     assert props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert props["detail"]["enum"] == ["summary", "full"]
@@ -162,7 +162,7 @@ async def test_fixed_value_inputs_use_enums():
                 return branch["enum"]
         return prop.get("enum")
 
-    assert _enum_in_anyof(props["config_mode"]) == ["inherit", "scoped", "bare"]
+    assert _enum_in_anyof(props["config_mode"]) == ["inherit", "scoped", "safe", "bare"]
     assert _enum_in_anyof(props["access"]) == ["toolless", "readonly"]
 
 
@@ -203,11 +203,16 @@ async def test_common_optional_params_are_described():
 
 
 async def test_status_reports_config_modes(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _patch_full_flag_support(monkeypatch)
     async with Client(mcp) as client:
         result = await client.call_tool("claude_status", {})
     data = structured(result)
     assert "config_modes_available" in data
+    assert data["config_modes_available"]["safe"] is True
     assert data["config_modes_available"]["bare"] is False
     assert data["hooks_disabled"] is False
     assert "$0.10-$0.20" in data["resolved_defaults"]["practical_min_budget_hint"]
@@ -223,13 +228,90 @@ async def test_status_does_not_claim_hooks_disabled_when_bare_unavailable(monkey
     assert data["hooks_disabled"] is False
 
 
+async def test_status_claims_hooks_disabled_for_safe_without_api_key(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _patch_full_flag_support(monkeypatch)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["resolved_defaults"]["config_mode"] == "safe"
+    assert data["config_modes_available"]["safe"] is True
+    assert data["hooks_disabled"] is True
+
+
+async def test_status_does_not_claim_safe_available_when_help_omits_flag(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+
+    class _Ver:
+        stdout = "2.0.0 (Claude Code)"
+
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: _Ver())
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--safe-mode"})
+    monkeypatch.setattr(
+        srv.preflight,
+        "flag_support",
+        lambda *a, **k: FlagSupport(supported=supported, help_parsed=True),
+    )
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["config_modes_available"]["safe"] is False
+    assert data["hooks_disabled"] is False
+    assert "--safe-mode" in data["flags_warning"]
+
+
+async def test_status_does_not_claim_safe_available_when_claude_missing(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: None)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["claude_found"] is False
+    assert data["config_modes_available"]["safe"] is False
+    assert data["hooks_disabled"] is False
+
+
+async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
+    fake_claude, monkeypatch, tmp_path
+):
+    import cc_plugin_codex.server as srv
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--safe-mode"})
+    monkeypatch.setattr(
+        srv.preflight,
+        "flag_support",
+        lambda *a, **k: FlagSupport(supported=supported, help_parsed=True),
+    )
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_ask",
+            {"prompt": "x", "config_mode": "safe", "workspace_root": str(tmp_path)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["ok"] is False
+    assert data["error"]["code"] == "unsupported_config_mode"
+    assert "--safe-mode" in data["error"]["message"]
+
+
 async def test_claude_ask_returns_normalized(fake_claude):
     async with Client(mcp) as client:
         result = await client.call_tool("claude_ask", {"prompt": "is this safe?"})
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-13"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-14"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -752,7 +834,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-13"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-14"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -862,6 +944,20 @@ async def test_dry_run_does_not_claim_hooks_disabled_when_bare_unavailable(monke
         )
     assert data["resolved_config_mode"] == "bare"
     assert data["hooks_disabled"] is False
+
+
+async def test_dry_run_claims_hooks_disabled_for_safe_without_api_key(monkeypatch, git_repo):
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _patch_full_flag_support(monkeypatch)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            )
+        )
+    assert data["resolved_config_mode"] == "safe"
+    assert data["hooks_disabled"] is True
 
 
 async def test_review_result_reports_redacted_paths(fake_claude, git_repo):
