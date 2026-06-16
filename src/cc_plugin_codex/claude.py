@@ -196,7 +196,9 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
             repair="Narrow the scope/focus or raise timeout_seconds.",
             retryable=True,
         )
-    if isinstance(env, dict) and env.get("is_error"):
+    if isinstance(env, dict) and (
+        env.get("is_error") or env.get("subtype") not in cli_contract.SUCCESS_SUBTYPES
+    ):
         subtype = str(env.get("subtype") or "").lower()
         result = str(env.get("result") or "")
         structured_blob = f"{subtype}\n{result}".lower()

@@ -218,6 +218,22 @@ def test_zero_exit_is_error_uses_failure_classifier(result, expected_code, retry
     assert res["error"].get("retryable", False) is retryable
 
 
+def test_non_success_subtype_without_is_error_uses_result_text():
+    env = _env("", is_error=False, subtype="error", result="the model declined to answer")
+    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert res["ok"] is False
+    assert res["error"]["code"] == "nonzero_exit"
+    assert "the model declined" in res["error"]["message"]
+    assert "exited 0" not in res["error"]["message"]
+
+
+def test_non_success_subtype_without_is_error_detects_contract_drift():
+    env = _env("", is_error=False, subtype="error", result="error: unknown option '--effort'")
+    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert res["ok"] is False
+    assert res["error"]["code"] == "cli_contract_changed"
+
+
 def test_normalize_string_questions_not_exploded():
     inner = {
         "summary": "x",
