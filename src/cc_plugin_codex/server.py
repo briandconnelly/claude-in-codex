@@ -70,6 +70,7 @@ from cc_plugin_codex.schemas import (
     ErrorResult,
     JobStarted,
     Meta,
+    RawDefaults,
     RawResponse,
     ResolvedDefaults,
     Scope,
@@ -449,6 +450,47 @@ def _resolve(
     return Resolved(cm, ac, mdl, budget, timeout, det, eff), None
 
 
+def _resolve_config_mode_only(
+    config_mode: str | None,
+    cwd: str,
+    scope: str | None = None,
+    base: str | None = None,
+    workspace_source: str | None = None,
+) -> tuple[str | None, dict | None]:
+    d = defaults()
+    cm = config_mode or d.config_mode
+    meta = _meta(
+        cwd,
+        cm if cm in ("inherit", "scoped", "safe", "bare") else "inherit",
+        "toolless",
+        0,
+        0,
+        None,
+        scope,
+        base,
+        workspace_source=workspace_source,
+    )
+    if cm not in ("inherit", "scoped", "safe", "bare"):
+        return None, _err(
+            "unsupported_config_mode",
+            f"Unknown config_mode '{cm}'.",
+            "Use one of: inherit, scoped, safe, bare.",
+            meta,
+            offending="config_mode",
+        )
+    if cm == "safe":
+        fs = preflight.flag_support()
+        if not safe_available(fs.help_parsed, fs.supported):
+            return None, _err(
+                "unsupported_config_mode",
+                "config_mode=safe requires a Claude CLI with --safe-mode support.",
+                "Update Claude Code, or use config_mode inherit/scoped/bare.",
+                meta,
+                offending="config_mode",
+            )
+    return cm, None
+
+
 async def _execute(
     tool,
     payload,
@@ -463,7 +505,7 @@ async def _execute(
 ) -> dict:
     prompt = build_prompt(tool, payload, context_text)
     cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
-    run = await run_claude_async(cmd, cwd=cwd, timeout_seconds=r.timeout)
+    run = await run_claude_async(cmd, cwd=cwd, timeout_seconds=r.timeout, stdin_text=prompt)
     meta = _meta(
         cwd,
         r.config_mode,
@@ -1095,7 +1137,7 @@ async def claude_review_changes_async(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
     try:
-        job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg))
+        job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
     except (FileNotFoundError, PermissionError):
         return _result(
             _err(
@@ -1296,6 +1338,7 @@ async def claude_job_cancel(
 async def claude_review_dry_run(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
     workspace_root: Annotated[
         str | None,
         Field(
@@ -1314,7 +1357,15 @@ async def claude_review_dry_run(
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
-    meta = _meta(cwd, "inherit", "toolless", 0, 0, None, scope, base, workspace_source=ws_source)
+    dry_config_mode, cm_err = _resolve_config_mode_only(
+        config_mode, cwd, scope=scope, base=base, workspace_source=ws_source
+    )
+    if cm_err:
+        return _result(cm_err)
+    assert dry_config_mode is not None
+    meta = _meta(
+        cwd, dry_config_mode, "toolless", 0, 0, None, scope, base, workspace_source=ws_source
+    )
     try:
         ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
     except InvalidBaseError:
@@ -1346,10 +1397,6 @@ async def claude_review_dry_run(
                 meta,
             )
         )
-    d = defaults()
-    dry_config_mode = (
-        d.config_mode if d.config_mode in ("inherit", "scoped", "safe", "bare") else "inherit"
-    )
     fs = preflight.flag_support()
     result = DryRunResult(
         cwd=cwd,
@@ -1450,6 +1497,57 @@ def claude_status() -> ToolResult:
     else:
         fs = preflight.FlagSupport(supported=frozenset(), help_parsed=False)
     d = defaults()
+    default_errors: list[ErrorInfo] = []
+    if d.config_mode not in ("inherit", "scoped", "safe", "bare"):
+        default_errors.append(
+            ErrorInfo(
+                code="unsupported_config_mode",
+                message=f"Unknown config_mode '{d.config_mode}'.",
+                repair="Set CC_PLUGIN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
+                offending_param="config_mode",
+            )
+        )
+    if d.access not in ("toolless", "readonly"):
+        default_errors.append(
+            ErrorInfo(
+                code="unsupported_access",
+                message=f"Unknown access '{d.access}'.",
+                repair="Set CC_PLUGIN_CODEX_ACCESS to one of: toolless, readonly.",
+                offending_param="access",
+            )
+        )
+    if d.config_mode == "safe" and found and not safe_available(fs.help_parsed, fs.supported):
+        default_errors.append(
+            ErrorInfo(
+                code="unsupported_config_mode",
+                message="config_mode=safe requires a Claude CLI with --safe-mode support.",
+                repair=(
+                    "Update Claude Code, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
+                    "inherit, scoped, or bare."
+                ),
+                offending_param="config_mode",
+            )
+        )
+    if d.config_mode == "bare" and found and not bare_available():
+        default_errors.append(
+            ErrorInfo(
+                code="api_key_missing",
+                message="config_mode=bare requires ANTHROPIC_API_KEY, which is unset.",
+                repair=(
+                    "Set ANTHROPIC_API_KEY, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
+                    "inherit, scoped, or safe."
+                ),
+                offending_param="config_mode",
+            )
+        )
+    raw_defaults = RawDefaults(
+        config_mode=d.config_mode,
+        access=d.access,
+        model=d.model,
+        effort=d.effort,
+        max_budget_usd=d.max_budget_usd,
+        timeout_seconds=d.timeout_seconds,
+    )
     resolved = ResolvedDefaults(
         config_mode=cast(
             "ConfigMode",
@@ -1475,16 +1573,18 @@ def claude_status() -> ToolResult:
         # Version is advisory, not gating: a major outside the tested range warns
         # (version_warning) but does not flip ready, so a claude major bump no
         # longer self-blocks an authenticated, installed CLI.
-        ready=bool(found and authenticated),
+        ready=bool(found and authenticated and not default_errors),
         config_modes_available={
-            "inherit": True,
-            "scoped": True,
+            "inherit": found,
+            "scoped": found,
             "safe": found and safe_available(fs.help_parsed, fs.supported),
-            "bare": bare_available(),
+            "bare": found and bare_available(),
         },
         hooks_disabled=found
         and hooks_disabled_available(resolved.config_mode, fs.help_parsed, fs.supported),
+        raw_defaults=raw_defaults,
         resolved_defaults=resolved,
+        default_errors=default_errors,
         caveat="config_mode=safe disables Claude Code customizations/hooks while preserving OAuth.",
     )
     return _result(status.model_dump(mode="json", exclude_none=True))
@@ -1510,6 +1610,9 @@ def _capabilities_payload() -> dict:
             key_optional_params=optional or [],
             returns=returns,
         )
+
+    execution_knobs = ["config_mode", "access", "model", "effort", "max_budget_usd"]
+    sync_execution_knobs = [*execution_knobs, "timeout_seconds"]
 
     result = CapabilitiesResult(
         name="cc-plugin-codex",
@@ -1546,7 +1649,7 @@ def _capabilities_payload() -> dict:
                 "Preview diff workspace, size, truncation, and redaction before paying.",
                 "diff byte count, context summary, truncation state, and redacted paths",
                 required=["scope"],
-                optional=["base", "workspace_root"],
+                optional=["base", "config_mode", "workspace_root"],
             ),
             tool_detail(
                 "claude_ask",
@@ -1557,9 +1660,7 @@ def _capabilities_payload() -> dict:
                 optional=[
                     "context",
                     "workspace_root",
-                    "effort",
-                    "max_budget_usd",
-                    "timeout_seconds",
+                    *sync_execution_knobs,
                 ],
             ),
             tool_detail(
@@ -1572,9 +1673,7 @@ def _capabilities_payload() -> dict:
                     "base",
                     "focus",
                     "workspace_root",
-                    "effort",
-                    "max_budget_usd",
-                    "timeout_seconds",
+                    *sync_execution_knobs,
                 ],
             ),
             tool_detail(
@@ -1588,9 +1687,7 @@ def _capabilities_payload() -> dict:
                     "scope",
                     "base",
                     "workspace_root",
-                    "effort",
-                    "max_budget_usd",
-                    "timeout_seconds",
+                    *sync_execution_knobs,
                 ],
             ),
             tool_detail(
@@ -1603,8 +1700,7 @@ def _capabilities_payload() -> dict:
                     "base",
                     "focus",
                     "workspace_root",
-                    "effort",
-                    "max_budget_usd",
+                    *execution_knobs,
                 ],
             ),
             tool_detail(
