@@ -81,6 +81,7 @@ def test_password_style_values_in_source_are_redacted(git_repo):
         "password = supersecretpassword123456\n"
         "passwd = anothersecret12345678\n"
         "pwd = shortsecretvalue123456\n"
+        "passphrase = sshkeypassphrase123456\n"
         "secret = shouldredact12345678\n"
     )
     subprocess.run(["git", "add", "-Nf", "config.ini"], cwd=git_repo, check=True)
@@ -88,8 +89,9 @@ def test_password_style_values_in_source_are_redacted(git_repo):
     assert "supersecretpassword123456" not in res.text
     assert "anothersecret12345678" not in res.text
     assert "shortsecretvalue123456" not in res.text
+    assert "sshkeypassphrase123456" not in res.text
     assert "shouldredact12345678" not in res.text
-    assert res.text.count("[redacted: secret value]") == 4
+    assert res.text.count("[redacted: secret value]") == 5
     assert "config.ini" in res.redacted_paths
 
 

@@ -39,7 +39,7 @@ SECRET_VALUE_PATTERNS = [
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),
     re.compile(r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/=-]{16,}"),
     re.compile(
-        r"(?i)((?:(?:api|access|secret|private)?_?(?:key|token|secret)|passw(?:or)?d|pwd)\s*[:=]\s*['\"]?)[A-Za-z0-9._~+/=-]{16,}"
+        r"(?i)((?:(?:api|access|secret|private)?_?(?:key|token|secret)|passw(?:or)?d|pwd|passphrase)\s*[:=]\s*['\"]?)[A-Za-z0-9._~+/=-]{16,}"
     ),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 ]
