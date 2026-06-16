@@ -48,7 +48,8 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 - The server redacts `.env`/secret-looking files and high-confidence token/key patterns in gathered diff lines before sending context. Treat this as best-effort defense-in-depth, not a guarantee; paid results expose affected paths in `meta.redacted_paths`.
 - Diff redaction only covers the context the server gathers. With `access=readonly`, Claude can `Read`/`Grep`/`Glob` any file in the workspace directly, so redaction does NOT protect against secrets it reads itself — use `access=toolless` (the default) when the workspace may contain secrets.
 - Free-form `prompt`/`context`/`target`/`evidence` text is capped before spend; split very large asks or use a narrower diff scope.
-- Default access is `toolless` (Claude gets no tools) and `config_mode=inherit`; both access modes withhold write/Bash tools. Claude Code hooks are outside the tool allowlist and may run in `inherit`/`scoped`; use `config_mode=bare` for untrusted workspaces when `ANTHROPIC_API_KEY` is set.
+- Default access is `toolless` (Claude gets no tools) and `config_mode=inherit`; both access modes withhold write/Bash tools. Claude Code hooks are outside the tool allowlist and may run in `inherit`/`scoped`; use `config_mode=safe` or `config_mode=bare` for untrusted workspaces.
+- Prefer `config_mode=safe` when preserving normal Claude authentication matters; use `config_mode=bare` when API-key-backed maximum isolation is desired.
 - When client MCP roots are available, explicit `workspace_root` values must be inside one of those roots; omit `workspace_root` to use the first root.
 - Cap cost/time with `max_budget_usd` and `timeout_seconds` for large reviews.
 - Reviews run at `effort=xhigh` by default for depth. Lower `effort` to `high`/`medium` to save cost on routine changes; raise to `max` for the most subtle ones.
