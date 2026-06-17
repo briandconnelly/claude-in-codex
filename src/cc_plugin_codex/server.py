@@ -43,10 +43,12 @@ from cc_plugin_codex.config import (
 )
 from cc_plugin_codex.context import (
     MAX_DIFF_BYTES,
+    GitUnavailableError,
     InvalidBaseError,
     InvalidHeadError,
     InvalidPathsError,
     InvalidScopeError,
+    NotAGitRepoError,
     gather_context,
     normalize_paths,
 )
@@ -235,6 +237,21 @@ _INVALID_HEAD_REPAIR = (
 )
 
 
+_INVALID_BASE_REPAIR = (
+    "Use an existing git ref matching [A-Za-z0-9._/-]+ that does not start with '-'."
+)
+
+
+def _invalid_base_error(meta: Meta, base: str | None) -> dict:
+    return _err(
+        "invalid_base",
+        f"Invalid base ref '{base}'.",
+        _INVALID_BASE_REPAIR,
+        meta,
+        offending="base",
+    )
+
+
 def _invalid_head_error(meta: Meta, message: str | None = None) -> dict:
     return _err(
         "invalid_head",
@@ -242,6 +259,56 @@ def _invalid_head_error(meta: Meta, message: str | None = None) -> dict:
         _INVALID_HEAD_REPAIR,
         meta,
         offending="head",
+    )
+
+
+def _invalid_scope_error(meta: Meta, scope: str | None, *, scope_optional: bool = False) -> dict:
+    repair = "Use working_tree, staged, or branch."
+    if scope_optional:
+        repair = "Use working_tree, staged, or branch (or omit scope)."
+    return _err(
+        "invalid_scope",
+        f"Invalid scope '{scope}'.",
+        repair,
+        meta,
+        offending="scope",
+    )
+
+
+def _context_error_result(
+    exc: Exception,
+    meta: Meta,
+    *,
+    scope: str | None,
+    base: str | None,
+    head: str | None,
+    scope_optional: bool = False,
+) -> dict:
+    if isinstance(exc, InvalidBaseError):
+        return _invalid_base_error(meta, base)
+    if isinstance(exc, InvalidHeadError):
+        return _invalid_head_error(meta, f"Invalid head ref '{head}'.")
+    if isinstance(exc, InvalidScopeError):
+        return _invalid_scope_error(meta, scope, scope_optional=scope_optional)
+    if isinstance(exc, NotAGitRepoError):
+        return _err(
+            "not_a_git_repo",
+            "Workspace is not a git repository.",
+            "Run reviews from inside a git repository, or pass workspace_root pointing at one.",
+            meta,
+        )
+    if isinstance(exc, GitUnavailableError):
+        return _err(
+            "git_unavailable",
+            "Git executable is not available.",
+            "Install git and ensure it is on PATH.",
+            meta,
+        )
+    return _err(
+        "internal_error",
+        f"git failed: {exc}",
+        "Ensure cwd is a git repo and base ref exists.",
+        meta,
     )
 
 
@@ -789,37 +856,8 @@ async def claude_review_changes(
         ctx_data = await run_sync(
             lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
-    except InvalidBaseError:
-        return _result(
-            _err(
-                "invalid_base",
-                f"Invalid base ref '{base}'.",
-                "Use an existing git ref matching [A-Za-z0-9._/-]+ that does not start with '-'.",
-                meta,
-                offending="base",
-            )
-        )
-    except InvalidHeadError:
-        return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
-    except InvalidScopeError:
-        return _result(
-            _err(
-                "invalid_scope",
-                f"Invalid scope '{scope}'.",
-                "Use working_tree, staged, or branch.",
-                meta,
-                offending="scope",
-            )
-        )
-    except RuntimeError as e:
-        return _result(
-            _err(
-                "internal_error",
-                f"git failed: {e}",
-                "Ensure cwd is a git repo and base ref exists.",
-                meta,
-            )
-        )
+    except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
+        return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
     if ctx_data.truncated:
         meta = _meta(
             cwd,
@@ -1022,36 +1060,15 @@ async def claude_adversarial_review(
                     cwd, scope=scope, base=base, paths=effective_paths, head=head
                 )
             )
-        except InvalidBaseError:
+        except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
             return _result(
-                _err(
-                    "invalid_base",
-                    f"Invalid base ref '{base}'.",
-                    "Use an existing git ref matching [A-Za-z0-9._/-]+ that does "
-                    "not start with '-'.",
+                _context_error_result(
+                    exc,
                     meta,
-                    offending="base",
-                )
-            )
-        except InvalidHeadError:
-            return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
-        except InvalidScopeError:
-            return _result(
-                _err(
-                    "invalid_scope",
-                    f"Invalid scope '{scope}'.",
-                    "Use working_tree, staged, or branch (or omit scope).",
-                    meta,
-                    offending="scope",
-                )
-            )
-        except RuntimeError as e:
-            return _result(
-                _err(
-                    "internal_error",
-                    f"git failed: {e}",
-                    "Ensure cwd is a git repo and base ref exists.",
-                    meta,
+                    scope=scope,
+                    base=base,
+                    head=head,
+                    scope_optional=True,
                 )
             )
         if ctx_data.truncated:
@@ -1237,37 +1254,8 @@ async def claude_review_changes_async(
         ctx_data = await run_sync(
             lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
-    except InvalidBaseError:
-        return _result(
-            _err(
-                "invalid_base",
-                f"Invalid base ref '{base}'.",
-                "Use an existing git ref matching [A-Za-z0-9._/-]+ that does not start with '-'.",
-                meta,
-                offending="base",
-            )
-        )
-    except InvalidHeadError:
-        return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
-    except InvalidScopeError:
-        return _result(
-            _err(
-                "invalid_scope",
-                f"Invalid scope '{scope}'.",
-                "Use working_tree, staged, or branch.",
-                meta,
-                offending="scope",
-            )
-        )
-    except RuntimeError as e:
-        return _result(
-            _err(
-                "internal_error",
-                f"git failed: {e}",
-                "Ensure cwd is a git repo and base ref exists.",
-                meta,
-            )
-        )
+    except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
+        return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
     if ctx_data.truncated:
         meta = _meta(
             cwd,
@@ -1599,37 +1587,8 @@ async def claude_review_dry_run(
         ctx_data = await run_sync(
             lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
-    except InvalidBaseError:
-        return _result(
-            _err(
-                "invalid_base",
-                f"Invalid base ref '{base}'.",
-                "Use an existing git ref matching [A-Za-z0-9._/-]+ that does not start with '-'.",
-                meta,
-                offending="base",
-            )
-        )
-    except InvalidHeadError:
-        return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
-    except InvalidScopeError:
-        return _result(
-            _err(
-                "invalid_scope",
-                f"Invalid scope '{scope}'.",
-                "Use working_tree, staged, or branch.",
-                meta,
-                offending="scope",
-            )
-        )
-    except RuntimeError as e:
-        return _result(
-            _err(
-                "internal_error",
-                f"git failed: {e}",
-                "Ensure cwd is a git repo and base ref exists.",
-                meta,
-            )
-        )
+    except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
+        return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
     fs = preflight.flag_support()
     effective_head, diff_range = branch_range(scope, base, head)
     result = DryRunResult(

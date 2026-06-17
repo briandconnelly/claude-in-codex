@@ -5,10 +5,12 @@ import pytest
 from cc_plugin_codex.context import (
     ContextResult,
     DiffOptions,
+    GitUnavailableError,
     InvalidBaseError,
     InvalidHeadError,
     InvalidPathsError,
     InvalidScopeError,
+    NotAGitRepoError,
     _diff_args,
     gather_context,
 )
@@ -208,6 +210,56 @@ def test_git_timeout_is_bounded(monkeypatch, git_repo):
     monkeypatch.setattr(ctx.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out after 2s"):
         gather_context(str(git_repo), scope="working_tree", base="main")
+
+
+def test_git_invocations_force_c_locale(monkeypatch, git_repo):
+    import cc_plugin_codex.context as ctx
+
+    envs = []
+
+    def fake_run(*args, **kwargs):
+        envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setenv("PATH", "preserved-path")
+    monkeypatch.setattr(ctx.subprocess, "run", fake_run)
+    gather_context(str(git_repo), scope="working_tree", base="main")
+    assert envs
+    assert all(env["LC_ALL"] == "C" for env in envs)
+    assert all(env["LANG"] == "C" for env in envs)
+    assert all(env["PATH"] == "preserved-path" for env in envs)
+
+
+def test_non_git_working_tree_raises_not_a_git_repo(tmp_path):
+    with pytest.raises(NotAGitRepoError):
+        gather_context(str(tmp_path), scope="working_tree", base="main")
+
+
+def test_non_git_branch_scope_raises_not_a_git_repo(tmp_path):
+    with pytest.raises(NotAGitRepoError):
+        gather_context(str(tmp_path), scope="branch", base="main")
+
+
+def test_missing_git_raises_git_unavailable(monkeypatch, git_repo):
+    import cc_plugin_codex.context as ctx
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(ctx.subprocess, "run", fake_run)
+    with pytest.raises(GitUnavailableError):
+        gather_context(str(git_repo), scope="working_tree", base="main")
+
+
+def test_missing_git_for_branch_scope_raises_git_unavailable(monkeypatch, git_repo):
+    import cc_plugin_codex.context as ctx
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(ctx.subprocess, "run", fake_run)
+    with pytest.raises(GitUnavailableError):
+        gather_context(str(git_repo), scope="branch", base="main")
 
 
 def test_size_cap_truncates(git_repo, monkeypatch):

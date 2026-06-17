@@ -368,7 +368,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-18"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-19"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1012,7 +1012,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-18"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-19"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1671,6 +1671,45 @@ async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_r
             )
         )
     assert data["error"]["code"] == "internal_error"
+
+
+@pytest.mark.parametrize(
+    "exc_type,code,repair",
+    [
+        (
+            "NotAGitRepoError",
+            "not_a_git_repo",
+            "Run reviews from inside a git repository, or pass workspace_root pointing at one.",
+        ),
+        ("GitUnavailableError", "git_unavailable", "Install git and ensure it is on PATH."),
+    ],
+)
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("claude_review_changes", {"scope": "working_tree"}),
+        ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_review_dry_run", {"scope": "working_tree"}),
+    ],
+)
+async def test_git_environment_errors_from_gather_context(
+    tool, args, exc_type, code, repair, monkeypatch, git_repo, tmp_path
+):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    exc = getattr(srv, exc_type)("boom")
+    monkeypatch.setattr(srv, "gather_context", lambda *a, **k: (_ for _ in ()).throw(exc))
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                tool, {**args, "workspace_root": str(git_repo)}, raise_on_error=False
+            )
+        )
+    assert data["error"]["code"] == code
+    assert data["error"]["repair"] == repair
+    assert data["error"]["retryable"] is False
 
 
 @pytest.mark.parametrize(
