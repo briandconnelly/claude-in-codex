@@ -23,6 +23,10 @@ class InvalidBaseError(ValueError):
     """Raised when the base ref for scope=branch is malformed/unsafe."""
 
 
+class InvalidPathsError(ValueError):
+    """Raised when one or more git pathspec filters are malformed/unsafe."""
+
+
 def _valid_ref(ref: str) -> bool:
     """A conservative git ref/commit check: no leading dash, no option/shell chars."""
     return bool(ref) and not ref.startswith("-") and bool(_REF_RE.match(ref))
@@ -53,6 +57,33 @@ class ContextResult:
     truncation_hint: str | None = None
     redacted_paths: list[str] = field(default_factory=list)
     diff_bytes: int = 0  # full (pre-truncation) UTF-8 byte size of the redacted diff
+
+
+@dataclass(frozen=True)
+class DiffOptions:
+    scope: str
+    base: str
+    paths: list[str] | None = None
+
+
+def normalize_paths(paths: list[str] | None) -> list[str] | None:
+    """Validate path filters before they reach git argv."""
+    if not paths:
+        return None
+    normalized: list[str] = []
+    for path in paths:
+        if path == "":
+            raise InvalidPathsError("paths entries must not be empty")
+        if path.startswith("-"):
+            raise InvalidPathsError(f"path must not start with '-': {path!r}")
+        if path.startswith(":"):
+            raise InvalidPathsError(f"git pathspec magic is not supported: {path!r}")
+        if path.startswith("/"):
+            raise InvalidPathsError(f"path must be repo-relative: {path!r}")
+        if any(segment == ".." for segment in path.split("/")):
+            raise InvalidPathsError(f"path must not contain '..' segments: {path!r}")
+        normalized.append(path)
+    return normalized
 
 
 def _git(cwd: str, *args: str) -> str:
@@ -95,28 +126,30 @@ def _base_exists(cwd: str, base: str) -> bool:
     return proc.returncode == 0
 
 
-def _diff_args(scope: str, base: str) -> list[str]:
+def _diff_args(opts: DiffOptions) -> list[str]:
     # --no-ext-diff + --no-textconv prevent configured external/textconv diff drivers
     # from executing commands during our own git call.
     common = ["diff", "--no-ext-diff", "--no-textconv"]
-    if scope == "working_tree":
-        return common
-    if scope == "staged":
-        return [*common, "--cached"]
-    if scope == "branch":
+    if opts.scope == "working_tree":
+        args = common
+    elif opts.scope == "staged":
+        args = [*common, "--cached"]
+    elif opts.scope == "branch":
+        base = opts.base
         if not _valid_ref(base):
             raise InvalidBaseError(f"invalid base ref: {base!r}")
         # --end-of-options ensures the ref can never be parsed as a git option.
-        return [*common, "--end-of-options", f"{base}...HEAD"]
-    raise InvalidScopeError(f"invalid scope: {scope}")
+        args = [*common, "--end-of-options", f"{base}...HEAD"]
+    else:
+        raise InvalidScopeError(f"invalid scope: {opts.scope}")
+    if opts.paths:
+        args = [*args, "--", *opts.paths]
+    return args
 
 
 def _summary(cwd: str, diff_args: list[str]) -> ContextSummary:
     summary_args = list(diff_args)
-    if "--end-of-options" in summary_args:
-        summary_args.insert(summary_args.index("--end-of-options"), "--numstat")
-    else:
-        summary_args.append("--numstat")
+    summary_args.insert(1, "--numstat")
     numstat = _git(cwd, *summary_args)
     files = added = removed = 0
     for line in numstat.splitlines():
@@ -187,8 +220,11 @@ def _redact(diff: str) -> tuple[str, list[str]]:
     return "\n".join(out_lines), redacted
 
 
-def gather_context(cwd: str, scope: str, base: str) -> ContextResult:
-    diff_args = _diff_args(scope, base)  # raises InvalidScopeError / InvalidBaseError
+def gather_context(
+    cwd: str, scope: str, base: str, paths: list[str] | None = None
+) -> ContextResult:
+    opts = DiffOptions(scope=scope, base=base, paths=normalize_paths(paths))
+    diff_args = _diff_args(opts)  # raises InvalidScopeError / InvalidBaseError
     if scope == "branch" and not _base_exists(cwd, base):
         raise InvalidBaseError(f"base ref does not resolve to a commit: {base!r}")
     summary = _summary(cwd, diff_args)
@@ -202,8 +238,9 @@ def gather_context(cwd: str, scope: str, base: str) -> ContextResult:
         text = encoded[:MAX_DIFF_BYTES].decode("utf-8", "ignore")
         truncated = True
         hint = (
-            f"diff exceeded {MAX_DIFF_BYTES} bytes; use scope=staged, choose "
-            "a closer branch base, or call claude_ask with selected context"
+            f"diff exceeded {MAX_DIFF_BYTES} bytes; retry with paths=[...], use "
+            "scope=staged, choose a closer branch base, or call claude_ask with "
+            "selected context"
         )
     return ContextResult(
         text=text,

@@ -5,6 +5,16 @@ All notable changes to `cc-plugin-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
+## 0.5.0 - 2026-06-17
+
+- Added optional `paths` filtering to diff-driven review tools so callers can
+  review a repo-relative subset of a large diff without leaving the MCP review
+  workflow.
+- Added structured `invalid_paths` repair errors, filtered diff metadata echo,
+  dry-run filter reporting, and truncation hints that name `paths=[...]` as the
+  in-tool escape hatch.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-16`.
+
 ## 0.4.0 - 2026-06-16
 
 - Passed Claude prompts to the `claude` CLI over stdin instead of argv, avoiding

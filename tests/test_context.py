@@ -4,7 +4,9 @@ import pytest
 
 from cc_plugin_codex.context import (
     ContextResult,
+    DiffOptions,
     InvalidBaseError,
+    InvalidPathsError,
     InvalidScopeError,
     _diff_args,
     gather_context,
@@ -19,6 +21,46 @@ def test_working_tree_diff(git_repo):
     assert res.summary.lines_added >= 1
     assert res.truncated is False
     assert res.diff_bytes == len(res.text.encode("utf-8"))
+
+
+def test_working_tree_diff_can_be_filtered_by_paths(git_repo):
+    (git_repo / "other.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "-Nf", "other.py"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main", paths=["other.py"])
+    assert "other.py" in res.text
+    assert "app.py" not in res.text
+    assert res.summary.files_changed == 1
+    assert res.summary.lines_added == 1
+
+
+def test_paths_none_and_empty_preserve_unfiltered_behavior(git_repo):
+    unfiltered = gather_context(str(git_repo), scope="working_tree", base="main")
+    none_paths = gather_context(str(git_repo), scope="working_tree", base="main", paths=None)
+    empty_paths = gather_context(str(git_repo), scope="working_tree", base="main", paths=[])
+    assert none_paths.text == unfiltered.text
+    assert none_paths.summary == unfiltered.summary
+    assert empty_paths.text == unfiltered.text
+    assert empty_paths.summary == unfiltered.summary
+
+
+@pytest.mark.parametrize("path", ["", "-bad", "/tmp/file.py", "../x.py", "src/../x.py", ":!vendor"])
+def test_invalid_paths_are_rejected_before_git(monkeypatch, git_repo, path):
+    import cc_plugin_codex.context as ctx
+
+    def fail_git(*_args, **_kwargs):
+        raise AssertionError("git should not be called for invalid paths")
+
+    monkeypatch.setattr(ctx, "_git", fail_git)
+    with pytest.raises(InvalidPathsError):
+        gather_context(str(git_repo), scope="working_tree", base="main", paths=[path])
+
+
+def test_dotdot_substrings_are_valid_path_names(git_repo):
+    path = git_repo / "foo..bar.py"
+    path.write_text("value = 1\n")
+    subprocess.run(["git", "add", "-Nf", path.name], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main", paths=[path.name])
+    assert "foo..bar.py" in res.text
 
 
 def test_diff_bytes_reports_full_size_when_truncated(git_repo, monkeypatch):
@@ -152,8 +194,24 @@ def test_size_cap_truncates(git_repo, monkeypatch):
     res = gather_context(str(git_repo), scope="working_tree", base="main")
     assert res.truncated is True
     assert res.truncation_hint
+    assert "paths=[...]" in res.truncation_hint
     assert "scope=staged" in res.truncation_hint
     assert "review specific files" not in res.truncation_hint
+
+
+def test_filtered_small_file_avoids_large_unfiltered_truncation(git_repo, monkeypatch):
+    import cc_plugin_codex.context as ctx
+
+    monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 500)
+    (git_repo / "big.py").write_text("x = 1\n" * 1000)
+    (git_repo / "small.py").write_text("ok = True\n")
+    subprocess.run(["git", "add", "-Nf", "big.py", "small.py"], cwd=git_repo, check=True)
+    unfiltered = gather_context(str(git_repo), scope="working_tree", base="main")
+    filtered = gather_context(str(git_repo), scope="working_tree", base="main", paths=["small.py"])
+    assert unfiltered.truncated is True
+    assert filtered.truncated is False
+    assert "small.py" in filtered.text
+    assert "big.py" not in filtered.text
 
 
 def test_stage_env_file_redacted(git_repo):
@@ -178,13 +236,13 @@ def test_pem_file_redacted(git_repo):
 
 
 def test_diff_args_include_no_textconv():
-    assert "--no-textconv" in _diff_args("working_tree", "main")
-    assert "--no-textconv" in _diff_args("staged", "main")
+    assert "--no-textconv" in _diff_args(DiffOptions("working_tree", "main"))
+    assert "--no-textconv" in _diff_args(DiffOptions("staged", "main"))
 
 
 def test_diff_args_bad_base_raises_invalid_base():
     with pytest.raises(InvalidBaseError):
-        _diff_args("branch", "-badref")
+        _diff_args(DiffOptions("branch", "-badref"))
 
 
 def test_branch_base_rejects_nonexistent_ref(git_repo):
@@ -210,6 +268,28 @@ def test_branch_scope_diff_summarizes_valid_branch(git_repo):
     assert res.summary.lines_added == 1
 
 
+def test_branch_scope_paths_filter_diff_and_numstat(git_repo):
+    base = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)
+    (git_repo / "src").mkdir()
+    (git_repo / "docs").mkdir()
+    (git_repo / "src" / "feature.py").write_text("value = 1\n")
+    (git_repo / "docs" / "note.md").write_text("note\n")
+    subprocess.run(["git", "add", "src/feature.py", "docs/note.md"], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "branch changes"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="branch", base=base, paths=["src"])
+    assert "src/feature.py" in res.text
+    assert "docs/note.md" not in res.text
+    assert res.summary.files_changed == 1
+    assert res.summary.lines_added == 1
+
+
 def test_diff_args_bad_scope_raises_invalid_scope():
     with pytest.raises(InvalidScopeError):
-        _diff_args("nonsense", "main")
+        _diff_args(DiffOptions("nonsense", "main"))

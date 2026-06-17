@@ -203,6 +203,13 @@ async def test_common_optional_params_are_described():
         assert props["max_budget_usd"]["description"]
         assert props["timeout_seconds"]["description"]
     assert tools["claude_adversarial_review"].inputSchema["properties"]["base"]["description"]
+    for name in (
+        "claude_review_changes",
+        "claude_review_changes_async",
+        "claude_adversarial_review",
+        "claude_review_dry_run",
+    ):
+        assert tools[name].inputSchema["properties"]["paths"]["description"]
 
 
 async def test_status_reports_config_modes(monkeypatch):
@@ -347,7 +354,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-15"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-16"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -546,6 +553,25 @@ async def test_review_changes_runs_in_git_repo(fake_claude, monkeypatch, git_rep
     assert data["verdict"] == "concerns"
 
 
+async def test_review_changes_filters_paths_and_echoes_meta(fake_claude, git_repo):
+    import subprocess as _sp
+
+    (git_repo / "other.py").write_text("value = 1\n")
+    _sp.run(["git", "add", "-Nf", "other.py"], cwd=git_repo, check=True)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {
+                "scope": "working_tree",
+                "paths": ["other.py"],
+                "workspace_root": str(git_repo),
+            },
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert data["meta"]["paths"] == ["other.py"]
+
+
 async def test_review_changes_empty_diff_skips_paid_call(monkeypatch, git_repo):
     import subprocess as _sp
 
@@ -566,6 +592,39 @@ async def test_review_changes_empty_diff_skips_paid_call(monkeypatch, git_repo):
     assert data["verdict"] == "pass"
     assert "No changes" in data["summary"]
     assert data["context_summary"]["files_changed"] == 0
+
+
+async def test_review_changes_empty_filtered_diff_is_transparent(monkeypatch, git_repo):
+    import cc_plugin_codex.server as srv
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "paths": ["missing.py"], "workspace_root": str(git_repo)},
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert data["meta"]["paths"] == ["missing.py"]
+    assert "matched paths" in data["summary"]
+    assert data["context_summary"]["files_changed"] == 0
+
+
+async def test_invalid_paths_are_structured_error(fake_claude, git_repo):
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "paths": ["../secret"], "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_paths"
+    assert data["error"]["offending_param"] == "paths"
+    assert "repo-relative" in data["error"]["repair"]
 
 
 async def test_adversarial_empty_attached_diff_skips_paid_call(monkeypatch, git_repo):
@@ -596,6 +655,19 @@ async def test_adversarial_without_scope_still_calls_claude(fake_claude, tmp_pat
             "claude_adversarial_review", {"target": "review plan", "workspace_root": str(tmp_path)}
         )
     assert structured(result)["ok"] is True
+
+
+async def test_adversarial_paths_without_scope_is_invalid(fake_claude, tmp_path):
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_adversarial_review",
+            {"target": "review plan", "paths": ["src"], "workspace_root": str(tmp_path)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_paths"
+    assert data["error"]["offending_param"] == "paths"
 
 
 async def test_adversarial_invalid_scope_param_rejected_by_schema(
@@ -924,7 +996,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-15"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-16"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -953,7 +1025,10 @@ async def test_capabilities_tool_returns_structured_contract():
     assert {"config_mode", "access", "model", "timeout_seconds"} <= set(
         details["claude_review_changes"]["key_optional_params"]
     )
-    assert "config_mode" in details["claude_review_dry_run"]["key_optional_params"]
+    assert "paths" in details["claude_review_changes"]["key_optional_params"]
+    assert "paths" in details["claude_review_changes_async"]["key_optional_params"]
+    assert "paths" in details["claude_adversarial_review"]["key_optional_params"]
+    assert {"config_mode", "paths"} <= set(details["claude_review_dry_run"]["key_optional_params"])
     assert details["claude_status"]["cost"] == "free"
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
@@ -995,6 +1070,27 @@ async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
     assert data["truncated"] is False
     assert data["context_summary"]["files_changed"] == 1
     assert "fingerprint" in data
+
+
+async def test_dry_run_echoes_paths_and_filtered_summary(monkeypatch, git_repo):
+    import subprocess as _sp
+
+    (git_repo / "other.py").write_text("value = 1\n")
+    _sp.run(["git", "add", "-Nf", "other.py"], cwd=git_repo, check=True)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run",
+                {
+                    "scope": "working_tree",
+                    "paths": ["other.py"],
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["paths"] == ["other.py"]
+    assert data["context_summary"]["files_changed"] == 1
 
 
 async def test_dry_run_reports_redaction_count(monkeypatch, git_repo):
@@ -1184,9 +1280,10 @@ async def test_async_result_reports_redacted_paths(monkeypatch, git_repo, tmp_pa
         started = structured(
             await client.call_tool(
                 "claude_review_changes_async",
-                {"scope": "working_tree", "workspace_root": str(git_repo)},
+                {"scope": "working_tree", "paths": [".env"], "workspace_root": str(git_repo)},
             )
         )
+        assert started["meta"]["paths"] == [".env"]
         job_id = started["job_id"]
         deadline = _time.time() + 5
         while _time.time() < deadline:
@@ -1203,6 +1300,7 @@ async def test_async_result_reports_redacted_paths(monkeypatch, git_repo, tmp_pa
                 "claude_job_result", {"job_id": job_id, "workspace_root": str(git_repo)}
             )
         )
+    assert result["meta"]["paths"] == [".env"]
     assert ".env" in result["meta"]["redacted_paths"]
 
 
