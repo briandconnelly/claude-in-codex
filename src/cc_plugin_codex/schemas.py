@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-15"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-16"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -51,6 +51,7 @@ ErrorCode = Literal[
     "unsupported_access",
     "invalid_scope",
     "invalid_base",
+    "invalid_paths",
     "invalid_workspace_root",
     "workspace_outside_roots",
     "context_too_large",
@@ -115,6 +116,7 @@ class Meta(BaseModel):
     access: Access
     scope: str | None = None
     base: str | None = None
+    paths: list[str] | None = None
     timeout_seconds: int
     elapsed_ms: int
     # The effective (env-defaulted + clamped) value passed to claude as
@@ -298,6 +300,7 @@ class DryRunResult(BaseModel):
     workspace_warning: str | None = None
     scope: str
     base: str | None = None
+    paths: list[str] = Field(default_factory=list)
     context_summary: ContextSummary
     diff_bytes: int  # full UTF-8 size of the redacted diff that would be sent
     max_diff_bytes: int  # the server's truncation threshold

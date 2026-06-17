@@ -50,6 +50,14 @@ def _str_list(value: Any) -> list[str]:
 
 def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
     parts = [_LEAD.get(tool, _LEAD["claude_ask"])]
+    paths = payload.get("paths")
+    paths_note = ""
+    if paths:
+        paths_note = (
+            f" Path filter applied to the server-provided diff: {paths!r}. "
+            "Treat findings as scoped to those paths; access=readonly may still "
+            "allow direct workspace reads outside this filter."
+        )
     if tool == "claude_ask":
         parts.append(payload["prompt"])
         if payload.get("context"):
@@ -57,13 +65,13 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
     elif tool == "claude_review_changes":
         if payload.get("focus"):
             parts.append(f"Focus especially on: {payload['focus']}.")
-        parts.append(f"\nChanges (scope={payload.get('scope')}):\n{context_text}")
+        parts.append(f"\nChanges (scope={payload.get('scope')}):{paths_note}\n{context_text}")
     elif tool == "claude_adversarial_review":
         parts.append(f"\nTarget:\n{payload['target']}")
         if payload.get("evidence"):
             parts.append(f"\nEvidence:\n{payload['evidence']}")
         if context_text:
-            parts.append(f"\nRelated changes:\n{context_text}")
+            parts.append(f"\nRelated changes:{paths_note}\n{context_text}")
     parts.append("\n" + _SCHEMA_INSTRUCTION)
     return "\n".join(parts)
 

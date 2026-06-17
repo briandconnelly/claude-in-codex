@@ -187,6 +187,7 @@ class JobConfig:
     workspace_source: str | None
     context_summary: ContextSummary | None
     requested_max_budget_usd: float | None = None
+    paths: list[str] | None = None
     redacted_paths: list[str] | None = None
     security_warnings: list[str] | None = None
 
@@ -254,6 +255,7 @@ def start_job(
             "workspace_source": cfg.workspace_source,
             "cwd": cwd,
             "requested_max_budget_usd": cfg.requested_max_budget_usd,
+            "paths": cfg.paths,
             "redacted_paths": cfg.redacted_paths or [],
             "security_warnings": cfg.security_warnings or [],
         },
@@ -390,6 +392,7 @@ def _build_meta(meta: dict) -> Meta:
         access=c.get("access", "toolless"),
         scope=c.get("scope"),
         base=c.get("base"),
+        paths=c.get("paths"),
         timeout_seconds=c.get("timeout_seconds", max_seconds()),
         requested_max_budget_usd=c.get("requested_max_budget_usd"),
         redacted_paths=c.get("redacted_paths") or [],

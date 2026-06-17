@@ -44,8 +44,10 @@ from cc_plugin_codex.config import (
 from cc_plugin_codex.context import (
     MAX_DIFF_BYTES,
     InvalidBaseError,
+    InvalidPathsError,
     InvalidScopeError,
     gather_context,
+    normalize_paths,
 )
 from cc_plugin_codex.jobs import JobConfig
 from cc_plugin_codex.normalize import apply_cost_usage, build_prompt, normalize_envelope
@@ -148,6 +150,7 @@ def _meta(
     exit_code: int | None,
     scope: str | None = None,
     base: str | None = None,
+    paths: list[str] | None = None,
     truncated: bool = False,
     hint: str | None = None,
     workspace_source: str | None = None,
@@ -162,6 +165,7 @@ def _meta(
         access=cast("Access", access),
         scope=scope,
         base=base,
+        paths=paths,
         timeout_seconds=timeout,
         elapsed_ms=elapsed,
         command_exit_code=exit_code,
@@ -195,6 +199,24 @@ def _err(
         ),
         meta=meta,
     ).model_dump(mode="json", exclude_none=True)
+
+
+def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
+    return _err(
+        "invalid_paths",
+        message or "Invalid paths filter.",
+        "Pass plain repo-relative paths such as paths=['src', 'tests/test_context.py']; "
+        "omit paths or pass [] for an unfiltered diff.",
+        meta,
+        offending="paths",
+    )
+
+
+def _resolve_paths(paths: list[str] | None, meta: Meta) -> tuple[list[str] | None, dict | None]:
+    try:
+        return normalize_paths(paths), None
+    except InvalidPathsError as exc:
+        return None, _invalid_paths_error(meta, str(exc))
 
 
 def _workspace_error(code: str, workspace_root: str | None = None) -> dict:
@@ -308,12 +330,16 @@ def _empty_diff_result(
     tool: str,
     meta: Meta,
     context_summary,
+    paths: list[str] | None = None,
     verdict: Verdict = "pass",
     confidence: Confidence = "high",
 ) -> dict:
+    summary = "No changes in scope; skipped Claude call."
+    if paths:
+        summary = "No changes matched paths; skipped Claude call."
     result = SuccessResult(
         tool=tool,
-        summary="No changes in scope; skipped Claude call.",
+        summary=summary,
         verdict=verdict,
         confidence=confidence,
         raw_response=RawResponse(),
@@ -344,6 +370,7 @@ def _resolve(
     cwd,
     scope=None,
     base=None,
+    paths: list[str] | None = None,
     workspace_source=None,
     effort=None,
 ):
@@ -372,6 +399,7 @@ def _resolve(
             None,
             scope,
             base,
+            paths,
             workspace_source=workspace_source,
             requested_budget=budget,
         )
@@ -392,6 +420,7 @@ def _resolve(
             None,
             scope,
             base,
+            paths,
             workspace_source=workspace_source,
             requested_budget=budget,
         )
@@ -415,6 +444,7 @@ def _resolve(
                 None,
                 scope,
                 base,
+                paths,
                 workspace_source=workspace_source,
                 requested_budget=budget,
             )
@@ -435,6 +465,7 @@ def _resolve(
         None,
         scope,
         base,
+        paths,
         workspace_source=workspace_source,
         requested_budget=budget,
         security_warnings=hook_security_warnings(cwd, cm),
@@ -455,6 +486,7 @@ def _resolve_config_mode_only(
     cwd: str,
     scope: str | None = None,
     base: str | None = None,
+    paths: list[str] | None = None,
     workspace_source: str | None = None,
 ) -> tuple[str | None, dict | None]:
     d = defaults()
@@ -468,6 +500,7 @@ def _resolve_config_mode_only(
         None,
         scope,
         base,
+        paths,
         workspace_source=workspace_source,
     )
     if cm not in ("inherit", "scoped", "safe", "bare"):
@@ -498,6 +531,7 @@ async def _execute(
     cwd,
     scope=None,
     base=None,
+    paths: list[str] | None = None,
     context_text="",
     context_summary=None,
     workspace_source=None,
@@ -515,6 +549,7 @@ async def _execute(
         run.exit_code,
         scope,
         base,
+        paths,
         workspace_source=workspace_source,
         requested_budget=r.budget,
         redacted_paths=redacted_paths,
@@ -620,6 +655,16 @@ async def claude_review_changes(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
     focus: Annotated[str | None, Field(description="e.g. 'security', 'tests'.")] = None,
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional plain repo-relative paths to filter the server-provided diff. "
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
+            )
+        ),
+    ] = None,
     workspace_root: Annotated[
         str | None,
         Field(
@@ -669,6 +714,7 @@ async def claude_review_changes(
         cwd,
         scope=scope,
         base=base,
+        paths=paths,
         workspace_source=ws_source,
         effort=effort,
     )
@@ -683,11 +729,17 @@ async def claude_review_changes(
         None,
         scope,
         base,
+        paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
     )
+    effective_paths, paths_err = _resolve_paths(paths, meta)
+    if paths_err:
+        return _result(paths_err)
     try:
-        ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
+        ctx_data = await run_sync(
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+        )
     except InvalidBaseError:
         return _result(
             _err(
@@ -727,6 +779,7 @@ async def claude_review_changes(
             None,
             scope,
             base,
+            effective_paths,
             truncated=True,
             hint=ctx_data.truncation_hint,
             workspace_source=ws_source,
@@ -750,20 +803,24 @@ async def claude_review_changes(
         None,
         scope,
         base,
+        effective_paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
-        return _result(_empty_diff_result("claude_review_changes", meta, ctx_data.summary))
+        return _result(
+            _empty_diff_result("claude_review_changes", meta, ctx_data.summary, effective_paths)
+        )
     out = await _execute(
         "claude_review_changes",
-        {"scope": scope, "base": base, "focus": focus},
+        {"scope": scope, "base": base, "focus": focus, "paths": effective_paths},
         r,
         cwd,
         scope=scope,
         base=base,
+        paths=effective_paths,
         context_text=ctx_data.text,
         context_summary=ctx_data.summary,
         workspace_source=ws_source,
@@ -784,6 +841,16 @@ async def claude_adversarial_review(
         Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
     ] = None,
     base: Annotated[str, Field(description="Base ref for branch diff when scope=branch.")] = "main",
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional plain repo-relative paths for the attached server-provided diff. "
+                "Requires scope; no exclude/pathspec magic; shell-style wildcards "
+                "(*, ?, []) still glob recursively. []/omitted means unfiltered."
+            )
+        ),
+    ] = None,
     workspace_root: Annotated[
         str | None,
         Field(
@@ -833,12 +900,14 @@ async def claude_adversarial_review(
         cwd,
         scope=scope,
         base=base,
+        paths=paths,
         workspace_source=ws_source,
         effort=effort,
     )
     if err:
         return _result(err)
-    payload = {"target": target, "evidence": evidence}
+    payload_text = {"target": target, "evidence": evidence}
+    payload: dict[str, object] = dict(payload_text)
     meta = _meta(
         cwd,
         r.config_mode,
@@ -848,16 +917,25 @@ async def claude_adversarial_review(
         None,
         scope,
         base,
+        paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
     )
-    too_large = _validate_input_size(payload, meta)
+    if paths and not scope:
+        return _result(
+            _invalid_paths_error(meta, "paths requires scope on claude_adversarial_review.")
+        )
+    too_large = _validate_input_size(payload_text, meta)
     if too_large:
         return _result(too_large)
     context_text = ""
     context_summary = None
     redacted_paths: list[str] = []
+    effective_paths = None
     if scope:
+        effective_paths, paths_err = _resolve_paths(paths, meta)
+        if paths_err:
+            return _result(paths_err)
         meta = _meta(
             cwd,
             r.config_mode,
@@ -867,11 +945,14 @@ async def claude_adversarial_review(
             None,
             scope,
             base,
+            effective_paths,
             workspace_source=ws_source,
             requested_budget=r.budget,
         )
         try:
-            ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
+            ctx_data = await run_sync(
+                lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+            )
         except InvalidBaseError:
             return _result(
                 _err(
@@ -912,6 +993,7 @@ async def claude_adversarial_review(
                 None,
                 scope,
                 base,
+                effective_paths,
                 truncated=True,
                 hint=ctx_data.truncation_hint,
                 workspace_source=ws_source,
@@ -935,6 +1017,7 @@ async def claude_adversarial_review(
             None,
             scope,
             base,
+            effective_paths,
             workspace_source=ws_source,
             requested_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
@@ -945,12 +1028,14 @@ async def claude_adversarial_review(
                     "claude_adversarial_review",
                     meta,
                     ctx_data.summary,
+                    effective_paths,
                     verdict="unknown",
                     confidence="low",
                 )
             )
         context_text, context_summary = ctx_data.text, ctx_data.summary
         redacted_paths = ctx_data.redacted_paths
+        payload["paths"] = effective_paths
     out = await _execute(
         "claude_adversarial_review",
         payload,
@@ -958,6 +1043,7 @@ async def claude_adversarial_review(
         cwd,
         scope=scope,
         base=base,
+        paths=effective_paths,
         context_text=context_text,
         context_summary=context_summary,
         workspace_source=ws_source,
@@ -986,6 +1072,16 @@ async def claude_review_changes_async(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
     focus: Annotated[str | None, Field(description="e.g. 'security', 'tests'.")] = None,
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional plain repo-relative paths to filter the server-provided diff. "
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
+            )
+        ),
+    ] = None,
     workspace_root: Annotated[
         str | None,
         Field(
@@ -1028,6 +1124,7 @@ async def claude_review_changes_async(
         cwd,
         scope=scope,
         base=base,
+        paths=paths,
         workspace_source=ws_source,
         effort=effort,
     )
@@ -1045,11 +1142,17 @@ async def claude_review_changes_async(
         None,
         scope,
         base,
+        paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
     )
+    effective_paths, paths_err = _resolve_paths(paths, meta)
+    if paths_err:
+        return _result(paths_err)
     try:
-        ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
+        ctx_data = await run_sync(
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+        )
     except InvalidBaseError:
         return _result(
             _err(
@@ -1089,6 +1192,7 @@ async def claude_review_changes_async(
             None,
             scope,
             base,
+            effective_paths,
             truncated=True,
             hint=ctx_data.truncation_hint,
             workspace_source=ws_source,
@@ -1112,14 +1216,19 @@ async def claude_review_changes_async(
         None,
         scope,
         base,
+        effective_paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
-        return _result(_empty_diff_result("claude_review_changes", meta, ctx_data.summary))
+        return _result(
+            _empty_diff_result("claude_review_changes", meta, ctx_data.summary, effective_paths)
+        )
     prompt = build_prompt(
-        "claude_review_changes", {"scope": scope, "base": base, "focus": focus}, ctx_data.text
+        "claude_review_changes",
+        {"scope": scope, "base": base, "focus": focus, "paths": effective_paths},
+        ctx_data.text,
     )
     cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
     cfg = JobConfig(
@@ -1133,6 +1242,7 @@ async def claude_review_changes_async(
         workspace_source=ws_source,
         context_summary=ctx_data.summary,
         requested_max_budget_usd=r.budget,
+        paths=effective_paths,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
     )
@@ -1172,6 +1282,7 @@ async def claude_review_changes_async(
             None,
             scope,
             base,
+            effective_paths,
             workspace_source=ws_source,
             requested_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
@@ -1338,6 +1449,16 @@ async def claude_job_cancel(
 async def claude_review_dry_run(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional plain repo-relative paths to filter the previewed diff. "
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
+            )
+        ),
+    ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
     workspace_root: Annotated[
         str | None,
@@ -1358,16 +1479,21 @@ async def claude_review_dry_run(
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
     dry_config_mode, cm_err = _resolve_config_mode_only(
-        config_mode, cwd, scope=scope, base=base, workspace_source=ws_source
+        config_mode, cwd, scope=scope, base=base, paths=paths, workspace_source=ws_source
     )
     if cm_err:
         return _result(cm_err)
     assert dry_config_mode is not None
     meta = _meta(
-        cwd, dry_config_mode, "toolless", 0, 0, None, scope, base, workspace_source=ws_source
+        cwd, dry_config_mode, "toolless", 0, 0, None, scope, base, paths, workspace_source=ws_source
     )
+    effective_paths, paths_err = _resolve_paths(paths, meta)
+    if paths_err:
+        return _result(paths_err)
     try:
-        ctx_data = await run_sync(lambda: gather_context(cwd, scope=scope, base=base))
+        ctx_data = await run_sync(
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+        )
     except InvalidBaseError:
         return _result(
             _err(
@@ -1404,6 +1530,7 @@ async def claude_review_dry_run(
         workspace_warning=workspace_warning_for(ws_source, cwd),
         scope=scope,
         base=base,
+        paths=effective_paths or [],
         context_summary=ctx_data.summary,
         diff_bytes=ctx_data.diff_bytes,
         max_diff_bytes=MAX_DIFF_BYTES,
@@ -1646,10 +1773,11 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_review_dry_run",
                 "free",
-                "Preview diff workspace, size, truncation, and redaction before paying.",
+                "Preview diff workspace, size, truncation, redaction, and optional paths "
+                "filter before paying.",
                 "diff byte count, context summary, truncation state, and redacted paths",
                 required=["scope"],
-                optional=["base", "config_mode", "workspace_root"],
+                optional=["base", "paths", "config_mode", "workspace_root"],
             ),
             tool_detail(
                 "claude_ask",
@@ -1666,12 +1794,14 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_review_changes",
                 "paid",
-                "Review working_tree, staged, or branch git diff synchronously.",
+                "Review working_tree, staged, or branch git diff synchronously; paths "
+                "scopes the server-provided diff but not readonly workspace reads.",
                 "structured review result; empty diffs return without spending",
                 required=["scope"],
                 optional=[
                     "base",
                     "focus",
+                    "paths",
                     "workspace_root",
                     *sync_execution_knobs,
                 ],
@@ -1686,6 +1816,7 @@ def _capabilities_payload() -> dict:
                     "evidence",
                     "scope",
                     "base",
+                    "paths",
                     "workspace_root",
                     *sync_execution_knobs,
                 ],
@@ -1693,12 +1824,14 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_review_changes_async",
                 "paid",
-                "Start a background diff review for long-running reviews.",
+                "Start a background diff review for long-running reviews; paths scopes the "
+                "server-provided diff.",
                 "job_id, status, polling hint, deadline, TTL, and resolved meta",
                 required=["scope"],
                 optional=[
                     "base",
                     "focus",
+                    "paths",
                     "workspace_root",
                     *execution_knobs,
                 ],

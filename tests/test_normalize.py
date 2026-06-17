@@ -40,6 +40,27 @@ def test_build_prompt_review_mentions_json_and_scope():
     assert "diff --git" in p
 
 
+def test_build_prompt_review_mentions_paths_when_scoped():
+    p = build_prompt(
+        "claude_review_changes",
+        payload={"scope": "working_tree", "paths": ["src"]},
+        context_text="diff --git ...",
+    )
+    assert "Path filter applied" in p
+    assert "['src']" in p
+
+
+def test_build_prompt_adversarial_mentions_paths_when_diff_attached():
+    p = build_prompt(
+        "claude_adversarial_review",
+        payload={"target": "plan", "paths": ["tests"]},
+        context_text="diff --git ...",
+    )
+    assert "Related changes" in p
+    assert "Path filter applied" in p
+    assert "['tests']" in p
+
+
 def test_extract_json_from_fenced_block():
     text = 'prose\n```json\n{"verdict": "pass"}\n```\ntrailing'
     assert extract_json(text) == {"verdict": "pass"}
