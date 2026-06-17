@@ -7,6 +7,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Added `readiness_detail` to `claude_status` so `ready:false` reports an
+  actionable stop reason, and refined Claude auth/API-key failure
+  classification and repair hints by `config_mode`.
 - Added optional `paths` filtering to diff-driven review tools so callers can
   review a repo-relative subset of a large diff without leaving the MCP review
   workflow.
@@ -21,7 +24,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   never fetches refs, calls GitHub, or accepts PR numbers/URLs.
 - Added a structured `invalid_head` repair error and reported the effective
   `head` and `diff_range` in result/dry-run/job meta.
-- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-17`.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-18`.
 
 ## 0.4.0 - 2026-06-16
 

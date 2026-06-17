@@ -212,6 +212,8 @@ def _api_key_repair_for(config_mode: str | None) -> str:
 
 
 def _has_logged_out_signal(blob: str) -> bool:
+    # Narrow on purpose: a bare "/login" can appear in reviewed content or URLs
+    # echoed by Claude, so require the explicit prompt wording.
     return "not logged in" in blob or "please run /login" in blob
 
 

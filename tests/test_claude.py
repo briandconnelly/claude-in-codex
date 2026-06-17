@@ -220,6 +220,46 @@ def test_classify_not_logged_in_wins_over_api_key_noise():
     assert "attempted config_mode" in info.repair
 
 
+def test_classify_plain_login_without_prompt_is_not_auth_signal():
+    run = ClaudeRun(
+        stdout="",
+        stderr="The reviewed URL was https://example.test/docs/login and mentions /login.",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    info = classify_failure(run)
+    assert info.code == "nonzero_exit"
+
+
+def test_classify_not_logged_in_repair_matches_default_mode():
+    run = ClaudeRun(
+        stdout="",
+        stderr="Not logged in · Please run /login",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    info = classify_failure(run)
+    assert info.code == "claude_auth_required"
+    assert "Run `claude /login`" in info.repair
+    assert "ANTHROPIC_API_KEY for config_mode=bare" in info.repair
+
+
+def test_classify_not_logged_in_repair_matches_bare_mode():
+    run = ClaudeRun(
+        stdout="",
+        stderr="Not logged in · Please run /login",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    info = classify_failure(run, config_mode="bare")
+    assert info.code == "claude_auth_required"
+    assert "Set a valid ANTHROPIC_API_KEY" in info.repair
+    assert "config_mode inherit/scoped/safe" in info.repair
+
+
 def test_classify_invalid_api_key():
     run = ClaudeRun(
         stdout="",
@@ -256,6 +296,20 @@ def test_classify_invalid_api_key_repair_matches_bare_mode():
     info = classify_failure(run, config_mode="bare")
     assert info.code == "api_key_invalid"
     assert "Set a valid ANTHROPIC_API_KEY" in info.repair
+
+
+def test_classify_invalid_api_key_repair_matches_default_mode():
+    run = ClaudeRun(
+        stdout="",
+        stderr="Invalid API key · Fix external API key",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    info = classify_failure(run)
+    assert info.code == "api_key_invalid"
+    assert "Set a valid ANTHROPIC_API_KEY" in info.repair
+    assert "config_mode inherit/scoped/safe" in info.repair
 
 
 def test_classify_timeout():

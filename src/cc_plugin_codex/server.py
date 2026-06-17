@@ -1804,12 +1804,12 @@ def claude_status() -> ToolResult:
         readiness_detail = (
             "ready: installed, authenticated, and defaults are usable for paid calls."
         )
+    elif not found:
+        readiness_detail = "not ready: the `claude` CLI was not found on PATH."
     elif default_errors:
         readiness_detail = (
             "not ready: default configuration is invalid; inspect default_errors before paid calls."
         )
-    elif not found:
-        readiness_detail = "not ready: the `claude` CLI was not found on PATH."
     elif authenticated is False:
         readiness_detail = "not ready: Claude CLI reports no authenticated session."
     elif authenticated is None:

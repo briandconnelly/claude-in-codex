@@ -300,6 +300,18 @@ async def test_status_does_not_claim_safe_available_when_claude_missing(monkeypa
     assert data["hooks_disabled"] is False
 
 
+async def test_status_reports_cli_missing_before_invalid_defaults(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: None)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["ready"] is False
+    assert "CLI was not found" in data["readiness_detail"]
+    assert data["default_errors"][0]["code"] == "unsupported_config_mode"
+
+
 async def test_status_reports_invalid_env_defaults(monkeypatch):
     import cc_plugin_codex.server as srv
 
