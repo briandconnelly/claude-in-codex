@@ -2,6 +2,7 @@ import anyio
 
 from cc_plugin_codex.claude import (
     ClaudeRun,
+    auth_status,
     build_command,
     classify_failure,
     run_claude_async,
@@ -19,7 +20,9 @@ _ALL_FLAGS = FlagSupport(
 
 
 async def test_run_claude_async_returns_output():
-    run = await run_claude_async(["sh", "-c", "printf hi"], cwd=".", timeout_seconds=10)
+    run = await run_claude_async(
+        ["sh", "-c", "printf hi"], cwd=".", timeout_seconds=10, config_mode="inherit"
+    )
     assert run.exit_code == 0
     assert run.stdout == "hi"
     assert run.timed_out is False
@@ -27,7 +30,11 @@ async def test_run_claude_async_returns_output():
 
 async def test_run_claude_async_sends_stdin():
     run = await run_claude_async(
-        ["sh", "-c", "cat"], cwd=".", timeout_seconds=10, stdin_text="prompt body"
+        ["sh", "-c", "cat"],
+        cwd=".",
+        timeout_seconds=10,
+        stdin_text="prompt body",
+        config_mode="inherit",
     )
     assert run.exit_code == 0
     assert run.stdout == "prompt body"
@@ -36,10 +43,15 @@ async def test_run_claude_async_sends_stdin():
 
 async def test_run_claude_async_strips_api_key_for_login_modes(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-stale")
     cmd = [
         "sh",
         "-c",
-        'if [ "${ANTHROPIC_API_KEY+x}" = x ]; then printf present; else printf absent; fi',
+        (
+            'if [ "${ANTHROPIC_API_KEY+x}" = x ] '
+            '|| [ "${ANTHROPIC_AUTH_TOKEN+x}" = x ]; '
+            "then printf present; else printf absent; fi"
+        ),
     ]
     for mode in ("inherit", "scoped", "safe"):
         run = await run_claude_async(cmd, cwd=".", timeout_seconds=10, config_mode=mode)
@@ -49,20 +61,69 @@ async def test_run_claude_async_strips_api_key_for_login_modes(monkeypatch):
 
 async def test_run_claude_async_preserves_api_key_for_bare(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-bare")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-bare")
     run = await run_claude_async(
-        ["sh", "-c", 'printf %s "$ANTHROPIC_API_KEY"'],
+        ["sh", "-c", 'printf "%s:%s" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN"'],
         cwd=".",
         timeout_seconds=10,
         config_mode="bare",
     )
     assert run.exit_code == 0
-    assert run.stdout == "sk-bare"
+    assert run.stdout == "sk-bare:token-bare"
+
+
+def test_auth_status_strips_direct_credentials_for_login_mode(monkeypatch):
+    import cc_plugin_codex.claude as cl
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-stale")
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(cl.subprocess, "run", fake_run)
+
+    logged_in, _ = auth_status(config_mode="inherit")
+
+    assert logged_in is True
+    assert captured["env"] is not None
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
+
+
+def test_auth_status_preserves_inherited_env_for_bare(monkeypatch):
+    import cc_plugin_codex.claude as cl
+
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(cl.subprocess, "run", fake_run)
+
+    logged_in, _ = auth_status(config_mode="bare")
+
+    assert logged_in is True
+    assert captured["env"] is None
 
 
 async def test_run_claude_async_times_out_and_kills(tmp_path):
     marker = tmp_path / "marker"
     cmd = ["sh", "-c", f"sleep 5; touch {marker}"]
-    run = await run_claude_async(cmd, cwd=".", timeout_seconds=1)
+    run = await run_claude_async(cmd, cwd=".", timeout_seconds=1, config_mode="inherit")
     assert run.timed_out is True
     assert run.exit_code == -9
     await anyio.sleep(0.3)
@@ -75,7 +136,7 @@ async def test_run_claude_async_cancellation_kills_process(tmp_path):
     async with anyio.create_task_group() as tg:
 
         async def _call():
-            await run_claude_async(cmd, cwd=".", timeout_seconds=30)
+            await run_claude_async(cmd, cwd=".", timeout_seconds=30, config_mode="inherit")
 
         tg.start_soon(_call)
         await anyio.sleep(0.3)  # let the subprocess spawn

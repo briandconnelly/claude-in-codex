@@ -1444,7 +1444,7 @@ async def test_status_auth_detail_is_redacted(monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(cl.subprocess, "run", lambda *a, **k: _Proc())
-    logged_in, detail = cl.auth_status()
+    logged_in, detail = cl.auth_status(config_mode="inherit")
     assert logged_in is True
     assert detail and "alice@example.com" not in detail
     assert "Acme Corp" not in detail

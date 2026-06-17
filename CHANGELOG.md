@@ -7,9 +7,10 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-- Removed `ANTHROPIC_API_KEY` from Claude subprocess environments for
-  login-backed config modes (`inherit`, `scoped`, and `safe`) so a stale or
-  placeholder key cannot override Claude Code OAuth authentication outside
+- Removed direct Anthropic credential env vars (`ANTHROPIC_API_KEY` and
+  `ANTHROPIC_AUTH_TOKEN`) from Claude subprocess environments for login-backed
+  config modes (`inherit`, `scoped`, and `safe`) so stale or placeholder
+  credentials cannot override Claude Code OAuth authentication outside
   `config_mode=bare`.
 - Added structured `not_a_git_repo` and `git_unavailable` repair errors for
   diff-driven review tools, replacing generic `internal_error` diagnostics for

@@ -1664,6 +1664,10 @@ def claude_status() -> ToolResult:
     supported: bool | None = None
     version_warning: str | None = None
     flags_warning: str | None = None
+    d = defaults()
+    auth_probe_config_mode = (
+        d.config_mode if d.config_mode in ("inherit", "scoped", "safe", "bare") else "inherit"
+    )
     if found:
         try:
             version = subprocess.run(
@@ -1685,7 +1689,7 @@ def claude_status() -> ToolResult:
             )
         # Free auth probe: lets an agent discover a logged-out CLI before
         # spending money on a paid call that would only then fail auth.
-        authenticated, auth_detail = auth_status()
+        authenticated, auth_detail = auth_status(config_mode=auth_probe_config_mode)
         # Free flag-contract probe: warn if a guarantee-bearing flag is missing
         # from `claude --help` (an early drift signal), without gating execution.
         fs = preflight.flag_support()
@@ -1698,7 +1702,6 @@ def claude_status() -> ToolResult:
             )
     else:
         fs = preflight.FlagSupport(supported=frozenset(), help_parsed=False)
-    d = defaults()
     default_errors: list[ErrorInfo] = []
     if d.config_mode not in ("inherit", "scoped", "safe", "bare"):
         default_errors.append(
