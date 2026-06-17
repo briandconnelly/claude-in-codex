@@ -354,7 +354,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-16"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-17"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -996,7 +996,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-16"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-17"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1820,3 +1820,341 @@ async def test_job_cancel_success_via_mcp(monkeypatch, git_repo, tmp_path):
             )
         )
     assert cancelled["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Issue #35: explicit branch diff head
+# ---------------------------------------------------------------------------
+
+
+def _make_branch_with_head(git_repo):
+    """Return (base, head_branch) where head_branch has one extra commit over base,
+    with the repo checked back out at base so base...head reflects the head commit."""
+    import subprocess as _sp
+
+    base = _sp.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
+    _sp.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)
+    (git_repo / "feature.py").write_text("value = 1\n")
+    _sp.run(["git", "add", "feature.py"], cwd=git_repo, check=True)
+    _sp.run(["git", "commit", "-q", "-m", "feature change"], cwd=git_repo, check=True)
+    _sp.run(["git", "switch", base], cwd=git_repo, check=True)
+    return base, "feature"
+
+
+async def test_tool_schemas_expose_head():
+    tools = await _tools_by_name()
+    for name in (
+        "claude_review_changes",
+        "claude_review_changes_async",
+        "claude_adversarial_review",
+        "claude_review_dry_run",
+    ):
+        props = tools[name].inputSchema["properties"]
+        assert "head" in props, name
+        assert props["head"]["description"], name
+
+
+async def test_capabilities_include_head():
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("cc_codex_capabilities", {}))
+    details = {d["name"]: d for d in data["tool_details"]}
+    for name in (
+        "claude_review_changes",
+        "claude_review_changes_async",
+        "claude_adversarial_review",
+        "claude_review_dry_run",
+    ):
+        assert "head" in details[name]["key_optional_params"], name
+
+
+async def test_review_changes_threads_head_into_gather_prompt_and_meta(
+    fake_claude, monkeypatch, git_repo
+):
+    import cc_plugin_codex.server as srv
+
+    captured = {}
+    real_build_prompt = srv.build_prompt
+
+    def spy_build_prompt(tool, payload, context_text):
+        captured["payload"] = payload
+        captured["context_text"] = context_text
+        return real_build_prompt(tool, payload, context_text)
+
+    base, head = _make_branch_with_head(git_repo)
+    monkeypatch.setattr(srv, "build_prompt", spy_build_prompt)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "branch",
+                    "base": base,
+                    "head": head,
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["meta"]["head"] == head
+    assert data["meta"]["diff_range"] == f"{base}...{head}"
+    assert "feature.py" in captured["context_text"]
+    assert captured["payload"]["head"] == head
+
+
+async def test_review_changes_default_head_reports_effective_head(fake_claude, git_repo):
+    import subprocess as _sp
+
+    base = _sp.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {"scope": "branch", "base": base, "workspace_root": str(git_repo)},
+            )
+        )
+    assert data["ok"] is True
+    assert data["meta"]["head"] == "HEAD"
+    assert data["meta"]["diff_range"] == f"{base}...HEAD"
+
+
+async def test_review_changes_non_branch_leaves_head_and_range_unset(fake_claude, git_repo):
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+            )
+        )
+    assert data["ok"] is True
+    assert data["meta"].get("head") is None
+    assert data["meta"].get("diff_range") is None
+
+
+async def test_review_changes_malformed_head_is_invalid_head(fake_claude, git_repo):
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "branch",
+                    "base": "main",
+                    "head": "--output=/tmp/pwn",
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["offending_param"] == "head"
+
+
+async def test_review_changes_empty_head_is_invalid_head(fake_claude, git_repo):
+    # An explicit empty string must surface as invalid_head, not be coalesced to HEAD.
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "branch",
+                    "base": "main",
+                    "head": "",
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["offending_param"] == "head"
+
+
+async def test_review_changes_nonexistent_head_is_invalid_head(fake_claude, git_repo):
+    import subprocess as _sp
+
+    base = _sp.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "branch",
+                    "base": base,
+                    "head": "no-such-ref",
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["offending_param"] == "head"
+
+
+async def test_review_changes_head_rejected_for_non_branch_scope(fake_claude, git_repo):
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {"scope": "working_tree", "head": "feature", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["offending_param"] == "head"
+
+
+async def test_adversarial_threads_head_when_diff_attached(fake_claude, git_repo):
+    base, head = _make_branch_with_head(git_repo)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_adversarial_review",
+                {
+                    "target": "the plan",
+                    "scope": "branch",
+                    "base": base,
+                    "head": head,
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["meta"]["head"] == head
+    assert data["meta"]["diff_range"] == f"{base}...{head}"
+
+
+async def test_adversarial_head_without_scope_is_rejected(fake_claude, git_repo):
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_adversarial_review",
+                {"target": "the plan", "head": "feature", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["offending_param"] == "head"
+
+
+async def test_dry_run_reports_effective_head_and_range(monkeypatch, git_repo):
+    base, head = _make_branch_with_head(git_repo)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run",
+                {
+                    "scope": "branch",
+                    "base": base,
+                    "head": head,
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["head"] == head
+    assert data["diff_range"] == f"{base}...{head}"
+
+
+async def test_dry_run_non_branch_leaves_head_and_range_unset(monkeypatch, git_repo):
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_dry_run",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+            )
+        )
+    assert data["ok"] is True
+    assert data.get("head") is None
+    assert data.get("diff_range") is None
+
+
+async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_path):
+    import json as _json
+
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    base, head = _make_branch_with_head(git_repo)
+    inner = {
+        "summary": "ok",
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [],
+        "questions": [],
+        "assumptions": [],
+    }
+    envelope = _json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": _json.dumps(inner),
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 5, "output_tokens": 1},
+        }
+    )
+    monkeypatch.setattr(
+        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+    )
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "branch",
+                    "base": base,
+                    "head": head,
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+        assert started["ok"] is True
+        assert started["meta"]["head"] == head
+        assert started["meta"]["diff_range"] == f"{base}...{head}"
+        job_id = started["job_id"]
+
+        import time as _time
+
+        deadline = _time.time() + 5
+        status = "running"
+        while _time.time() < deadline:
+            st = structured(
+                await client.call_tool(
+                    "claude_job_status", {"job_id": job_id, "workspace_root": str(git_repo)}
+                )
+            )
+            status = st["status"]
+            if status != "running":
+                break
+            await anyio.sleep(0.05)
+        assert status == "done"
+        res = structured(
+            await client.call_tool(
+                "claude_job_result", {"job_id": job_id, "workspace_root": str(git_repo)}
+            )
+        )
+    assert res["ok"] is True
+    assert res["meta"]["head"] == head
+    assert res["meta"]["diff_range"] == f"{base}...{head}"

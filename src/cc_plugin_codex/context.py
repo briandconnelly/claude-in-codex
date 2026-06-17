@@ -24,6 +24,10 @@ class InvalidBaseError(ValueError):
     """Raised when the base ref for scope=branch is malformed/unsafe."""
 
 
+class InvalidHeadError(ValueError):
+    """Raised when the head ref for scope=branch is malformed/unsafe or unresolvable."""
+
+
 class InvalidPathsError(ValueError):
     """Raised when one or more git pathspec filters are malformed/unsafe."""
 
@@ -65,6 +69,7 @@ class DiffOptions:
     scope: str
     base: str
     paths: list[str] | None = None
+    head: str = "HEAD"
 
 
 def normalize_paths(paths: list[str] | None) -> list[str] | None:
@@ -109,17 +114,17 @@ def _git(cwd: str, *args: str) -> str:
     return proc.stdout
 
 
-def _base_exists(cwd: str, base: str) -> bool:
-    """Whether base resolves to a commit.
+def _ref_exists(cwd: str, ref: str) -> bool:
+    """Whether ref resolves to a commit.
 
-    Syntactically safe but nonexistent refs should be reported as invalid_base,
-    not as a generic git/internal failure. This keeps branch-diff tools
-    repairable for agents.
+    Syntactically safe but nonexistent refs should be reported as invalid_base or
+    invalid_head, not as a generic git/internal failure. This keeps branch-diff
+    tools repairable for agents.
     """
     timeout = git_timeout_seconds()
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -143,8 +148,11 @@ def _diff_args(opts: DiffOptions) -> list[str]:
         base = opts.base
         if not _valid_ref(base):
             raise InvalidBaseError(f"invalid base ref: {base!r}")
-        # --end-of-options ensures the ref can never be parsed as a git option.
-        args = [*common, "--end-of-options", f"{base}...HEAD"]
+        head = opts.head
+        if not _valid_ref(head):
+            raise InvalidHeadError(f"invalid head ref: {head!r}")
+        # --end-of-options ensures the refs can never be parsed as git options.
+        args = [*common, "--end-of-options", f"{base}...{head}"]
     else:
         raise InvalidScopeError(f"invalid scope: {opts.scope}")
     if opts.paths:
@@ -226,12 +234,22 @@ def _redact(diff: str) -> tuple[str, list[str]]:
 
 
 def gather_context(
-    cwd: str, scope: str, base: str, paths: list[str] | None = None
+    cwd: str, scope: str, base: str, paths: list[str] | None = None, head: str | None = None
 ) -> ContextResult:
-    opts = DiffOptions(scope=scope, base=base, paths=normalize_paths(paths))
-    diff_args = _diff_args(opts)  # raises InvalidScopeError / InvalidBaseError
-    if scope == "branch" and not _base_exists(cwd, base):
-        raise InvalidBaseError(f"base ref does not resolve to a commit: {base!r}")
+    # Explicit head only makes sense for a base...head branch comparison; reject it
+    # for working_tree/staged rather than silently ignoring it.
+    if head is not None and scope != "branch":
+        raise InvalidHeadError(f"head is only valid for scope=branch, not {scope!r}")
+    # Coalesce only None (caller omitted head), never "" — an explicit empty string
+    # must fall through to _valid_ref and raise invalid_head, not silently use HEAD.
+    effective_head = "HEAD" if head is None else head
+    opts = DiffOptions(scope=scope, base=base, paths=normalize_paths(paths), head=effective_head)
+    diff_args = _diff_args(opts)  # raises InvalidScopeError/InvalidBaseError/InvalidHeadError
+    if scope == "branch":
+        if not _ref_exists(cwd, base):
+            raise InvalidBaseError(f"base ref does not resolve to a commit: {base!r}")
+        if not _ref_exists(cwd, effective_head):
+            raise InvalidHeadError(f"head ref does not resolve to a commit: {effective_head!r}")
     summary = _summary(cwd, diff_args)
     raw = _git(cwd, *diff_args)
     text, redacted = _redact(raw)

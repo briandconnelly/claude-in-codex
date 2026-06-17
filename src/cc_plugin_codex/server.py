@@ -44,6 +44,7 @@ from cc_plugin_codex.config import (
 from cc_plugin_codex.context import (
     MAX_DIFF_BYTES,
     InvalidBaseError,
+    InvalidHeadError,
     InvalidPathsError,
     InvalidScopeError,
     gather_context,
@@ -80,22 +81,30 @@ from cc_plugin_codex.schemas import (
     SuccessResult,
     ToolCapability,
     Verdict,
+    branch_range,
     workspace_warning_for,
 )
 
 CAPABILITY_SUMMARY = (
     "cc-plugin-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. It never edits code, grants "
-    "Bash/write tools, or proxies Claude MCP tools; Claude Code hooks may still run "
-    "unless config_mode=safe or bare is used. Paid tools send context to Anthropic; call "
+    "Bash/write tools, or proxies Claude MCP tools; hooks may still run unless "
+    "config_mode=safe/bare. Paid tools send context to Anthropic; call "
     "claude_status before spending. claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
-    "claude_review_dry_run previews workspace/diff-size/redaction for free. Findings "
-    "are advisory claims to verify. Pass workspace_root explicitly: it defaults to "
-    "the first MCP root, else server cwd; when roots exist it must be inside one. "
-    "access=toolless is default; access=readonly lets Claude read files directly, "
-    "bypassing server-gathered diff redaction. Free-form input is capped by "
-    "CC_PLUGIN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
+    "claude_review_dry_run previews workspace/diff-size/redaction. "
+    "scope=branch reviews base...head locally (head defaults HEAD); no ref "
+    "fetch, GitHub calls, or PR URLs. Findings advisory. "
+    "Pass workspace_root explicitly: defaults to first MCP root, else server cwd; "
+    "with roots it must be inside one. toolless default; readonly lets "
+    "Claude read files directly, bypassing diff redaction. Free-form input capped "
+    "by CC_PLUGIN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
+)
+
+_HEAD_FIELD_DESC = (
+    "Head ref for scope=branch; reviews base...head instead of base...HEAD. Only "
+    "valid for scope=branch; defaults to HEAD. Must be a local-resolvable git ref "
+    "or commit — the server does not fetch refs, call GitHub, or accept PR URLs."
 )
 
 PRACTICAL_MIN_BUDGET_HINT = (
@@ -158,13 +167,20 @@ def _meta(
     redacted_paths: list[str] | None = None,
     compat_warnings: list[str] | None = None,
     security_warnings: list[str] | None = None,
+    *,
+    head: str | None = None,
 ) -> Meta:
+    # head is keyword-only so the many positional _meta(...) call sites that pass
+    # base positionally stay untouched; only branch-scope call sites set it.
+    effective_head, diff_range = branch_range(scope, base, head)
     return Meta(
         cwd=cwd,
         config_mode=cast("ConfigMode", config_mode),
         access=cast("Access", access),
         scope=scope,
         base=base,
+        head=effective_head,
+        diff_range=diff_range,
         paths=paths,
         timeout_seconds=timeout,
         elapsed_ms=elapsed,
@@ -209,6 +225,23 @@ def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
         "omit paths or pass [] for an unfiltered diff.",
         meta,
         offending="paths",
+    )
+
+
+_INVALID_HEAD_REPAIR = (
+    "Pass a local-resolvable git ref or commit for head and only with scope=branch; "
+    "omit head to compare against HEAD. The server does not fetch refs, call GitHub, "
+    "or accept PR numbers/URLs — make the ref available locally first."
+)
+
+
+def _invalid_head_error(meta: Meta, message: str | None = None) -> dict:
+    return _err(
+        "invalid_head",
+        message or "Invalid head ref.",
+        _INVALID_HEAD_REPAIR,
+        meta,
+        offending="head",
     )
 
 
@@ -373,6 +406,7 @@ def _resolve(
     paths: list[str] | None = None,
     workspace_source=None,
     effort=None,
+    head: str | None = None,
 ):
     """Resolve env defaults + clamps and validate.
 
@@ -402,6 +436,7 @@ def _resolve(
             paths,
             workspace_source=workspace_source,
             requested_budget=budget,
+            head=head,
         )
         return None, _err(
             "unsupported_config_mode",
@@ -423,6 +458,7 @@ def _resolve(
             paths,
             workspace_source=workspace_source,
             requested_budget=budget,
+            head=head,
         )
         return None, _err(
             "unsupported_access",
@@ -447,6 +483,7 @@ def _resolve(
                 paths,
                 workspace_source=workspace_source,
                 requested_budget=budget,
+                head=head,
             )
             return None, _err(
                 "unsupported_config_mode",
@@ -469,6 +506,7 @@ def _resolve(
         workspace_source=workspace_source,
         requested_budget=budget,
         security_warnings=hook_security_warnings(cwd, cm),
+        head=head,
     )
     if cm == "bare" and not bare_available():
         return None, _err(
@@ -488,6 +526,7 @@ def _resolve_config_mode_only(
     base: str | None = None,
     paths: list[str] | None = None,
     workspace_source: str | None = None,
+    head: str | None = None,
 ) -> tuple[str | None, dict | None]:
     d = defaults()
     cm = config_mode or d.config_mode
@@ -502,6 +541,7 @@ def _resolve_config_mode_only(
         base,
         paths,
         workspace_source=workspace_source,
+        head=head,
     )
     if cm not in ("inherit", "scoped", "safe", "bare"):
         return None, _err(
@@ -536,6 +576,7 @@ async def _execute(
     context_summary=None,
     workspace_source=None,
     redacted_paths: list[str] | None = None,
+    head: str | None = None,
 ) -> dict:
     prompt = build_prompt(tool, payload, context_text)
     cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
@@ -555,6 +596,7 @@ async def _execute(
         redacted_paths=redacted_paths,
         compat_warnings=dropped,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        head=head,
     )
     if run.exit_code != 0 or run.timed_out:
         # A non-zero exit can still carry a cost-bearing JSON envelope (e.g.
@@ -654,6 +696,7 @@ async def claude_ask(
 async def claude_review_changes(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     focus: Annotated[str | None, Field(description="e.g. 'security', 'tests'.")] = None,
     paths: Annotated[
         list[str] | None,
@@ -717,6 +760,7 @@ async def claude_review_changes(
         paths=paths,
         workspace_source=ws_source,
         effort=effort,
+        head=head,
     )
     if err:
         return _result(err)
@@ -732,13 +776,18 @@ async def claude_review_changes(
         paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
+        head=head,
     )
+    if head is not None and scope != "branch":
+        return _result(
+            _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
+        )
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
     except InvalidBaseError:
         return _result(
@@ -750,6 +799,8 @@ async def claude_review_changes(
                 offending="base",
             )
         )
+    except InvalidHeadError:
+        return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
     except InvalidScopeError:
         return _result(
             _err(
@@ -785,6 +836,7 @@ async def claude_review_changes(
             workspace_source=ws_source,
             requested_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
+            head=head,
         )
         return _result(
             _err(
@@ -808,6 +860,7 @@ async def claude_review_changes(
         requested_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        head=head,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         return _result(
@@ -815,7 +868,7 @@ async def claude_review_changes(
         )
     out = await _execute(
         "claude_review_changes",
-        {"scope": scope, "base": base, "focus": focus, "paths": effective_paths},
+        {"scope": scope, "base": base, "head": head, "focus": focus, "paths": effective_paths},
         r,
         cwd,
         scope=scope,
@@ -824,6 +877,7 @@ async def claude_review_changes(
         context_text=ctx_data.text,
         context_summary=ctx_data.summary,
         workspace_source=ws_source,
+        head=head,
         redacted_paths=ctx_data.redacted_paths,
     )
     return _result(out)
@@ -841,6 +895,7 @@ async def claude_adversarial_review(
         Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
     ] = None,
     base: Annotated[str, Field(description="Base ref for branch diff when scope=branch.")] = "main",
+    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
         Field(
@@ -903,6 +958,7 @@ async def claude_adversarial_review(
         paths=paths,
         workspace_source=ws_source,
         effort=effort,
+        head=head,
     )
     if err:
         return _result(err)
@@ -920,10 +976,20 @@ async def claude_adversarial_review(
         paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
+        head=head,
     )
     if paths and not scope:
         return _result(
             _invalid_paths_error(meta, "paths requires scope on claude_adversarial_review.")
+        )
+    # head only makes sense for an attached branch diff; reject it when scope is
+    # omitted or is not branch (this also covers adversarial head-without-scope).
+    if head is not None and scope != "branch":
+        return _result(
+            _invalid_head_error(
+                meta,
+                "head requires scope=branch on claude_adversarial_review.",
+            )
         )
     too_large = _validate_input_size(payload_text, meta)
     if too_large:
@@ -948,10 +1014,13 @@ async def claude_adversarial_review(
             effective_paths,
             workspace_source=ws_source,
             requested_budget=r.budget,
+            head=head,
         )
         try:
             ctx_data = await run_sync(
-                lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+                lambda: gather_context(
+                    cwd, scope=scope, base=base, paths=effective_paths, head=head
+                )
             )
         except InvalidBaseError:
             return _result(
@@ -964,6 +1033,8 @@ async def claude_adversarial_review(
                     offending="base",
                 )
             )
+        except InvalidHeadError:
+            return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
         except InvalidScopeError:
             return _result(
                 _err(
@@ -999,6 +1070,7 @@ async def claude_adversarial_review(
                 workspace_source=ws_source,
                 requested_budget=r.budget,
                 redacted_paths=ctx_data.redacted_paths,
+                head=head,
             )
             return _result(
                 _err(
@@ -1021,6 +1093,7 @@ async def claude_adversarial_review(
             workspace_source=ws_source,
             requested_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
+            head=head,
         )
         if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
             return _result(
@@ -1036,6 +1109,9 @@ async def claude_adversarial_review(
         context_text, context_summary = ctx_data.text, ctx_data.summary
         redacted_paths = ctx_data.redacted_paths
         payload["paths"] = effective_paths
+        payload["scope"] = scope
+        payload["base"] = base
+        payload["head"] = head
     out = await _execute(
         "claude_adversarial_review",
         payload,
@@ -1048,6 +1124,7 @@ async def claude_adversarial_review(
         context_summary=context_summary,
         workspace_source=ws_source,
         redacted_paths=redacted_paths,
+        head=head,
     )
     return _result(out)
 
@@ -1071,6 +1148,7 @@ _ASYNC_START_ANNOTATIONS = {
 async def claude_review_changes_async(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     focus: Annotated[str | None, Field(description="e.g. 'security', 'tests'.")] = None,
     paths: Annotated[
         list[str] | None,
@@ -1127,6 +1205,7 @@ async def claude_review_changes_async(
         paths=paths,
         workspace_source=ws_source,
         effort=effort,
+        head=head,
     )
     if err:
         return _result(err)
@@ -1145,13 +1224,18 @@ async def claude_review_changes_async(
         paths,
         workspace_source=ws_source,
         requested_budget=r.budget,
+        head=head,
     )
+    if head is not None and scope != "branch":
+        return _result(
+            _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
+        )
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
     except InvalidBaseError:
         return _result(
@@ -1163,6 +1247,8 @@ async def claude_review_changes_async(
                 offending="base",
             )
         )
+    except InvalidHeadError:
+        return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
     except InvalidScopeError:
         return _result(
             _err(
@@ -1198,6 +1284,7 @@ async def claude_review_changes_async(
             workspace_source=ws_source,
             requested_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
+            head=head,
         )
         return _result(
             _err(
@@ -1220,6 +1307,7 @@ async def claude_review_changes_async(
         workspace_source=ws_source,
         requested_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
+        head=head,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         return _result(
@@ -1227,7 +1315,7 @@ async def claude_review_changes_async(
         )
     prompt = build_prompt(
         "claude_review_changes",
-        {"scope": scope, "base": base, "focus": focus, "paths": effective_paths},
+        {"scope": scope, "base": base, "head": head, "focus": focus, "paths": effective_paths},
         ctx_data.text,
     )
     cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
@@ -1237,6 +1325,7 @@ async def claude_review_changes_async(
         access=r.access,
         scope=scope,
         base=base,
+        head=head,
         detail=r.detail,
         timeout_seconds=jobs.max_seconds(),
         workspace_source=ws_source,
@@ -1288,6 +1377,7 @@ async def claude_review_changes_async(
             redacted_paths=ctx_data.redacted_paths,
             compat_warnings=dropped,
             security_warnings=hook_security_warnings(cwd, r.config_mode),
+            head=head,
         ),
     )
     return _result(started.model_dump(mode="json", exclude_none=True))
@@ -1449,6 +1539,7 @@ async def claude_job_cancel(
 async def claude_review_dry_run(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
     base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
         Field(
@@ -1479,20 +1570,34 @@ async def claude_review_dry_run(
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root))
     dry_config_mode, cm_err = _resolve_config_mode_only(
-        config_mode, cwd, scope=scope, base=base, paths=paths, workspace_source=ws_source
+        config_mode, cwd, scope=scope, base=base, paths=paths, workspace_source=ws_source, head=head
     )
     if cm_err:
         return _result(cm_err)
     assert dry_config_mode is not None
     meta = _meta(
-        cwd, dry_config_mode, "toolless", 0, 0, None, scope, base, paths, workspace_source=ws_source
+        cwd,
+        dry_config_mode,
+        "toolless",
+        0,
+        0,
+        None,
+        scope,
+        base,
+        paths,
+        workspace_source=ws_source,
+        head=head,
     )
+    if head is not None and scope != "branch":
+        return _result(
+            _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
+        )
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths)
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
     except InvalidBaseError:
         return _result(
@@ -1504,6 +1609,8 @@ async def claude_review_dry_run(
                 offending="base",
             )
         )
+    except InvalidHeadError:
+        return _result(_invalid_head_error(meta, f"Invalid head ref '{head}'."))
     except InvalidScopeError:
         return _result(
             _err(
@@ -1524,12 +1631,15 @@ async def claude_review_dry_run(
             )
         )
     fs = preflight.flag_support()
+    effective_head, diff_range = branch_range(scope, base, head)
     result = DryRunResult(
         cwd=cwd,
         workspace_source=ws_source,
         workspace_warning=workspace_warning_for(ws_source, cwd),
         scope=scope,
         base=base,
+        head=effective_head,
+        diff_range=diff_range,
         paths=effective_paths or [],
         context_summary=ctx_data.summary,
         diff_bytes=ctx_data.diff_bytes,
@@ -1777,7 +1887,7 @@ def _capabilities_payload() -> dict:
                 "filter before paying.",
                 "diff byte count, context summary, truncation state, and redacted paths",
                 required=["scope"],
-                optional=["base", "paths", "config_mode", "workspace_root"],
+                optional=["base", "head", "paths", "config_mode", "workspace_root"],
             ),
             tool_detail(
                 "claude_ask",
@@ -1794,12 +1904,14 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_review_changes",
                 "paid",
-                "Review working_tree, staged, or branch git diff synchronously; paths "
+                "Review working_tree, staged, or branch git diff synchronously; "
+                "scope=branch reviews base...head (head defaults to HEAD); paths "
                 "scopes the server-provided diff but not readonly workspace reads.",
                 "structured review result; empty diffs return without spending",
                 required=["scope"],
                 optional=[
                     "base",
+                    "head",
                     "focus",
                     "paths",
                     "workspace_root",
@@ -1809,13 +1921,15 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_adversarial_review",
                 "paid",
-                "Pressure-test a plan, claim, or decision; optionally attach a diff.",
+                "Pressure-test a plan, claim, or decision; optionally attach a diff "
+                "(scope=branch attaches base...head, head defaults to HEAD).",
                 "structured counterarguments, risks, questions, assumptions, cost, and usage",
                 required=["target"],
                 optional=[
                     "evidence",
                     "scope",
                     "base",
+                    "head",
                     "paths",
                     "workspace_root",
                     *sync_execution_knobs,
@@ -1824,12 +1938,14 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_review_changes_async",
                 "paid",
-                "Start a background diff review for long-running reviews; paths scopes the "
+                "Start a background diff review for long-running reviews; scope=branch "
+                "reviews base...head (head defaults to HEAD); paths scopes the "
                 "server-provided diff.",
                 "job_id, status, polling hint, deadline, TTL, and resolved meta",
                 required=["scope"],
                 optional=[
                     "base",
+                    "head",
                     "focus",
                     "paths",
                     "workspace_root",
@@ -1893,6 +2009,8 @@ def _capabilities_payload() -> dict:
             "does NOT resume a call once it ends or is cancelled",
             "does NOT guarantee secret removal; diff redaction is best-effort and "
             "access=readonly lets Claude read workspace files directly",
+            "does NOT fetch refs, call the GitHub API, or accept PR numbers/URLs; "
+            "scope=branch base/head must already resolve locally",
         ],
         prerequisites=[
             "the `claude` CLI installed and authenticated",

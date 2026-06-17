@@ -13,7 +13,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 - Added structured `invalid_paths` repair errors, filtered diff metadata echo,
   dry-run filter reporting, and truncation hints that name `paths=[...]` as the
   in-tool escape hatch.
-- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-16`.
+- Added an optional `head` ref to the diff-driven review tools
+  (`claude_review_changes`, `claude_review_changes_async`,
+  `claude_adversarial_review`, `claude_review_dry_run`) so `scope=branch` can
+  review `base...head` instead of only `base...HEAD`. `head` defaults to `HEAD`,
+  is rejected for non-branch scopes, and resolves locally only — the server
+  never fetches refs, calls GitHub, or accepts PR numbers/URLs.
+- Added a structured `invalid_head` repair error and reported the effective
+  `head` and `diff_range` in result/dry-run/job meta.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-17`.
 
 ## 0.4.0 - 2026-06-16
 

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-16"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-17"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -42,6 +42,25 @@ def workspace_warning_for(source: str | None, cwd: str) -> str | None:
     return None
 
 
+def branch_range(
+    scope: str | None, base: str | None, head: str | None
+) -> tuple[str | None, str | None]:
+    """Effective (head, diff_range) for a result's meta.
+
+    Only branch scope has a base...head comparison: it reports the effective head
+    (defaulting to ``HEAD`` when the caller omitted one) and the ``base...head``
+    range string. Non-branch scopes leave both unset. Shared by Meta construction,
+    the dry-run result, and the background-job meta rebuild so the derived range
+    cannot drift from base+head."""
+    if scope != "branch":
+        return None, None
+    # Coalesce only None (caller omitted head), never "" — an explicit empty
+    # string is invalid input that must surface as invalid_head, not be hidden
+    # behind a silent HEAD default.
+    effective_head = "HEAD" if head is None else head
+    return effective_head, f"{base}...{effective_head}"
+
+
 ErrorCode = Literal[
     "claude_not_found",
     "claude_auth_required",
@@ -51,6 +70,7 @@ ErrorCode = Literal[
     "unsupported_access",
     "invalid_scope",
     "invalid_base",
+    "invalid_head",
     "invalid_paths",
     "invalid_workspace_root",
     "workspace_outside_roots",
@@ -116,6 +136,8 @@ class Meta(BaseModel):
     access: Access
     scope: str | None = None
     base: str | None = None
+    head: str | None = None
+    diff_range: str | None = None  # effective base...head for scope=branch
     paths: list[str] | None = None
     timeout_seconds: int
     elapsed_ms: int
@@ -300,6 +322,8 @@ class DryRunResult(BaseModel):
     workspace_warning: str | None = None
     scope: str
     base: str | None = None
+    head: str | None = None
+    diff_range: str | None = None  # effective base...head for scope=branch
     paths: list[str] = Field(default_factory=list)
     context_summary: ContextSummary
     diff_bytes: int  # full UTF-8 size of the redacted diff that would be sent
