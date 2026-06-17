@@ -74,22 +74,45 @@ The bundled `.mcp.json` pins the server to a **versioned release tag**
 auto-ships to installed users — they update deliberately. The trade-off is that
 fixes (including resilience fixes) only reach users on the next tagged release.
 
-When cutting a release, bump these **together**:
+When cutting a release, bump these **together**. The `Publish` workflow's
+metadata-validation step (`.github/workflows/publish.yml`) hard-checks the
+items marked ✅ and aborts the release if any is missing, so omitting one is
+caught before publishing:
 
-1. `pyproject.toml` `version`
-2. `.codex-plugin/plugin.json` `version`
-3. `FINGERPRINT` in `src/cc_plugin_codex/schemas.py` — **only** when the
+1. `pyproject.toml` `version` ✅
+2. `.codex-plugin/plugin.json` `version` ✅
+3. the `@vX.Y.Z` ref in `.mcp.json` ✅
+4. `README.md` — the pinned `cc-plugin-codex==X.Y.Z` install example ✅
+5. `CHANGELOG.md` — a new `## X.Y.Z - YYYY-MM-DD` section ✅
+6. `FINGERPRINT` in `src/cc_plugin_codex/schemas.py` — **only** when the
    agent-visible surface changed (tool names, input/output schemas, the
-   `ErrorCode` set, the value enums, or the capability summary)
-4. the `@vX.Y.Z` ref in `.mcp.json`
+   `ErrorCode` set, the value enums, or the capability summary); not validated
+   by the workflow
+7. the `plugins/cc-plugin-codex/` mirror (`.codex-plugin/plugin.json` and
+   `.mcp.json`) — keep in sync with the root copies; not validated by the
+   workflow
 
-After the release commit is on `main`, run the `Publish` GitHub Actions workflow
-manually with version `X.Y.Z`. The workflow validates the lockstep references,
-runs the test matrix, builds and checks the distributions, publishes to PyPI,
-then creates the matching `vX.Y.Z` git tag and GitHub Release.
+After the release commit is on `main`, check it out (`git switch main &&
+git pull`) and publish by tagging it and pushing the tag:
 
-Pushing a matching `vX.Y.Z` tag manually is still supported as an escape hatch;
-it runs the same validation and publishing workflow.
+```sh
+git tag -a vX.Y.Z -m "cc-plugin-codex vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The tag push triggers the `Publish` workflow, which validates the lockstep
+references, runs the test matrix, builds and checks the distributions, publishes
+to PyPI, then creates the matching GitHub Release.
+
+The PyPI upload runs in the `pypi` GitHub Actions environment, which requires a
+manual approval from a designated reviewer. The run pauses at that gate until the
+reviewer approves the deployment (Actions run → **Review deployments** → approve
+`pypi`).
+
+The `Publish` workflow also accepts a manual `workflow_dispatch` run with an
+explicit version, but the `pypi` environment's deployment-branch policy only
+permits `vX.Y.Z` **tag** refs, so a dispatch from `main` is rejected at the
+deployment gate and does **not** publish. Push the tag instead.
 
 The `.mcp.json` ref and the git tag must match, or a bundled install fails to
 resolve.
