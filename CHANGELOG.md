@@ -5,6 +5,25 @@ All notable changes to `cc-plugin-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
+## 0.4.0 - 2026-06-16
+
+- Passed Claude prompts to the `claude` CLI over stdin instead of argv, avoiding
+  process-listing exposure and command-line length limits for large reviews.
+- Added structured default-resolution detail to `claude_status`: a `raw_defaults`
+  block reporting the unresolved configured defaults and a `default_errors` list
+  surfacing per-default resolution failures, so misconfiguration is visible
+  before a paid call.
+- Aligned MCP config-mode contract metadata, including consistent dry-run error
+  metadata for invalid config modes.
+- Forwarded the full set of runtime tuning environment variables
+  (`CC_PLUGIN_CODEX_*` for git/job/state/input/version knobs) through the bundled
+  `.mcp.json` so they take effect when the server is launched from the plugin.
+- Updated safe-mode guidance in `SECURITY.md` and the `collaborating-with-claude`
+  skill.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-15`.
+- Bumped dependencies, including vulnerable transitive packages in `uv.lock`,
+  `fastmcp` (3.4.0 → 3.4.2), `ruff`, and `ty`.
+
 ## 0.3.1 - 2026-06-16
 
 - Expanded best-effort diff redaction for common credential files and

@@ -4,7 +4,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/briandconnelly/cc-plugin-codex.git@v0.3.1",
+        "git+https://github.com/briandconnelly/cc-plugin-codex.git@v0.4.0",
         "cc-plugin-codex-mcp"
       ],
       "env_vars": [
