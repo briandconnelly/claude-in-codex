@@ -92,11 +92,11 @@ caught before publishing:
    `.mcp.json`) — keep in sync with the root copies; not validated by the
    workflow
 
-After the release commit is on `main`, publish by pushing the matching
-`vX.Y.Z` tag:
+After the release commit is on `main`, check it out (`git switch main &&
+git pull`) and publish by tagging it and pushing the tag:
 
 ```sh
-git tag -a vX.Y.Z -m "cc-plugin-codex vX.Y.Z" <release-commit>
+git tag -a vX.Y.Z -m "cc-plugin-codex vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
