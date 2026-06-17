@@ -660,7 +660,8 @@ async def claude_review_changes(
         Field(
             description=(
                 "Optional plain repo-relative paths to filter the server-provided diff. "
-                "No pathspec magic or excludes; []/omitted means unfiltered."
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
             )
         ),
     ] = None,
@@ -845,7 +846,8 @@ async def claude_adversarial_review(
         Field(
             description=(
                 "Optional plain repo-relative paths for the attached server-provided diff. "
-                "Requires scope; no pathspec magic or excludes."
+                "Requires scope; no exclude/pathspec magic; shell-style wildcards "
+                "(*, ?, []) still glob recursively. []/omitted means unfiltered."
             )
         ),
     ] = None,
@@ -1075,7 +1077,8 @@ async def claude_review_changes_async(
         Field(
             description=(
                 "Optional plain repo-relative paths to filter the server-provided diff. "
-                "No pathspec magic or excludes; []/omitted means unfiltered."
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
             )
         ),
     ] = None,
@@ -1451,7 +1454,8 @@ async def claude_review_dry_run(
         Field(
             description=(
                 "Optional plain repo-relative paths to filter the previewed diff. "
-                "No pathspec magic or excludes; []/omitted means unfiltered."
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
             )
         ),
     ] = None,
