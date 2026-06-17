@@ -34,6 +34,31 @@ async def test_run_claude_async_sends_stdin():
     assert run.timed_out is False
 
 
+async def test_run_claude_async_strips_api_key_for_login_modes(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale")
+    cmd = [
+        "sh",
+        "-c",
+        'if [ "${ANTHROPIC_API_KEY+x}" = x ]; then printf present; else printf absent; fi',
+    ]
+    for mode in ("inherit", "scoped", "safe"):
+        run = await run_claude_async(cmd, cwd=".", timeout_seconds=10, config_mode=mode)
+        assert run.exit_code == 0
+        assert run.stdout == "absent"
+
+
+async def test_run_claude_async_preserves_api_key_for_bare(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-bare")
+    run = await run_claude_async(
+        ["sh", "-c", 'printf %s "$ANTHROPIC_API_KEY"'],
+        cwd=".",
+        timeout_seconds=10,
+        config_mode="bare",
+    )
+    assert run.exit_code == 0
+    assert run.stdout == "sk-bare"
+
+
 async def test_run_claude_async_times_out_and_kills(tmp_path):
     marker = tmp_path / "marker"
     cmd = ["sh", "-c", f"sleep 5; touch {marker}"]

@@ -1414,9 +1414,10 @@ async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
         }
     )
 
-    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
         captured["cmd"] = cmd
         captured["stdin_text"] = stdin_text
+        captured["config_mode"] = config_mode
         return ClaudeRun(stdout=envelope, stderr="", exit_code=0, elapsed_ms=1, timed_out=False)
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
@@ -1430,6 +1431,7 @@ async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
     assert data["ok"] is True
     assert all(prompt not in arg for arg in captured["cmd"])
     assert prompt in captured["stdin_text"]
+    assert captured["config_mode"] == "inherit"
 
 
 async def test_status_auth_detail_is_redacted(monkeypatch):
@@ -1529,7 +1531,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
         }
     )
 
-    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
         return ClaudeRun(stdout=envelope, stderr="", exit_code=1, elapsed_ms=5, timed_out=False)
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
@@ -1796,7 +1798,7 @@ async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
     import cc_plugin_codex.server as srv
     from cc_plugin_codex.claude import ClaudeRun
 
-    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
         return ClaudeRun(
             stdout="not json at all", stderr="boom", exit_code=1, elapsed_ms=5, timed_out=False
         )

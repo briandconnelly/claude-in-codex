@@ -68,7 +68,7 @@ def fake_claude(monkeypatch):
         }
     )
 
-    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None):
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
         return ClaudeRun(stdout=envelope, stderr="", exit_code=0, elapsed_ms=12, timed_out=False)
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)

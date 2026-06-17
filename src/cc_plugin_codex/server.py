@@ -647,7 +647,13 @@ async def _execute(
 ) -> dict:
     prompt = build_prompt(tool, payload, context_text)
     cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
-    run = await run_claude_async(cmd, cwd=cwd, timeout_seconds=r.timeout, stdin_text=prompt)
+    run = await run_claude_async(
+        cmd,
+        cwd=cwd,
+        timeout_seconds=r.timeout,
+        stdin_text=prompt,
+        config_mode=r.config_mode,
+    )
     meta = _meta(
         cwd,
         r.config_mode,

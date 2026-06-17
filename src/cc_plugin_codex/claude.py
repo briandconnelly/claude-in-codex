@@ -41,6 +41,20 @@ class ClaudeRun:
     timed_out: bool
 
 
+def _claude_subprocess_env(config_mode: str | None) -> dict[str, str] | None:
+    """Return an explicit subprocess env when the selected mode must alter it.
+
+    Login-backed modes must use Claude Code's OAuth/session path, even if the
+    MCP server process was launched with a stale or placeholder API key. Bare
+    mode deliberately relies on ANTHROPIC_API_KEY, so leave inheritance intact.
+    """
+    if config_mode not in ("inherit", "scoped", "safe"):
+        return None
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+    return env
+
+
 def _gate_optional(tokens: list[str], fs: FlagSupport) -> tuple[list[str], list[str]]:
     """Drop any HELP_GATED flag (and its value, if it takes one) the installed
     `claude` does not advertise in --help. Returns (kept_tokens, dropped_flags).
@@ -140,7 +154,12 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 async def run_claude_async(
-    cmd: list[str], cwd: str, timeout_seconds: int, stdin_text: str | None = None
+    cmd: list[str],
+    cwd: str,
+    timeout_seconds: int,
+    stdin_text: str | None = None,
+    *,
+    config_mode: str | None = None,
 ) -> ClaudeRun:
     """Run `claude` as a subprocess, returning a ClaudeRun.
 
@@ -157,6 +176,7 @@ async def run_claude_async(
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            env=_claude_subprocess_env(config_mode),
             start_new_session=True,
         )
     except OSError:
