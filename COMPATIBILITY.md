@@ -83,13 +83,27 @@ When cutting a release, bump these **together**:
    `ErrorCode` set, the value enums, or the capability summary)
 4. the `@vX.Y.Z` ref in `.mcp.json`
 
-After the release commit is on `main`, run the `Publish` GitHub Actions workflow
-manually with version `X.Y.Z`. The workflow validates the lockstep references,
-runs the test matrix, builds and checks the distributions, publishes to PyPI,
-then creates the matching `vX.Y.Z` git tag and GitHub Release.
+After the release commit is on `main`, publish by pushing the matching
+`vX.Y.Z` tag:
 
-Pushing a matching `vX.Y.Z` tag manually is still supported as an escape hatch;
-it runs the same validation and publishing workflow.
+```sh
+git tag -a vX.Y.Z -m "cc-plugin-codex vX.Y.Z" <release-commit>
+git push origin vX.Y.Z
+```
+
+The tag push triggers the `Publish` workflow, which validates the lockstep
+references, runs the test matrix, builds and checks the distributions, publishes
+to PyPI, then creates the matching GitHub Release.
+
+The PyPI upload runs in the `pypi` GitHub Actions environment, which requires a
+manual approval from a designated reviewer. The run pauses at that gate until the
+reviewer approves the deployment (Actions run → **Review deployments** → approve
+`pypi`).
+
+The `Publish` workflow also accepts a manual `workflow_dispatch` run with an
+explicit version, but the `pypi` environment's deployment-branch policy only
+permits `vX.Y.Z` **tag** refs, so a dispatch from `main` is rejected at the
+deployment gate and does **not** publish. Push the tag instead.
 
 The `.mcp.json` ref and the git tag must match, or a bundled install fails to
 resolve.
