@@ -240,7 +240,9 @@ def gather_context(
     # for working_tree/staged rather than silently ignoring it.
     if head is not None and scope != "branch":
         raise InvalidHeadError(f"head is only valid for scope=branch, not {scope!r}")
-    effective_head = head or "HEAD"
+    # Coalesce only None (caller omitted head), never "" — an explicit empty string
+    # must fall through to _valid_ref and raise invalid_head, not silently use HEAD.
+    effective_head = "HEAD" if head is None else head
     opts = DiffOptions(scope=scope, base=base, paths=normalize_paths(paths), head=effective_head)
     diff_args = _diff_args(opts)  # raises InvalidScopeError/InvalidBaseError/InvalidHeadError
     if scope == "branch":

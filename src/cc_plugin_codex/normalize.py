@@ -19,6 +19,7 @@ from cc_plugin_codex.schemas import (
     SuccessResult,
     Usage,
     Verdict,
+    branch_range,
 )
 
 _SCHEMA_INSTRUCTION = (
@@ -62,20 +63,22 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
         parts.append(payload["prompt"])
         if payload.get("context"):
             parts.append(f"\nAdditional context:\n{payload['context']}")
-    elif tool == "claude_review_changes":
+    # base...head range string for branch-scope diffs; None for other scopes.
+    _, diff_range = branch_range(payload.get("scope"), payload.get("base"), payload.get("head"))
+    if tool == "claude_review_changes":
         if payload.get("focus"):
             parts.append(f"Focus especially on: {payload['focus']}.")
         scope_note = f"scope={payload.get('scope')}"
-        if payload.get("scope") == "branch":
-            head = payload.get("head") or "HEAD"
-            scope_note += f", range={payload.get('base')}...{head}"
+        if diff_range:
+            scope_note += f", range={diff_range}"
         parts.append(f"\nChanges ({scope_note}):{paths_note}\n{context_text}")
     elif tool == "claude_adversarial_review":
         parts.append(f"\nTarget:\n{payload['target']}")
         if payload.get("evidence"):
             parts.append(f"\nEvidence:\n{payload['evidence']}")
         if context_text:
-            parts.append(f"\nRelated changes:{paths_note}\n{context_text}")
+            range_note = f" (range={diff_range})" if diff_range else ""
+            parts.append(f"\nRelated changes{range_note}:{paths_note}\n{context_text}")
     parts.append("\n" + _SCHEMA_INSTRUCTION)
     return "\n".join(parts)
 

@@ -342,6 +342,13 @@ def test_branch_head_rejects_nonexistent_ref(git_repo):
         gather_context(str(git_repo), scope="branch", base=base, head="not-a-real-ref")
 
 
+def test_branch_empty_string_head_is_rejected_not_coalesced(git_repo):
+    # An explicit "" must fail validation rather than silently defaulting to HEAD.
+    base = _current_branch(git_repo)
+    with pytest.raises(InvalidHeadError):
+        gather_context(str(git_repo), scope="branch", base=base, head="")
+
+
 def test_branch_explicit_branch_head_works(git_repo):
     base = _current_branch(git_repo)
     subprocess.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)

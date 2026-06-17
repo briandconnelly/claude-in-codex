@@ -54,7 +54,10 @@ def branch_range(
     cannot drift from base+head."""
     if scope != "branch":
         return None, None
-    effective_head = head or "HEAD"
+    # Coalesce only None (caller omitted head), never "" — an explicit empty
+    # string is invalid input that must surface as invalid_head, not be hidden
+    # behind a silent HEAD default.
+    effective_head = "HEAD" if head is None else head
     return effective_head, f"{base}...{effective_head}"
 
 

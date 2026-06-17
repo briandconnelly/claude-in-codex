@@ -1962,6 +1962,26 @@ async def test_review_changes_malformed_head_is_invalid_head(fake_claude, git_re
     assert data["error"]["offending_param"] == "head"
 
 
+async def test_review_changes_empty_head_is_invalid_head(fake_claude, git_repo):
+    # An explicit empty string must surface as invalid_head, not be coalesced to HEAD.
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "branch",
+                    "base": "main",
+                    "head": "",
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["offending_param"] == "head"
+
+
 async def test_review_changes_nonexistent_head_is_invalid_head(fake_claude, git_repo):
     import subprocess as _sp
 
