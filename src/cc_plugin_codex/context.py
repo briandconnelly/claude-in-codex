@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -91,6 +92,13 @@ def _classify_git_failure(stderr: str) -> None:
     raise RuntimeError(message)
 
 
+def _git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
 def normalize_paths(paths: list[str] | None) -> list[str] | None:
     """Validate path filters before they reach git argv."""
     if not paths:
@@ -125,6 +133,7 @@ def _git(cwd: str, *args: str) -> str:
             text=True,
             timeout=timeout,
             check=False,
+            env=_git_env(),
         )
     except FileNotFoundError as exc:
         raise GitUnavailableError("git executable not found") from exc
@@ -151,6 +160,7 @@ def _ref_exists(cwd: str, ref: str) -> bool:
             text=True,
             timeout=timeout,
             check=False,
+            env=_git_env(),
         )
     except FileNotFoundError as exc:
         raise GitUnavailableError("git executable not found") from exc

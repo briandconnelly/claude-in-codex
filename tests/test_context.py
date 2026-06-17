@@ -212,6 +212,24 @@ def test_git_timeout_is_bounded(monkeypatch, git_repo):
         gather_context(str(git_repo), scope="working_tree", base="main")
 
 
+def test_git_invocations_force_c_locale(monkeypatch, git_repo):
+    import cc_plugin_codex.context as ctx
+
+    envs = []
+
+    def fake_run(*args, **kwargs):
+        envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setenv("PATH", "preserved-path")
+    monkeypatch.setattr(ctx.subprocess, "run", fake_run)
+    gather_context(str(git_repo), scope="working_tree", base="main")
+    assert envs
+    assert all(env["LC_ALL"] == "C" for env in envs)
+    assert all(env["LANG"] == "C" for env in envs)
+    assert all(env["PATH"] == "preserved-path" for env in envs)
+
+
 def test_non_git_working_tree_raises_not_a_git_repo(tmp_path):
     with pytest.raises(NotAGitRepoError):
         gather_context(str(tmp_path), scope="working_tree", base="main")
