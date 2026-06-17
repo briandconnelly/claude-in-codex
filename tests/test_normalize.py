@@ -50,6 +50,15 @@ def test_build_prompt_review_mentions_paths_when_scoped():
     assert "['src']" in p
 
 
+def test_build_prompt_review_mentions_branch_range_when_head_set():
+    p = build_prompt(
+        "claude_review_changes",
+        payload={"scope": "branch", "base": "main", "head": "feature"},
+        context_text="diff --git ...",
+    )
+    assert "main...feature" in p
+
+
 def test_build_prompt_adversarial_mentions_paths_when_diff_attached():
     p = build_prompt(
         "claude_adversarial_review",

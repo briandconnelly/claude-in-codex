@@ -40,6 +40,7 @@ from cc_plugin_codex.schemas import (
     ErrorInfo,
     ErrorResult,
     Meta,
+    branch_range,
     workspace_warning_for,
 )
 
@@ -182,6 +183,7 @@ class JobConfig:
     access: str
     scope: str | None
     base: str | None
+    head: str | None
     detail: str
     timeout_seconds: int
     workspace_source: str | None
@@ -250,6 +252,7 @@ def start_job(
             "access": cfg.access,
             "scope": cfg.scope,
             "base": cfg.base,
+            "head": cfg.head,
             "detail": cfg.detail,
             "timeout_seconds": cfg.timeout_seconds,
             "workspace_source": cfg.workspace_source,
@@ -384,14 +387,20 @@ def _build_meta(meta: dict) -> Meta:
     c = meta.get("config", {})
     cwd = c.get("cwd", "")
     source = c.get("workspace_source")
+    scope = c.get("scope")
+    # Recompute diff_range from the stored base+head inputs so it cannot drift from
+    # what the job was started with; head defaults to HEAD for branch scope.
+    head, diff_range = branch_range(scope, c.get("base"), c.get("head"))
     return Meta(
         cwd=cwd,
         workspace_source=source,
         workspace_warning=workspace_warning_for(source, cwd),
         config_mode=c.get("config_mode", "inherit"),
         access=c.get("access", "toolless"),
-        scope=c.get("scope"),
+        scope=scope,
         base=c.get("base"),
+        head=head,
+        diff_range=diff_range,
         paths=c.get("paths"),
         timeout_seconds=c.get("timeout_seconds", max_seconds()),
         requested_max_budget_usd=c.get("requested_max_budget_usd"),

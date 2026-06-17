@@ -65,7 +65,11 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
     elif tool == "claude_review_changes":
         if payload.get("focus"):
             parts.append(f"Focus especially on: {payload['focus']}.")
-        parts.append(f"\nChanges (scope={payload.get('scope')}):{paths_note}\n{context_text}")
+        scope_note = f"scope={payload.get('scope')}"
+        if payload.get("scope") == "branch":
+            head = payload.get("head") or "HEAD"
+            scope_note += f", range={payload.get('base')}...{head}"
+        parts.append(f"\nChanges ({scope_note}):{paths_note}\n{context_text}")
     elif tool == "claude_adversarial_review":
         parts.append(f"\nTarget:\n{payload['target']}")
         if payload.get("evidence"):

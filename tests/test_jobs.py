@@ -52,6 +52,7 @@ def _cfg(**over):
         access="toolless",
         scope="working_tree",
         base="main",
+        head=None,
         detail="summary",
         timeout_seconds=1800,
         workspace_source="cwd",
@@ -135,6 +136,37 @@ def test_start_job_spawn_failure_cleans_partial_record(tmp_path):
     with pytest.raises(OSError):
         jobs.start_job(["definitely-no-such-claude-binary-xyz"], cwd, _cfg())
     assert jobs.list_jobs(cwd)["jobs"] == []
+
+
+def test_job_config_persists_head(tmp_path):
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg(scope="branch", base="main", head="feature"))
+    _await_done(cwd, job_id)
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["meta"]["head"] == "feature"
+    # diff_range is recomputed from base+head, not persisted separately.
+    assert payload["meta"]["diff_range"] == "main...feature"
+
+
+def test_job_meta_defaults_head_for_branch_scope(tmp_path):
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg(scope="branch", base="main"))
+    _await_done(cwd, job_id)
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["meta"]["head"] == "HEAD"
+    assert payload["meta"]["diff_range"] == "main...HEAD"
+
+
+def test_job_meta_non_branch_leaves_head_and_range_unset(tmp_path):
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg(scope="working_tree", base="main"))
+    _await_done(cwd, job_id)
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["meta"].get("head") is None
+    assert payload["meta"].get("diff_range") is None
 
 
 def test_job_meta_carries_requested_budget_and_warning(tmp_path):

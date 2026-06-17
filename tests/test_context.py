@@ -6,11 +6,22 @@ from cc_plugin_codex.context import (
     ContextResult,
     DiffOptions,
     InvalidBaseError,
+    InvalidHeadError,
     InvalidPathsError,
     InvalidScopeError,
     _diff_args,
     gather_context,
 )
+
+
+def _current_branch(git_repo):
+    return subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def test_working_tree_diff(git_repo):
@@ -307,3 +318,77 @@ def test_branch_scope_paths_filter_diff_and_numstat(git_repo):
 def test_diff_args_bad_scope_raises_invalid_scope():
     with pytest.raises(InvalidScopeError):
         _diff_args(DiffOptions("nonsense", "main"))
+
+
+def test_diff_args_uses_explicit_head_range():
+    args = _diff_args(DiffOptions("branch", "main", head="feature"))
+    assert "main...feature" in args
+    assert "main...HEAD" not in args
+
+
+def test_diff_args_default_head_preserves_head_range():
+    args = _diff_args(DiffOptions("branch", "main"))
+    assert "main...HEAD" in args
+
+
+def test_diff_args_malformed_head_raises_invalid_head():
+    with pytest.raises(InvalidHeadError):
+        _diff_args(DiffOptions("branch", "main", head="--output=/tmp/pwn"))
+
+
+def test_branch_head_rejects_nonexistent_ref(git_repo):
+    base = _current_branch(git_repo)
+    with pytest.raises(InvalidHeadError):
+        gather_context(str(git_repo), scope="branch", base=base, head="not-a-real-ref")
+
+
+def test_branch_explicit_branch_head_works(git_repo):
+    base = _current_branch(git_repo)
+    subprocess.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)
+    (git_repo / "branch.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "branch.py"], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "branch change"], cwd=git_repo, check=True)
+    subprocess.run(["git", "switch", base], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="branch", base=base, head="feature")
+    assert "branch.py" in res.text
+    assert res.summary.files_changed == 1
+
+
+def test_branch_explicit_commit_head_works(git_repo):
+    base = _current_branch(git_repo)
+    subprocess.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)
+    (git_repo / "branch.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "branch.py"], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "branch change"], cwd=git_repo, check=True)
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", base], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="branch", base=base, head=head_sha)
+    assert "branch.py" in res.text
+
+
+def test_branch_paths_filter_with_explicit_head(git_repo):
+    base = _current_branch(git_repo)
+    subprocess.run(["git", "switch", "-c", "feature"], cwd=git_repo, check=True)
+    (git_repo / "src").mkdir()
+    (git_repo / "docs").mkdir()
+    (git_repo / "src" / "feature.py").write_text("value = 1\n")
+    (git_repo / "docs" / "note.md").write_text("note\n")
+    subprocess.run(["git", "add", "src/feature.py", "docs/note.md"], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "branch changes"], cwd=git_repo, check=True)
+    subprocess.run(["git", "switch", base], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="branch", base=base, head="feature", paths=["src"])
+    assert "src/feature.py" in res.text
+    assert "docs/note.md" not in res.text
+    assert res.summary.files_changed == 1
+
+
+@pytest.mark.parametrize("scope", ["working_tree", "staged"])
+def test_explicit_head_rejected_for_non_branch_scope(git_repo, scope):
+    with pytest.raises(InvalidHeadError):
+        gather_context(str(git_repo), scope=scope, base="main", head="feature")

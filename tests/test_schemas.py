@@ -93,7 +93,23 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-16"
+    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-17"
+
+
+def test_meta_carries_head_and_diff_range():
+    meta = Meta(
+        cwd="/repo",
+        config_mode="inherit",
+        access="toolless",
+        scope="branch",
+        base="main",
+        head="feature",
+        diff_range="main...feature",
+        timeout_seconds=180,
+        elapsed_ms=10,
+    )
+    assert meta.head == "feature"
+    assert meta.diff_range == "main...feature"
 
 
 def test_success_result_dump_omits_none():
