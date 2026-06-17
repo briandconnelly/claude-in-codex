@@ -607,7 +607,7 @@ async def _execute(
             env = None
         if isinstance(env, dict):
             apply_cost_usage(meta, env)
-        info = classify_failure(run)
+        info = classify_failure(run, config_mode=r.config_mode)
         return _err(info.code, info.message, info.repair, meta, retryable=info.retryable)
     return normalize_envelope(
         tool, run.stdout, meta, detail=r.detail, context_summary=context_summary
@@ -1799,6 +1799,24 @@ def claude_status() -> ToolResult:
         timeout_bounds=[MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS],
         practical_min_budget_hint=PRACTICAL_MIN_BUDGET_HINT,
     )
+    ready = bool(found and authenticated and not default_errors)
+    if ready:
+        readiness_detail = (
+            "ready: installed, authenticated, and defaults are usable for paid calls."
+        )
+    elif not found:
+        readiness_detail = "not ready: the `claude` CLI was not found on PATH."
+    elif default_errors:
+        readiness_detail = (
+            "not ready: default configuration is invalid; inspect default_errors before paid calls."
+        )
+    elif authenticated is False:
+        readiness_detail = "not ready: Claude CLI reports no authenticated session."
+    elif authenticated is None:
+        readiness_detail = "not ready: Claude CLI authentication could not be determined."
+    else:
+        readiness_detail = "not ready: inspect status fields before paid calls."
+
     status = StatusResult(
         claude_found=found,
         claude_version=version,
@@ -1810,7 +1828,8 @@ def claude_status() -> ToolResult:
         # Version is advisory, not gating: a major outside the tested range warns
         # (version_warning) but does not flip ready, so a claude major bump no
         # longer self-blocks an authenticated, installed CLI.
-        ready=bool(found and authenticated and not default_errors),
+        ready=ready,
+        readiness_detail=readiness_detail,
         config_modes_available={
             "inherit": found,
             "scoped": found,

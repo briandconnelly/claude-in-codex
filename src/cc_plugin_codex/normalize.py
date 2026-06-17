@@ -210,7 +210,8 @@ def normalize_envelope(
                     exit_code=0,
                     elapsed_ms=meta.elapsed_ms,
                     timed_out=False,
-                )
+                ),
+                config_mode=meta.config_mode,
             ),
             meta,
         )

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-17"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-18"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -235,7 +235,8 @@ class StatusResult(BaseModel):
     # Set when `claude --help` did not list a guarantee-bearing flag this plugin
     # sends — an early, free signal that the CLI contract drifted.
     flags_warning: str | None = None
-    ready: bool = False  # found AND authenticated (version is advisory, not gating)
+    ready: bool = False  # found AND authenticated AND defaults are usable for paid calls
+    readiness_detail: str
     config_modes_available: dict
     hooks_disabled: bool
     raw_defaults: RawDefaults

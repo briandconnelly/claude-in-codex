@@ -49,7 +49,7 @@ Restart Codex after installing. Then ask Codex:
 > Ask Claude to run `claude_status`.
 
 `claude_status` is free. It checks whether the `claude` CLI is installed, authenticated, and
-compatible, and shows the defaults a paid call would use.
+compatible, gives a `ready` stop/continue signal, and shows the defaults a paid call would use.
 
 ## Use it
 
@@ -166,6 +166,7 @@ Start with:
 Then:
 
 - If `claude_authenticated` is false, run `claude /login`.
+- If `ready` is false, inspect `readiness_detail` and `default_errors` before making paid calls.
 - If the workspace looks wrong, pass `workspace_root` explicitly.
 - If a review is large or expensive, run `claude_review_dry_run` first.
 - If a background job id is lost, use `claude_job_list`.

@@ -183,7 +183,49 @@ async def run_claude_async(
     return ClaudeRun(out, err, proc.returncode, elapsed, False)
 
 
-def classify_failure(run: ClaudeRun) -> ErrorInfo:
+def _auth_repair_for(config_mode: str | None) -> str:
+    if config_mode in ("inherit", "scoped", "safe"):
+        return "Run `claude /login`; the attempted config_mode uses the Claude login path."
+    if config_mode == "bare":
+        return (
+            "Set a valid ANTHROPIC_API_KEY, or use config_mode inherit/scoped/safe "
+            "after `claude /login`."
+        )
+    return "Run `claude /login`, or set a valid ANTHROPIC_API_KEY for config_mode=bare."
+
+
+def _api_key_repair_for(config_mode: str | None) -> str:
+    if config_mode == "bare":
+        return (
+            "Set a valid ANTHROPIC_API_KEY, or use config_mode inherit/scoped/safe "
+            "after `claude /login`."
+        )
+    if config_mode in ("inherit", "scoped", "safe"):
+        return (
+            "The attempted config_mode does not rely on ANTHROPIC_API_KEY; unset or fix "
+            "ANTHROPIC_API_KEY, then rerun claude_status before retrying."
+        )
+    return (
+        "Set a valid ANTHROPIC_API_KEY, or use config_mode inherit/scoped/safe "
+        "after `claude /login`."
+    )
+
+
+def _has_logged_out_signal(blob: str) -> bool:
+    # Narrow on purpose: a bare "/login" can appear in reviewed content or URLs
+    # echoed by Claude, so require the explicit prompt wording.
+    return "not logged in" in blob or "please run /login" in blob
+
+
+def _has_invalid_api_key_signal(blob: str) -> bool:
+    return (
+        "api_key_invalid" in blob
+        or "invalid api key" in blob
+        or "anthropic_api_key is invalid" in blob
+    )
+
+
+def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> ErrorInfo:
     env = None
     with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
@@ -206,18 +248,24 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
         subtype = str(env.get("subtype") or "").lower()
         result = str(env.get("result") or "")
         structured_blob = f"{subtype}\n{result}".lower()
-        if "api_key" in structured_blob or "invalid api key" in structured_blob:
+        combined_blob = f"{structured_blob}\n{run.stderr}".lower()
+        if _has_logged_out_signal(combined_blob):
+            return ErrorInfo(
+                code="claude_auth_required",
+                message="claude is not authenticated.",
+                repair=_auth_repair_for(config_mode),
+            )
+        if _has_invalid_api_key_signal(structured_blob):
             return ErrorInfo(
                 code="api_key_invalid",
                 message="ANTHROPIC_API_KEY is invalid.",
-                repair="Set a valid ANTHROPIC_API_KEY, or use config_mode "
-                "inherit/scoped to use your existing login.",
+                repair=_api_key_repair_for(config_mode),
             )
         if "auth" in structured_blob or "login" in structured_blob:
             return ErrorInfo(
                 code="claude_auth_required",
                 message="claude is not authenticated.",
-                repair="Run `claude /login`.",
+                repair=_auth_repair_for(config_mode),
             )
         if "budget" in structured_blob:
             return ErrorInfo(
@@ -253,18 +301,17 @@ def classify_failure(run: ClaudeRun) -> ErrorInfo:
     if isinstance(env, dict):
         extra = f"{env.get('subtype', '')} {env.get('result', '')}"
     blob = f"{extra}\n{run.stdout}\n{run.stderr}".lower()
-    if "invalid api key" in blob:
-        return ErrorInfo(
-            code="api_key_invalid",
-            message="ANTHROPIC_API_KEY is invalid.",
-            repair="Set a valid ANTHROPIC_API_KEY, or use config_mode "
-            "inherit/scoped to use your existing login.",
-        )
-    if "not logged in" in blob or "/login" in blob:
+    if _has_logged_out_signal(blob):
         return ErrorInfo(
             code="claude_auth_required",
             message="claude is not authenticated.",
-            repair="Run `claude /login`.",
+            repair=_auth_repair_for(config_mode),
+        )
+    if _has_invalid_api_key_signal(blob):
+        return ErrorInfo(
+            code="api_key_invalid",
+            message="ANTHROPIC_API_KEY is invalid.",
+            repair=_api_key_repair_for(config_mode),
         )
     if "budget" in blob:
         return ErrorInfo(
