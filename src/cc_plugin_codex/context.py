@@ -13,6 +13,7 @@ from cc_plugin_codex.schemas import ContextSummary
 MAX_DIFF_BYTES = 200_000
 
 _REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
 class InvalidScopeError(ValueError):
@@ -78,7 +79,11 @@ def normalize_paths(paths: list[str] | None) -> list[str] | None:
             raise InvalidPathsError(f"path must not start with '-': {path!r}")
         if path.startswith(":"):
             raise InvalidPathsError(f"git pathspec magic is not supported: {path!r}")
+        if "\\" in path:
+            raise InvalidPathsError(f"path must use '/' separators: {path!r}")
         if path.startswith("/"):
+            raise InvalidPathsError(f"path must be repo-relative: {path!r}")
+        if _WINDOWS_DRIVE_RE.match(path):
             raise InvalidPathsError(f"path must be repo-relative: {path!r}")
         if any(segment == ".." for segment in path.split("/")):
             raise InvalidPathsError(f"path must not contain '..' segments: {path!r}")

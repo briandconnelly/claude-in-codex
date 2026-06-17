@@ -43,7 +43,21 @@ def test_paths_none_and_empty_preserve_unfiltered_behavior(git_repo):
     assert empty_paths.summary == unfiltered.summary
 
 
-@pytest.mark.parametrize("path", ["", "-bad", "/tmp/file.py", "../x.py", "src/../x.py", ":!vendor"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "-bad",
+        "/tmp/file.py",
+        "../x.py",
+        "src/../x.py",
+        ":!vendor",
+        "C:/repo/file.py",
+        "C:\\repo\\file.py",
+        "\\\\server\\share\\file.py",
+        "src\\..\\secret.py",
+    ],
+)
 def test_invalid_paths_are_rejected_before_git(monkeypatch, git_repo, path):
     import cc_plugin_codex.context as ctx
 
