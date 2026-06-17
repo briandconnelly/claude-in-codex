@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "cc-plugin-codex/0.1/schema-18"
+FINGERPRINT = "cc-plugin-codex/0.1/schema-19"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -74,6 +74,8 @@ ErrorCode = Literal[
     "invalid_paths",
     "invalid_workspace_root",
     "workspace_outside_roots",
+    "not_a_git_repo",
+    "git_unavailable",
     "context_too_large",
     "timeout",
     "budget_exceeded",

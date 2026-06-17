@@ -32,6 +32,14 @@ class InvalidPathsError(ValueError):
     """Raised when one or more git pathspec filters are malformed/unsafe."""
 
 
+class GitUnavailableError(RuntimeError):
+    """Raised when the git executable is missing or cannot be launched."""
+
+
+class NotAGitRepoError(RuntimeError):
+    """Raised when the selected workspace is not a git working tree."""
+
+
 def _valid_ref(ref: str) -> bool:
     """A conservative git ref/commit check: no leading dash, no option/shell chars."""
     return bool(ref) and not ref.startswith("-") and bool(_REF_RE.match(ref))
@@ -72,6 +80,17 @@ class DiffOptions:
     head: str = "HEAD"
 
 
+def _is_not_git_repo_error(stderr: str) -> bool:
+    return "not a git repository" in stderr.lower()
+
+
+def _classify_git_failure(stderr: str) -> None:
+    message = stderr.strip() or "git failed"
+    if _is_not_git_repo_error(message):
+        raise NotAGitRepoError(message)
+    raise RuntimeError(message)
+
+
 def normalize_paths(paths: list[str] | None) -> list[str] | None:
     """Validate path filters before they reach git argv."""
     if not paths:
@@ -107,10 +126,12 @@ def _git(cwd: str, *args: str) -> str:
             timeout=timeout,
             check=False,
         )
+    except FileNotFoundError as exc:
+        raise GitUnavailableError("git executable not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"git {' '.join(args)} timed out after {timeout}s") from exc
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or "git failed")
+        _classify_git_failure(proc.stderr)
     return proc.stdout
 
 
@@ -131,8 +152,12 @@ def _ref_exists(cwd: str, ref: str) -> bool:
             timeout=timeout,
             check=False,
         )
+    except FileNotFoundError as exc:
+        raise GitUnavailableError("git executable not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"git rev-parse timed out after {timeout}s") from exc
+    if proc.returncode != 0 and _is_not_git_repo_error(proc.stderr):
+        raise NotAGitRepoError(proc.stderr.strip() or "not a git repository")
     return proc.returncode == 0
 
 

@@ -7,6 +7,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Added structured `not_a_git_repo` and `git_unavailable` repair errors for
+  diff-driven review tools, replacing generic `internal_error` diagnostics for
+  common git workspace setup failures.
 - Added `readiness_detail` to `claude_status` so `ready:false` reports an
   actionable stop reason, and refined Claude auth/API-key failure
   classification and repair hints by `config_mode`.
@@ -24,7 +27,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   never fetches refs, calls GitHub, or accepts PR numbers/URLs.
 - Added a structured `invalid_head` repair error and reported the effective
   `head` and `diff_range` in result/dry-run/job meta.
-- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-18`.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-19`.
 
 ## 0.4.0 - 2026-06-16
 
