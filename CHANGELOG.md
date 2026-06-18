@@ -7,6 +7,13 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Added an `unexpanded_env_placeholder` diagnostic: `claude_status` now reports
+  `ready:false` and names any tracked env var (`CC_PLUGIN_CODEX_*` or
+  `ANTHROPIC_API_KEY`) delivered as a literal `${...}` placeholder when the MCP
+  host fails to expand env substitutions — including a non-empty placeholder API
+  key that would otherwise look valid — and `classify_failure` returns a
+  placeholder-aware repair hint on `api_key_invalid`. Bumps the contract
+  fingerprint (new `ErrorCode`).
 - Removed direct Anthropic credential env vars (`ANTHROPIC_API_KEY` and
   `ANTHROPIC_AUTH_TOKEN`) from Claude subprocess environments for login-backed
   config modes (`inherit`, `scoped`, and `safe`) so stale or placeholder

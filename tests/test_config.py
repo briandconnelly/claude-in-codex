@@ -44,6 +44,32 @@ def test_bare_available(monkeypatch):
     assert cfg.bare_available() is True
 
 
+def test_is_env_placeholder():
+    assert cfg.is_env_placeholder("${ANTHROPIC_API_KEY}") is True
+    assert cfg.is_env_placeholder("  ${VAR}  ") is True  # tolerates surrounding whitespace
+    assert cfg.is_env_placeholder("sk-real-key") is False
+    assert cfg.is_env_placeholder("prefix${VAR}") is False  # not a whole-value placeholder
+    assert cfg.is_env_placeholder("") is False
+    assert cfg.is_env_placeholder(None) is False
+
+
+def test_placeholder_env_vars_scans_tracked_vars(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "${CC_PLUGIN_CODEX_CLAUDE_CONFIG}")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "readonly")  # real value, not flagged
+    monkeypatch.setenv("UNRELATED_VAR", "${UNRELATED_VAR}")  # not tracked
+    assert cfg.placeholder_env_vars() == [
+        "ANTHROPIC_API_KEY",
+        "CC_PLUGIN_CODEX_CLAUDE_CONFIG",
+    ]
+
+
+def test_placeholder_env_vars_empty_when_expanded(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-real")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
+    assert cfg.placeholder_env_vars() == []
+
+
 def test_defaults_from_env(monkeypatch):
     monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
     monkeypatch.setenv("CC_PLUGIN_CODEX_TIMEOUT_SECONDS", "240")

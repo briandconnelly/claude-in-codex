@@ -23,6 +23,7 @@ from cc_plugin_codex.claude import (
     run_claude_async,
 )
 from cc_plugin_codex.config import (
+    ENV_PLACEHOLDER_REPAIR,
     MAX_BUDGET_USD,
     MAX_TIMEOUT_SECONDS,
     MIN_BUDGET_USD,
@@ -35,6 +36,7 @@ from cc_plugin_codex.config import (
     hook_security_warnings,
     hooks_disabled_available,
     max_input_bytes,
+    placeholder_env_vars,
     safe_available,
     sanitize_effort,
     supported_majors,
@@ -1646,6 +1648,72 @@ async def claude_job_list(
     return _result(data)
 
 
+def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
+    """Validation errors for the resolved env defaults, for claude_status.
+
+    Root-cause diagnostic first: if the host delivered literal `${...}` values, a
+    per-knob "Unknown config_mode '${...}'" message would blame the value instead
+    of the host not expanding env substitutions. Flag the placeholders and skip
+    the misleading per-knob enum errors for those same vars (a placeholder API key
+    is caught here too, even though it is non-empty)."""
+    errors: list[ErrorInfo] = []
+    placeholders = placeholder_env_vars()
+    if placeholders:
+        named = ", ".join(placeholders)
+        errors.append(
+            ErrorInfo(
+                code="unexpanded_env_placeholder",
+                message=f"These env vars are literal ${{...}} placeholders: {named}.",
+                repair=ENV_PLACEHOLDER_REPAIR,
+            )
+        )
+    config_is_placeholder = "CC_PLUGIN_CODEX_CLAUDE_CONFIG" in placeholders
+    access_is_placeholder = "CC_PLUGIN_CODEX_ACCESS" in placeholders
+    if d.config_mode not in ("inherit", "scoped", "safe", "bare") and not config_is_placeholder:
+        errors.append(
+            ErrorInfo(
+                code="unsupported_config_mode",
+                message=f"Unknown config_mode '{d.config_mode}'.",
+                repair="Set CC_PLUGIN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
+                offending_param="config_mode",
+            )
+        )
+    if d.access not in ("toolless", "readonly") and not access_is_placeholder:
+        errors.append(
+            ErrorInfo(
+                code="unsupported_access",
+                message=f"Unknown access '{d.access}'.",
+                repair="Set CC_PLUGIN_CODEX_ACCESS to one of: toolless, readonly.",
+                offending_param="access",
+            )
+        )
+    if d.config_mode == "safe" and found and not safe_available(fs.help_parsed, fs.supported):
+        errors.append(
+            ErrorInfo(
+                code="unsupported_config_mode",
+                message="config_mode=safe requires a Claude CLI with --safe-mode support.",
+                repair=(
+                    "Update Claude Code, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
+                    "inherit, scoped, or bare."
+                ),
+                offending_param="config_mode",
+            )
+        )
+    if d.config_mode == "bare" and found and not bare_available():
+        errors.append(
+            ErrorInfo(
+                code="api_key_missing",
+                message="config_mode=bare requires ANTHROPIC_API_KEY, which is unset.",
+                repair=(
+                    "Set ANTHROPIC_API_KEY, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
+                    "inherit, scoped, or safe."
+                ),
+                offending_param="config_mode",
+            )
+        )
+    return errors
+
+
 @mcp.tool(
     annotations=_FREE_READ_ANNOTATIONS,
     title="Claude CLI status & defaults",
@@ -1702,49 +1770,7 @@ def claude_status() -> ToolResult:
             )
     else:
         fs = preflight.FlagSupport(supported=frozenset(), help_parsed=False)
-    default_errors: list[ErrorInfo] = []
-    if d.config_mode not in ("inherit", "scoped", "safe", "bare"):
-        default_errors.append(
-            ErrorInfo(
-                code="unsupported_config_mode",
-                message=f"Unknown config_mode '{d.config_mode}'.",
-                repair="Set CC_PLUGIN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
-                offending_param="config_mode",
-            )
-        )
-    if d.access not in ("toolless", "readonly"):
-        default_errors.append(
-            ErrorInfo(
-                code="unsupported_access",
-                message=f"Unknown access '{d.access}'.",
-                repair="Set CC_PLUGIN_CODEX_ACCESS to one of: toolless, readonly.",
-                offending_param="access",
-            )
-        )
-    if d.config_mode == "safe" and found and not safe_available(fs.help_parsed, fs.supported):
-        default_errors.append(
-            ErrorInfo(
-                code="unsupported_config_mode",
-                message="config_mode=safe requires a Claude CLI with --safe-mode support.",
-                repair=(
-                    "Update Claude Code, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
-                    "inherit, scoped, or bare."
-                ),
-                offending_param="config_mode",
-            )
-        )
-    if d.config_mode == "bare" and found and not bare_available():
-        default_errors.append(
-            ErrorInfo(
-                code="api_key_missing",
-                message="config_mode=bare requires ANTHROPIC_API_KEY, which is unset.",
-                repair=(
-                    "Set ANTHROPIC_API_KEY, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
-                    "inherit, scoped, or safe."
-                ),
-                offending_param="config_mode",
-            )
-        )
+    default_errors = _default_config_errors(d, found, fs)
     raw_defaults = RawDefaults(
         config_mode=d.config_mode,
         access=d.access,

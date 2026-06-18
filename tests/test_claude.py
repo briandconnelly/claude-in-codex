@@ -384,6 +384,21 @@ def test_classify_invalid_api_key_repair_matches_bare_mode():
     assert "Set a valid ANTHROPIC_API_KEY" in info.repair
 
 
+def test_classify_invalid_api_key_repair_flags_placeholder(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
+    run = ClaudeRun(
+        stdout="",
+        stderr="Invalid API key · Fix external API key",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    info = classify_failure(run, config_mode="inherit")
+    assert info.code == "api_key_invalid"
+    assert "literal ${...} placeholder" in info.repair
+    assert "not expanding env substitutions" in info.repair
+
+
 def test_classify_invalid_api_key_repair_matches_default_mode():
     run = ClaudeRun(
         stdout="",
