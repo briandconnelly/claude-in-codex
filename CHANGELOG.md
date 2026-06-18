@@ -7,6 +7,13 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Added `api_key_present` (boolean only — the value is never echoed) and an
+  advisory `api_key_warning` to `claude_status`: when `ANTHROPIC_API_KEY` is set
+  in a login mode (`inherit`/`scoped`/`safe`), the warning explains that the key
+  is stripped and ignored there in favor of OAuth and is used only in
+  `config_mode=bare`. The warning does not appear in `bare`, nor for a literal
+  `${...}` placeholder (already covered by `unexpanded_env_placeholder`). Bumps
+  the contract fingerprint (new `StatusResult` fields).
 - Added an `unexpanded_env_placeholder` diagnostic: `claude_status` now reports
   `ready:false` and names any tracked env var (`CC_PLUGIN_CODEX_*` or
   `ANTHROPIC_API_KEY`) delivered as a literal `${...}` placeholder when the MCP
