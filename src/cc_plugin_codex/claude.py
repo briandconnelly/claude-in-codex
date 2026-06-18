@@ -19,6 +19,7 @@ from cc_plugin_codex.config import (
     INDEPENDENT_CRITIC_PROMPT,
     access_flags,
     config_mode_flags,
+    is_env_placeholder,
 )
 from cc_plugin_codex.schemas import ErrorInfo
 
@@ -222,6 +223,14 @@ def _auth_repair_for(config_mode: str | None) -> str:
 
 
 def _api_key_repair_for(config_mode: str | None) -> str:
+    # A literal `${ANTHROPIC_API_KEY}` is the host failing to expand env vars, not a
+    # rotated/revoked key — point at host substitution instead of "set a valid key".
+    if is_env_placeholder(os.environ.get("ANTHROPIC_API_KEY")):
+        return (
+            "ANTHROPIC_API_KEY is a literal ${...} placeholder; your MCP host is not "
+            "expanding env substitutions. Use an env_vars passthrough list, or set a "
+            "literal key."
+        )
     if config_mode == "bare":
         return (
             "Set a valid ANTHROPIC_API_KEY, or use config_mode inherit/scoped/safe "

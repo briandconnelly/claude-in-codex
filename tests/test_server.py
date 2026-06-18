@@ -335,6 +335,46 @@ async def test_status_reports_invalid_env_defaults(monkeypatch):
     }
 
 
+async def test_status_flags_unexpanded_env_placeholders(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    # Host delivered literal ${...} for both a config knob and the API key.
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "${CC_PLUGIN_CODEX_CLAUDE_CONFIG}")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["ready"] is False
+    codes = [err["code"] for err in data["default_errors"]]
+    # The placeholder diagnostic fires...
+    assert "unexpanded_env_placeholder" in codes
+    placeholder = next(
+        e for e in data["default_errors"] if e["code"] == "unexpanded_env_placeholder"
+    )
+    assert "CC_PLUGIN_CODEX_CLAUDE_CONFIG" in placeholder["message"]
+    # ...and names the non-empty API key, which would otherwise look valid.
+    assert "ANTHROPIC_API_KEY" in placeholder["message"]
+    # The misleading per-knob "Unknown config_mode '${...}'" error is suppressed.
+    assert "unsupported_config_mode" not in codes
+
+
+async def test_status_no_placeholder_error_for_valid_env(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
+    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "readonly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    codes = [err["code"] for err in data["default_errors"]]
+    assert "unexpanded_env_placeholder" not in codes
+
+
 async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
     fake_claude, monkeypatch, tmp_path
 ):
@@ -368,7 +408,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-19"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-20"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1012,7 +1052,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-19"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-20"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",

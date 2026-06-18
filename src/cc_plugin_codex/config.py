@@ -86,6 +86,44 @@ def defaults() -> Defaults:
     )
 
 
+# A value the MCP host failed to expand: the literal `${VAR}` form delivered
+# verbatim when the host does not perform ${...} substitution. The body must be a
+# valid shell variable name so malformed forms (`${}`, `${ x }`, `${1}`) are not
+# misreported as substitution failures. Matched against the whole value only: an
+# embedded `${VAR}` (e.g. `${HOME}/state`) is deliberately not flagged, since a
+# legitimate value may contain `$` and we want zero false positives here.
+_ENV_PLACEHOLDER_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+def is_env_placeholder(value: str | None) -> bool:
+    """True when an env value is an unexpanded `${...}` placeholder.
+
+    Some MCP hosts deliver `"env": {"VAR": "${VAR}"}` literally instead of
+    substituting it, so a non-empty value can still be unusable. Callers use this
+    to diagnose the host-substitution failure rather than blaming the value."""
+    return value is not None and bool(_ENV_PLACEHOLDER_RE.match(value.strip()))
+
+
+def placeholder_env_vars() -> list[str]:
+    """Names of tracked env vars whose values are unexpanded `${...}` placeholders.
+
+    Scans this plugin's own `CC_PLUGIN_CODEX_*` knobs plus `ANTHROPIC_API_KEY`
+    (which Claude Code prefers over the OAuth login, so a placeholder key breaks
+    every config_mode). Sorted for stable, deterministic reporting."""
+    return sorted(
+        name
+        for name, value in os.environ.items()
+        if (name.startswith("CC_PLUGIN_CODEX_") or name == "ANTHROPIC_API_KEY")
+        and is_env_placeholder(value)
+    )
+
+
+ENV_PLACEHOLDER_REPAIR = (
+    "These env vars are literal ${...}; your MCP host is not expanding env "
+    "substitutions. Use an env_vars passthrough list, or set literal values."
+)
+
+
 def sanitize_effort(value: str | None) -> str:
     """Normalize an effort value to a CLI-accepted level, falling back to the
     default. An invalid env value must not break a paid call, so it degrades
