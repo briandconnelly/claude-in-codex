@@ -5,22 +5,20 @@ All notable changes to `cc-plugin-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
-## Unreleased
+## 0.5.0 - 2026-06-17
 
 - Added `api_key_present` (boolean only — the value is never echoed) and an
   advisory `api_key_warning` to `claude_status`: when `ANTHROPIC_API_KEY` is set
   in a login mode (`inherit`/`scoped`/`safe`), the warning explains that the key
   is stripped and ignored there in favor of OAuth and is used only in
   `config_mode=bare`. The warning does not appear in `bare`, nor for a literal
-  `${...}` placeholder (already covered by `unexpanded_env_placeholder`). Bumps
-  the contract fingerprint (new `StatusResult` fields).
+  `${...}` placeholder (already covered by `unexpanded_env_placeholder`).
 - Added an `unexpanded_env_placeholder` diagnostic: `claude_status` now reports
   `ready:false` and names any tracked env var (`CC_PLUGIN_CODEX_*` or
   `ANTHROPIC_API_KEY`) delivered as a literal `${...}` placeholder when the MCP
   host fails to expand env substitutions — including a non-empty placeholder API
   key that would otherwise look valid — and `classify_failure` returns a
-  placeholder-aware repair hint on `api_key_invalid`. Bumps the contract
-  fingerprint (new `ErrorCode`).
+  placeholder-aware repair hint on `api_key_invalid`.
 - Removed direct Anthropic credential env vars (`ANTHROPIC_API_KEY` and
   `ANTHROPIC_AUTH_TOKEN`) from Claude subprocess environments for login-backed
   config modes (`inherit`, `scoped`, and `safe`) so stale or placeholder
@@ -46,7 +44,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   never fetches refs, calls GitHub, or accepts PR numbers/URLs.
 - Added a structured `invalid_head` repair error and reported the effective
   `head` and `diff_range` in result/dry-run/job meta.
-- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-19`.
+- Bumped the agent-visible schema fingerprint to `cc-plugin-codex/0.1/schema-21`.
 
 ## 0.4.0 - 2026-06-16
 
