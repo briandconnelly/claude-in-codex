@@ -178,17 +178,20 @@ def git_timeout_seconds() -> int:
     return max(1, _env_int("CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS", DEFAULT_GIT_TIMEOUT_SECONDS))
 
 
-def bare_available() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-
 def api_key_present() -> bool:
     """Whether a non-empty ANTHROPIC_API_KEY is set (placeholder values count).
 
-    Presence is defined as non-empty, matching bare_available(); a literal
-    ${...} placeholder is non-empty and therefore present. The value itself is
-    never returned — callers report only this boolean."""
+    Presence is defined as non-empty; a literal ${...} placeholder is non-empty
+    and therefore present. The value itself is never returned — callers report
+    only this boolean. Single source of truth for key presence (bare_available
+    delegates here)."""
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def bare_available() -> bool:
+    # config_mode=bare runs on the direct API key, so it is available exactly when
+    # one is present. Delegates to api_key_present so the presence rule is defined once.
+    return api_key_present()
 
 
 def safe_available(help_parsed: bool, supported_flags: set[str] | frozenset[str]) -> bool:
