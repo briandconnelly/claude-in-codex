@@ -46,11 +46,17 @@ def test_bare_available(monkeypatch):
 
 def test_is_env_placeholder():
     assert cfg.is_env_placeholder("${ANTHROPIC_API_KEY}") is True
+    assert cfg.is_env_placeholder("${VAR_1}") is True
     assert cfg.is_env_placeholder("  ${VAR}  ") is True  # tolerates surrounding whitespace
     assert cfg.is_env_placeholder("sk-real-key") is False
     assert cfg.is_env_placeholder("prefix${VAR}") is False  # not a whole-value placeholder
+    assert cfg.is_env_placeholder("${HOME}/state") is False  # embedded, deliberately not flagged
     assert cfg.is_env_placeholder("") is False
     assert cfg.is_env_placeholder(None) is False
+    # Malformed ${...} forms are not valid shell var names -> not a substitution failure.
+    assert cfg.is_env_placeholder("${}") is False
+    assert cfg.is_env_placeholder("${ VAR }") is False
+    assert cfg.is_env_placeholder("${1ABC}") is False
 
 
 def test_placeholder_env_vars_scans_tracked_vars(monkeypatch):

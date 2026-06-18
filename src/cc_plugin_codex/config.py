@@ -87,9 +87,12 @@ def defaults() -> Defaults:
 
 
 # A value the MCP host failed to expand: the literal `${VAR}` form delivered
-# verbatim when the host does not perform ${...} substitution. Anchored so a
-# legitimate value that merely happens to contain `${` mid-string is not flagged.
-_ENV_PLACEHOLDER_RE = re.compile(r"^\$\{[^}]*\}$")
+# verbatim when the host does not perform ${...} substitution. The body must be a
+# valid shell variable name so malformed forms (`${}`, `${ x }`, `${1}`) are not
+# misreported as substitution failures. Matched against the whole value only: an
+# embedded `${VAR}` (e.g. `${HOME}/state`) is deliberately not flagged, since a
+# legitimate value may contain `$` and we want zero false positives here.
+_ENV_PLACEHOLDER_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
 def is_env_placeholder(value: str | None) -> bool:
