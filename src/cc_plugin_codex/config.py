@@ -182,6 +182,15 @@ def bare_available() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def api_key_present() -> bool:
+    """Whether a non-empty ANTHROPIC_API_KEY is set (placeholder values count).
+
+    Presence is defined as non-empty, matching bare_available(); a literal
+    ${...} placeholder is non-empty and therefore present. The value itself is
+    never returned — callers report only this boolean."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
 def safe_available(help_parsed: bool, supported_flags: set[str] | frozenset[str]) -> bool:
     """Whether the installed Claude CLI appears to support --safe-mode.
 

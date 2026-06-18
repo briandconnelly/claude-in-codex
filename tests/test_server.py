@@ -375,6 +375,71 @@ async def test_status_no_placeholder_error_for_valid_env(monkeypatch):
     assert "unexpanded_env_placeholder" not in codes
 
 
+async def test_status_warns_api_key_set_in_login_mode(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["api_key_present"] is True
+    assert "ignored in config_mode inherit/scoped/safe" in data["api_key_warning"]
+    assert "config_mode=bare" in data["api_key_warning"]
+    # The key value must never appear in any output field.
+    assert "sk-ant-secret-value" not in json.dumps(data)
+
+
+async def test_status_no_api_key_warning_in_bare_mode(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    # bare mode deliberately uses the key, so its presence is not a caveat.
+    assert data["api_key_present"] is True
+    assert "api_key_warning" not in data
+    assert "sk-ant-secret-value" not in json.dumps(data)
+
+
+async def test_status_no_api_key_warning_when_unset(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["api_key_present"] is False
+    assert "api_key_warning" not in data
+
+
+async def test_status_no_api_key_warning_for_placeholder_in_login_mode(monkeypatch):
+    import cc_plugin_codex.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
+    _patch_full_flag_support(monkeypatch)
+    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    # A literal ${...} is non-empty (present) but is diagnosed by the placeholder
+    # default_error path, so the override warning must not duplicate it.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_status", {}))
+    assert data["api_key_present"] is True
+    assert "api_key_warning" not in data
+    codes = [err["code"] for err in data["default_errors"]]
+    assert "unexpanded_env_placeholder" in codes
+
+
 async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
     fake_claude, monkeypatch, tmp_path
 ):
@@ -408,7 +473,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-20"
+    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-21"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1052,7 +1117,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("cc_codex_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-20"
+    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-21"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",

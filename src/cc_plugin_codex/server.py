@@ -29,12 +29,14 @@ from cc_plugin_codex.config import (
     MIN_BUDGET_USD,
     MIN_TIMEOUT_SECONDS,
     VALID_EFFORTS,
+    api_key_present,
     bare_available,
     clamp_budget,
     clamp_timeout,
     defaults,
     hook_security_warnings,
     hooks_disabled_available,
+    is_env_placeholder,
     max_input_bytes,
     placeholder_env_vars,
     safe_available,
@@ -1811,6 +1813,23 @@ def claude_status() -> ToolResult:
     else:
         readiness_detail = "not ready: inspect status fields before paid calls."
 
+    # Login modes strip ANTHROPIC_API_KEY from the subprocess env (it is used only
+    # in bare), so a key set there has no effect — surface that as advisory. Skip a
+    # literal ${...} placeholder, which _default_config_errors already diagnoses as
+    # unexpanded_env_placeholder; warning again would just duplicate it.
+    key_present = api_key_present()
+    api_key_warning: str | None = None
+    if (
+        key_present
+        and resolved.config_mode in ("inherit", "scoped", "safe")
+        and not is_env_placeholder(os.environ.get("ANTHROPIC_API_KEY"))
+    ):
+        api_key_warning = (
+            "ANTHROPIC_API_KEY is set but ignored in config_mode inherit/scoped/safe "
+            "(these use your OAuth login); it is used only in config_mode=bare. Unset "
+            "it if it is stale, or use config_mode=bare to use it deliberately."
+        )
+
     status = StatusResult(
         claude_found=found,
         claude_version=version,
@@ -1819,6 +1838,8 @@ def claude_status() -> ToolResult:
         version_supported=supported,
         version_warning=version_warning,
         flags_warning=flags_warning,
+        api_key_present=key_present,
+        api_key_warning=api_key_warning,
         # Version is advisory, not gating: a major outside the tested range warns
         # (version_warning) but does not flip ready, so a claude major bump no
         # longer self-blocks an authenticated, installed CLI.
