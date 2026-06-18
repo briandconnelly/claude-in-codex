@@ -27,6 +27,8 @@ _BUDGET_REPAIR = (
     "$0.10-$0.20; lower best-effort budgets can spend and still stop before a "
     "useful answer."
 )
+_LOGIN_MODES = frozenset({"inherit", "scoped", "safe"})
+_LOGIN_CREDENTIAL_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 if TYPE_CHECKING:
     from cc_plugin_codex.preflight import FlagSupport
@@ -39,6 +41,22 @@ class ClaudeRun:
     exit_code: int
     elapsed_ms: int
     timed_out: bool
+
+
+def _claude_subprocess_env(config_mode: str | None) -> dict[str, str] | None:
+    """Return an explicit subprocess env when the selected mode must alter it.
+
+    Login-backed modes must use Claude Code's OAuth/session path, even if the
+    MCP server process was launched with stale or placeholder Anthropic direct
+    credential env vars. Bare mode deliberately relies on those credentials, so
+    leave inheritance intact.
+    """
+    if config_mode not in _LOGIN_MODES:
+        return None
+    env = os.environ.copy()
+    for name in _LOGIN_CREDENTIAL_ENV_VARS:
+        env.pop(name, None)
+    return env
 
 
 def _gate_optional(tokens: list[str], fs: FlagSupport) -> tuple[list[str], list[str]]:
@@ -95,7 +113,9 @@ def build_command(
     return cmd, dropped
 
 
-def auth_status(timeout_seconds: int = 10) -> tuple[bool | None, str | None]:
+def auth_status(
+    timeout_seconds: int = 10, *, config_mode: str | None
+) -> tuple[bool | None, str | None]:
     """Probe `claude auth status` without making a paid call.
 
     Returns (logged_in, detail). logged_in is None when the probe could not run
@@ -111,6 +131,7 @@ def auth_status(timeout_seconds: int = 10) -> tuple[bool | None, str | None]:
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=_claude_subprocess_env(config_mode),
         )
     except (OSError, subprocess.SubprocessError):
         return None, None
@@ -140,7 +161,12 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 async def run_claude_async(
-    cmd: list[str], cwd: str, timeout_seconds: int, stdin_text: str | None = None
+    cmd: list[str],
+    cwd: str,
+    timeout_seconds: int,
+    stdin_text: str | None = None,
+    *,
+    config_mode: str,
 ) -> ClaudeRun:
     """Run `claude` as a subprocess, returning a ClaudeRun.
 
@@ -157,6 +183,7 @@ async def run_claude_async(
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            env=_claude_subprocess_env(config_mode),
             start_new_session=True,
         )
     except OSError:
@@ -184,7 +211,7 @@ async def run_claude_async(
 
 
 def _auth_repair_for(config_mode: str | None) -> str:
-    if config_mode in ("inherit", "scoped", "safe"):
+    if config_mode in _LOGIN_MODES:
         return "Run `claude /login`; the attempted config_mode uses the Claude login path."
     if config_mode == "bare":
         return (
@@ -200,7 +227,7 @@ def _api_key_repair_for(config_mode: str | None) -> str:
             "Set a valid ANTHROPIC_API_KEY, or use config_mode inherit/scoped/safe "
             "after `claude /login`."
         )
-    if config_mode in ("inherit", "scoped", "safe"):
+    if config_mode in _LOGIN_MODES:
         return (
             "The attempted config_mode does not rely on ANTHROPIC_API_KEY; unset or fix "
             "ANTHROPIC_API_KEY, then rerun claude_status before retrying."
