@@ -473,7 +473,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-21"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-22"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1115,9 +1115,9 @@ async def test_capabilities_tool_returns_structured_contract():
     # F7: the capability/version contract is available as structured data, not
     # only as a prose resource.
     async with Client(mcp) as client:
-        result = await client.call_tool("cc_codex_capabilities", {})
+        result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-21"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-22"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1135,7 +1135,6 @@ async def test_capabilities_tool_returns_structured_contract():
         assert lifecycle in data["free_tools"]
     details = {item["name"]: item for item in data["tool_details"]}
     assert set(details) == set(data["paid_tools"]) | set(data["free_tools"]) - {
-        "cc_codex_capabilities",
         "claude_capabilities",
     }
     assert details["claude_review_changes"]["cost"] == "paid"
@@ -1161,16 +1160,13 @@ async def test_list_tools_includes_new_free_tools():
     assert {"claude_review_dry_run", "claude_job_list", "claude_capabilities"} <= names
 
 
-async def test_claude_capabilities_alias_matches_canonical():
+async def test_claude_capabilities_returns_expected_free_tools():
     async with Client(mcp) as client:
-        canon = structured(await client.call_tool("cc_codex_capabilities", {}))
-        alias = structured(await client.call_tool("claude_capabilities", {}))
-    # request_id-free contract: the two must be byte-for-byte identical.
-    assert canon == alias
-    assert "claude_review_dry_run" in alias["free_tools"]
-    assert "claude_job_list" in alias["free_tools"]
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    assert "claude_review_dry_run" in data["free_tools"]
+    assert "claude_job_list" in data["free_tools"]
     # The readonly redaction-bypass caveat is now in the negative scope.
-    assert any("readonly" in s for s in alias["negative_scope"])
+    assert any("readonly" in s for s in data["negative_scope"])
 
 
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
@@ -2025,7 +2021,7 @@ async def test_tool_schemas_expose_head():
 
 async def test_capabilities_include_head():
     async with Client(mcp) as client:
-        data = structured(await client.call_tool("cc_codex_capabilities", {}))
+        data = structured(await client.call_tool("claude_capabilities", {}))
     details = {d["name"]: d for d in data["tool_details"]}
     for name in (
         "claude_review_changes",
