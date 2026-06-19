@@ -1,6 +1,6 @@
 {
   "name": "claude-in-codex",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Call Claude Code from Codex for bounded, independent code review and second opinions",
   "author": { "name": "Brian Connelly", "url": "https://github.com/briandconnelly" },
   "repository": "https://github.com/briandconnelly/claude-in-codex",
