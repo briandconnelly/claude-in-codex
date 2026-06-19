@@ -1862,8 +1862,7 @@ def claude_status() -> ToolResult:
 
 
 def _capabilities_payload() -> dict:
-    """Build the capability contract. Shared by cc_codex_capabilities and its
-    claude_capabilities alias so the two tools cannot drift."""
+    """Build the capability contract. Shared by claude_capabilities."""
 
     def tool_detail(
         name: str,
@@ -1898,7 +1897,6 @@ def _capabilities_payload() -> dict:
         ],
         free_tools=[
             "claude_status",
-            "cc_codex_capabilities",
             "claude_capabilities",
             "claude_review_dry_run",
             "claude_job_status",
@@ -2062,29 +2060,15 @@ def _capabilities_payload() -> dict:
 
 @mcp.tool(
     annotations=_FREE_READ_ANNOTATIONS,
-    title="claude-in-codex capabilities",
-    output_schema=CAPABILITIES_SCHEMA,
-)
-def cc_codex_capabilities() -> ToolResult:
-    """Return the compact capability contract for this server.
-
-    Free and read-only. Call first when unsure which tool to use. Includes tool
-    inventory, scope/negative-scope, prerequisites, modes, deprecation policy, and
-    fingerprint. Also available as claude_capabilities.
-    """
-    return _result(_capabilities_payload())
-
-
-@mcp.tool(
-    annotations=_FREE_READ_ANNOTATIONS,
     title="Claude review capabilities",
     output_schema=CAPABILITIES_SCHEMA,
 )
 def claude_capabilities() -> ToolResult:
-    """Alias of cc_codex_capabilities: the Claude review/critique capability contract.
+    """Return the compact capability contract for this server.
 
-    Free and read-only. Discoverable under a claude_* name; returns the identical
-    contract as cc_codex_capabilities.
+    Free and read-only. Call first when unsure which tool to use. Includes tool
+    inventory, scope/negative-scope, prerequisites, modes, deprecation policy, and
+    fingerprint.
     """
     return _result(_capabilities_payload())
 
