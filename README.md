@@ -1,12 +1,12 @@
-# cc-plugin-codex
+# claude-in-codex
 
-[![CI](https://github.com/briandconnelly/cc-plugin-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/briandconnelly/cc-plugin-codex/actions/workflows/ci.yml)
+[![CI](https://github.com/briandconnelly/claude-in-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/briandconnelly/claude-in-codex/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Ask Claude Code for an independent code review or second opinion, straight from Codex.
 
-`cc-plugin-codex` is review-only: Claude reviews, critiques, and advises. It does not edit
+`claude-in-codex` is review-only: Claude reviews, critiques, and advises. It does not edit
 your code, run shell commands, or get write tools. It is the mirror image of
 [`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc), which lets Claude call
 Codex.
@@ -40,8 +40,8 @@ git --version
 Add this repository as a Codex marketplace, then install the plugin from it:
 
 ```sh
-codex plugin marketplace add briandconnelly/cc-plugin-codex
-codex plugin add cc-plugin-codex
+codex plugin marketplace add briandconnelly/claude-in-codex
+codex plugin add claude-in-codex
 ```
 
 Restart Codex after installing. Then ask Codex:
@@ -140,12 +140,12 @@ Every setting is optional. These are the knobs most users are likely to change:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CC_PLUGIN_CODEX_ACCESS` | `toolless` | `toolless` or `readonly` |
-| `CC_PLUGIN_CODEX_CLAUDE_CONFIG` | `inherit` | `inherit`, `scoped`, `safe`, or `bare` |
-| `CC_PLUGIN_CODEX_EFFORT` | `xhigh` | `low`, `medium`, `high`, `xhigh`, or `max` |
-| `CC_PLUGIN_CODEX_MAX_BUDGET_USD` | `1.00` | best-effort per-call budget threshold |
-| `CC_PLUGIN_CODEX_MODEL` | unset | Claude model; unset uses the CLI default |
-| `CC_PLUGIN_CODEX_TIMEOUT_SECONDS` | `180` | per-call timeout, clamped to 10-600 seconds |
+| `CLAUDE_IN_CODEX_ACCESS` | `toolless` | `toolless` or `readonly` |
+| `CLAUDE_IN_CODEX_CLAUDE_CONFIG` | `inherit` | `inherit`, `scoped`, `safe`, or `bare` |
+| `CLAUDE_IN_CODEX_EFFORT` | `xhigh` | `low`, `medium`, `high`, `xhigh`, or `max` |
+| `CLAUDE_IN_CODEX_MAX_BUDGET_USD` | `1.00` | best-effort per-call budget threshold |
+| `CLAUDE_IN_CODEX_MODEL` | unset | Claude model; unset uses the CLI default |
+| `CLAUDE_IN_CODEX_TIMEOUT_SECONDS` | `180` | per-call timeout, clamped to 10-600 seconds |
 | `ANTHROPIC_API_KEY` | unset | required only for `config_mode=bare` |
 
 Set these in the environment you launch Codex from. The bundled MCP config forwards the common
@@ -182,7 +182,7 @@ The Python package publishes the MCP server entry point for direct use and relea
 After a PyPI release, the server can also be launched with:
 
 ```sh
-uvx --from cc-plugin-codex==0.5.0 cc-plugin-codex-mcp
+uvx --from claude-in-codex==0.6.0 claude-in-codex-mcp
 ```
 
 ## Advanced reference
@@ -192,7 +192,7 @@ cost when the Claude CLI reports it. The tool contract is experimental and pre-1
 pin `meta.fingerprint` to detect agent-visible changes.
 
 The Claude CLI compatibility assumptions are centralized in
-[`src/cc_plugin_codex/cli_contract.py`](./src/cc_plugin_codex/cli_contract.py) and documented
+[`src/claude_in_codex/cli_contract.py`](./src/claude_in_codex/cli_contract.py) and documented
 in [`COMPATIBILITY.md`](./COMPATIBILITY.md).
 
 ## Local development
@@ -200,7 +200,7 @@ in [`COMPATIBILITY.md`](./COMPATIBILITY.md).
 Run the MCP server from a checkout:
 
 ```sh
-codex mcp add cc-plugin-codex -- uv run --directory "$(pwd)" cc-plugin-codex-mcp
+codex mcp add claude-in-codex -- uv run --directory "$(pwd)" claude-in-codex-mcp
 ```
 
 Run tests:

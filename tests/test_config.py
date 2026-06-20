@@ -1,4 +1,4 @@
-import cc_plugin_codex.config as cfg
+import claude_in_codex.config as cfg
 
 
 def test_inherit_flags():
@@ -61,24 +61,24 @@ def test_is_env_placeholder():
 
 def test_placeholder_env_vars_scans_tracked_vars(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "${CC_PLUGIN_CODEX_CLAUDE_CONFIG}")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "readonly")  # real value, not flagged
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "${CLAUDE_IN_CODEX_CLAUDE_CONFIG}")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_ACCESS", "readonly")  # real value, not flagged
     monkeypatch.setenv("UNRELATED_VAR", "${UNRELATED_VAR}")  # not tracked
     assert cfg.placeholder_env_vars() == [
         "ANTHROPIC_API_KEY",
-        "CC_PLUGIN_CODEX_CLAUDE_CONFIG",
+        "CLAUDE_IN_CODEX_CLAUDE_CONFIG",
     ]
 
 
 def test_placeholder_env_vars_empty_when_expanded(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-real")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "scoped")
     assert cfg.placeholder_env_vars() == []
 
 
 def test_defaults_from_env(monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_TIMEOUT_SECONDS", "240")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "scoped")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_TIMEOUT_SECONDS", "240")
     d = cfg.defaults()
     assert d.config_mode == "scoped"
     assert d.timeout_seconds == 240
@@ -133,8 +133,8 @@ def test_hooks_disabled_available_requires_api_key_for_bare(monkeypatch):
 
 
 def test_defaults_malformed_numeric_env_falls_back(monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_MAX_BUDGET_USD", "abc")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_TIMEOUT_SECONDS", "xyz")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_BUDGET_USD", "abc")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_TIMEOUT_SECONDS", "xyz")
     d = cfg.defaults()
     assert d.max_budget_usd == 1.00
     assert d.timeout_seconds == 180
@@ -148,12 +148,12 @@ def test_readonly_allowlist_has_no_write_tools():
 
 
 def test_default_effort(monkeypatch):
-    monkeypatch.delenv("CC_PLUGIN_CODEX_EFFORT", raising=False)
+    monkeypatch.delenv("CLAUDE_IN_CODEX_EFFORT", raising=False)
     assert cfg.defaults().effort == cfg.DEFAULT_EFFORT
 
 
 def test_effort_from_env(monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_EFFORT", "xhigh")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_EFFORT", "xhigh")
     assert cfg.defaults().effort == "xhigh"
 
 
@@ -173,12 +173,12 @@ def test_version_supported():
 
 def test_supported_majors_env_override(monkeypatch):
     # A user can opt into an untested major without a code change.
-    monkeypatch.setenv("CC_PLUGIN_CODEX_SUPPORTED_MAJORS", "2,3")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_SUPPORTED_MAJORS", "2,3")
     assert cfg.supported_majors() == frozenset({2, 3})
     assert cfg.version_supported("3.0.0") is True
     assert cfg.version_supported("4.1.0") is False
 
 
 def test_supported_majors_env_garbage_falls_back(monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_SUPPORTED_MAJORS", "not,ints")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_SUPPORTED_MAJORS", "not,ints")
     assert cfg.supported_majors() == cfg.cli_contract.SUPPORTED_MAJORS

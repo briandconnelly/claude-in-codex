@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from cc_plugin_codex.context import (
+from claude_in_codex.context import (
     ContextResult,
     DiffOptions,
     GitUnavailableError,
@@ -72,7 +72,7 @@ def test_paths_none_and_empty_preserve_unfiltered_behavior(git_repo):
     ],
 )
 def test_invalid_paths_are_rejected_before_git(monkeypatch, git_repo, path):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     def fail_git(*_args, **_kwargs):
         raise AssertionError("git should not be called for invalid paths")
@@ -91,7 +91,7 @@ def test_dotdot_substrings_are_valid_path_names(git_repo):
 
 
 def test_diff_bytes_reports_full_size_when_truncated(git_repo, monkeypatch):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 10)
     (git_repo / "big.py").write_text("x = 1\n" * 1000)
@@ -201,19 +201,19 @@ def test_redacted_paths_are_normalized(git_repo):
 
 
 def test_git_timeout_is_bounded(monkeypatch, git_repo):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     def fake_run(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_GIT_TIMEOUT_SECONDS", "2")
     monkeypatch.setattr(ctx.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out after 2s"):
         gather_context(str(git_repo), scope="working_tree", base="main")
 
 
 def test_git_invocations_force_c_locale(monkeypatch, git_repo):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     envs = []
 
@@ -241,7 +241,7 @@ def test_non_git_branch_scope_raises_not_a_git_repo(tmp_path):
 
 
 def test_missing_git_raises_git_unavailable(monkeypatch, git_repo):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     def fake_run(*args, **kwargs):
         raise FileNotFoundError("git")
@@ -252,7 +252,7 @@ def test_missing_git_raises_git_unavailable(monkeypatch, git_repo):
 
 
 def test_missing_git_for_branch_scope_raises_git_unavailable(monkeypatch, git_repo):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     def fake_run(*args, **kwargs):
         raise FileNotFoundError("git")
@@ -263,7 +263,7 @@ def test_missing_git_for_branch_scope_raises_git_unavailable(monkeypatch, git_re
 
 
 def test_size_cap_truncates(git_repo, monkeypatch):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 10)
     (git_repo / "big.py").write_text("x = 1\n" * 1000)
@@ -277,7 +277,7 @@ def test_size_cap_truncates(git_repo, monkeypatch):
 
 
 def test_filtered_small_file_avoids_large_unfiltered_truncation(git_repo, monkeypatch):
-    import cc_plugin_codex.context as ctx
+    import claude_in_codex.context as ctx
 
     monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 500)
     (git_repo / "big.py").write_text("x = 1\n" * 1000)

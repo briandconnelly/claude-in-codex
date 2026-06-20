@@ -1,14 +1,14 @@
 import anyio
 
-from cc_plugin_codex.claude import (
+from claude_in_codex.claude import (
     ClaudeRun,
     auth_status,
     build_command,
     classify_failure,
     run_claude_async,
 )
-from cc_plugin_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
-from cc_plugin_codex.preflight import FlagSupport
+from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
+from claude_in_codex.preflight import FlagSupport
 
 # Probe could not run -> fail open: every flag is treated as supported, so these
 # tests are deterministic and never shell out to a real `claude --help`.
@@ -73,7 +73,7 @@ async def test_run_claude_async_preserves_api_key_for_bare(monkeypatch):
 
 
 def test_auth_status_strips_direct_credentials_for_login_mode(monkeypatch):
-    import cc_plugin_codex.claude as cl
+    import claude_in_codex.claude as cl
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-stale")
@@ -99,7 +99,7 @@ def test_auth_status_strips_direct_credentials_for_login_mode(monkeypatch):
 
 
 def test_auth_status_preserves_inherited_env_for_bare(monkeypatch):
-    import cc_plugin_codex.claude as cl
+    import claude_in_codex.claude as cl
 
     captured = {}
 

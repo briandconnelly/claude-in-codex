@@ -7,8 +7,8 @@ legitimately changes."""
 
 from pathlib import Path
 
-from cc_plugin_codex.normalize import normalize_envelope
-from cc_plugin_codex.schemas import FINGERPRINT, Meta
+from claude_in_codex.normalize import normalize_envelope
+from claude_in_codex.schemas import FINGERPRINT, Meta
 
 _GOLDEN = (Path(__file__).parent / "golden" / "claude_envelope.json").read_text()
 

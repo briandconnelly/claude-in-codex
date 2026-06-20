@@ -64,7 +64,7 @@ jobs:
           grep -Fq "version = \"${version}\"" pyproject.toml
           grep -Fq "\"version\": \"${version}\"" .codex-plugin/plugin.json
           grep -Fq "@${tag}" .mcp.json
-          grep -Fq "cc-plugin-codex==${version}" README.md
+          grep -Fq "claude-in-codex==${version}" README.md
           grep -Fq "## ${version} -" CHANGELOG.md
 
           {
@@ -157,7 +157,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "cc-plugin-codex ${TAG}" "$GITHUB_SHA"
+          git tag -a "$TAG" -m "claude-in-codex ${TAG}" "$GITHUB_SHA"
           git push origin "$TAG"
 
       - name: Create release
@@ -173,5 +173,5 @@ jobs:
           fi
 
           gh release create "$TAG" dist/* \
-            --title "cc-plugin-codex ${TAG}" \
+            --title "claude-in-codex ${TAG}" \
             --notes "See CHANGELOG.md for release notes."

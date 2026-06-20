@@ -30,10 +30,10 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from cc_plugin_codex.claude import contract_changed_error
-from cc_plugin_codex.cli_contract import is_contract_drift
-from cc_plugin_codex.normalize import apply_cost_usage, normalize_envelope
-from cc_plugin_codex.schemas import (
+from claude_in_codex.claude import contract_changed_error
+from claude_in_codex.cli_contract import is_contract_drift
+from claude_in_codex.normalize import apply_cost_usage, normalize_envelope
+from claude_in_codex.schemas import (
     FINGERPRINT,
     ContextSummary,
     ErrorCode,
@@ -44,10 +44,10 @@ from cc_plugin_codex.schemas import (
     workspace_warning_for,
 )
 
-STATE_ENV = "CC_PLUGIN_CODEX_STATE_DIR"
-TTL_ENV = "CC_PLUGIN_CODEX_JOB_TTL"
-MAX_SECONDS_ENV = "CC_PLUGIN_CODEX_JOB_MAX_SECONDS"
-MAX_COUNT_ENV = "CC_PLUGIN_CODEX_JOB_MAX_COUNT"
+STATE_ENV = "CLAUDE_IN_CODEX_STATE_DIR"
+TTL_ENV = "CLAUDE_IN_CODEX_JOB_TTL"
+MAX_SECONDS_ENV = "CLAUDE_IN_CODEX_JOB_MAX_SECONDS"
+MAX_COUNT_ENV = "CLAUDE_IN_CODEX_JOB_MAX_COUNT"
 
 DEFAULT_TTL = 86_400  # delete terminal job records after 24h
 DEFAULT_MAX_SECONDS = 1_800  # wall-clock cap; a poll past this reaps the job
@@ -80,7 +80,7 @@ def _state_root() -> Path:
     root = os.environ.get(STATE_ENV)
     if root:
         return Path(root)
-    return Path.home() / ".cache" / "cc-plugin-codex" / "jobs"
+    return Path.home() / ".cache" / "claude-in-codex" / "jobs"
 
 
 def _ws_dir(cwd: str) -> Path:
@@ -543,7 +543,7 @@ _STATE_TO_ERROR = {
     "timeout": (
         "job_timeout",
         "The job exceeded its wall-clock deadline and was stopped.",
-        "Narrow the scope or raise CC_PLUGIN_CODEX_JOB_MAX_SECONDS, then start a new job.",
+        "Narrow the scope or raise CLAUDE_IN_CODEX_JOB_MAX_SECONDS, then start a new job.",
     ),
 }
 

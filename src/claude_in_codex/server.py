@@ -15,14 +15,14 @@ from fastmcp import Context, FastMCP
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
-from cc_plugin_codex import __version__, cli_contract, jobs, preflight
-from cc_plugin_codex.claude import (
+from claude_in_codex import __version__, cli_contract, jobs, preflight
+from claude_in_codex.claude import (
     auth_status,
     build_command,
     classify_failure,
     run_claude_async,
 )
-from cc_plugin_codex.config import (
+from claude_in_codex.config import (
     ENV_PLACEHOLDER_REPAIR,
     MAX_BUDGET_USD,
     MAX_TIMEOUT_SECONDS,
@@ -45,7 +45,7 @@ from cc_plugin_codex.config import (
     version_supported,
     workspace_hook_settings,
 )
-from cc_plugin_codex.context import (
+from claude_in_codex.context import (
     MAX_DIFF_BYTES,
     GitUnavailableError,
     InvalidBaseError,
@@ -56,9 +56,9 @@ from cc_plugin_codex.context import (
     gather_context,
     normalize_paths,
 )
-from cc_plugin_codex.jobs import JobConfig
-from cc_plugin_codex.normalize import apply_cost_usage, build_prompt, normalize_envelope
-from cc_plugin_codex.schemas import (
+from claude_in_codex.jobs import JobConfig
+from claude_in_codex.normalize import apply_cost_usage, build_prompt, normalize_envelope
+from claude_in_codex.schemas import (
     CAPABILITIES_SCHEMA,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
@@ -92,7 +92,7 @@ from cc_plugin_codex.schemas import (
 )
 
 CAPABILITY_SUMMARY = (
-    "cc-plugin-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
+    "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. It never edits code, grants "
     "Bash/write tools, or proxies Claude MCP tools; hooks may still run unless "
     "config_mode=safe/bare. Paid tools send context to Anthropic; call "
@@ -104,7 +104,7 @@ CAPABILITY_SUMMARY = (
     "Pass workspace_root explicitly: defaults to first MCP root, else server cwd; "
     "with roots it must be inside one. toolless default; readonly lets "
     "Claude read files directly, bypassing diff redaction. Free-form input capped "
-    "by CC_PLUGIN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
+    "by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
 _HEAD_FIELD_DESC = (
@@ -119,7 +119,7 @@ PRACTICAL_MIN_BUDGET_HINT = (
     "budget_exceeded."
 )
 
-mcp = FastMCP(name="cc-plugin-codex", instructions=CAPABILITY_SUMMARY)
+mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
 
 # Paid tools read code but are NOT idempotent (each call spends money and re-invokes
 # Claude) and are explicitly non-destructive (no writes/shell). openWorld: they reach
@@ -424,7 +424,7 @@ def _validate_input_size(fields: dict[str, str | None], meta: Meta) -> dict | No
         "context_too_large",
         f"User-supplied text is {total} bytes, exceeding the {limit}-byte limit.",
         "Shorten the prompt/evidence/context, split the request, or raise "
-        "CC_PLUGIN_CODEX_MAX_INPUT_BYTES if this workspace intentionally allows it.",
+        "CLAUDE_IN_CODEX_MAX_INPUT_BYTES if this workspace intentionally allows it.",
         meta,
         offending=largest,
     )
@@ -1669,14 +1669,14 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 repair=ENV_PLACEHOLDER_REPAIR,
             )
         )
-    config_is_placeholder = "CC_PLUGIN_CODEX_CLAUDE_CONFIG" in placeholders
-    access_is_placeholder = "CC_PLUGIN_CODEX_ACCESS" in placeholders
+    config_is_placeholder = "CLAUDE_IN_CODEX_CLAUDE_CONFIG" in placeholders
+    access_is_placeholder = "CLAUDE_IN_CODEX_ACCESS" in placeholders
     if d.config_mode not in ("inherit", "scoped", "safe", "bare") and not config_is_placeholder:
         errors.append(
             ErrorInfo(
                 code="unsupported_config_mode",
                 message=f"Unknown config_mode '{d.config_mode}'.",
-                repair="Set CC_PLUGIN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
+                repair="Set CLAUDE_IN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
                 offending_param="config_mode",
             )
         )
@@ -1685,7 +1685,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
             ErrorInfo(
                 code="unsupported_access",
                 message=f"Unknown access '{d.access}'.",
-                repair="Set CC_PLUGIN_CODEX_ACCESS to one of: toolless, readonly.",
+                repair="Set CLAUDE_IN_CODEX_ACCESS to one of: toolless, readonly.",
                 offending_param="access",
             )
         )
@@ -1695,7 +1695,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 code="unsupported_config_mode",
                 message="config_mode=safe requires a Claude CLI with --safe-mode support.",
                 repair=(
-                    "Update Claude Code, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
+                    "Update Claude Code, or set CLAUDE_IN_CODEX_CLAUDE_CONFIG to "
                     "inherit, scoped, or bare."
                 ),
                 offending_param="config_mode",
@@ -1707,7 +1707,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 code="api_key_missing",
                 message="config_mode=bare requires ANTHROPIC_API_KEY, which is unset.",
                 repair=(
-                    "Set ANTHROPIC_API_KEY, or set CC_PLUGIN_CODEX_CLAUDE_CONFIG to "
+                    "Set ANTHROPIC_API_KEY, or set CLAUDE_IN_CODEX_CLAUDE_CONFIG to "
                     "inherit, scoped, or safe."
                 ),
                 offending_param="config_mode",
@@ -1862,8 +1862,7 @@ def claude_status() -> ToolResult:
 
 
 def _capabilities_payload() -> dict:
-    """Build the capability contract. Shared by cc_codex_capabilities and its
-    claude_capabilities alias so the two tools cannot drift."""
+    """Build the capability contract. Shared by claude_capabilities."""
 
     def tool_detail(
         name: str,
@@ -1886,7 +1885,7 @@ def _capabilities_payload() -> dict:
     sync_execution_knobs = [*execution_knobs, "timeout_seconds"]
 
     result = CapabilitiesResult(
-        name="cc-plugin-codex",
+        name="claude-in-codex",
         version=__version__,
         transport="stdio",
         stability="experimental",
@@ -1898,7 +1897,6 @@ def _capabilities_payload() -> dict:
         ],
         free_tools=[
             "claude_status",
-            "cc_codex_capabilities",
             "claude_capabilities",
             "claude_review_dry_run",
             "claude_job_status",
@@ -2062,34 +2060,20 @@ def _capabilities_payload() -> dict:
 
 @mcp.tool(
     annotations=_FREE_READ_ANNOTATIONS,
-    title="cc-plugin-codex capabilities",
-    output_schema=CAPABILITIES_SCHEMA,
-)
-def cc_codex_capabilities() -> ToolResult:
-    """Return the compact capability contract for this server.
-
-    Free and read-only. Call first when unsure which tool to use. Includes tool
-    inventory, scope/negative-scope, prerequisites, modes, deprecation policy, and
-    fingerprint. Also available as claude_capabilities.
-    """
-    return _result(_capabilities_payload())
-
-
-@mcp.tool(
-    annotations=_FREE_READ_ANNOTATIONS,
     title="Claude review capabilities",
     output_schema=CAPABILITIES_SCHEMA,
 )
 def claude_capabilities() -> ToolResult:
-    """Alias of cc_codex_capabilities: the Claude review/critique capability contract.
+    """Return the compact capability contract for this server.
 
-    Free and read-only. Discoverable under a claude_* name; returns the identical
-    contract as cc_codex_capabilities.
+    Free and read-only. Call first when unsure which tool to use. Includes tool
+    inventory, scope/negative-scope, prerequisites, modes, deprecation policy, and
+    fingerprint.
     """
     return _result(_capabilities_payload())
 
 
-@mcp.resource("cc-plugin-codex://capabilities")
+@mcp.resource("claude-in-codex://capabilities")
 def capabilities() -> str:
     """Server capability summary, negative scope, and prerequisites."""
     return CAPABILITY_SUMMARY

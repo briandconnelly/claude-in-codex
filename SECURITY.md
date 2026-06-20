@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-`cc-plugin-codex` is pre-1.0. Security fixes are released for the latest
+`claude-in-codex` is pre-1.0. Security fixes are released for the latest
 published version.
 
 ## Reporting a Vulnerability
@@ -14,8 +14,8 @@ private workspace contents.
 Include:
 
 - The affected version.
-- The relevant configuration, including `CC_PLUGIN_CODEX_ACCESS` and
-  `CC_PLUGIN_CODEX_CLAUDE_CONFIG` when applicable.
+- The relevant configuration, including `CLAUDE_IN_CODEX_ACCESS` and
+  `CLAUDE_IN_CODEX_CLAUDE_CONFIG` when applicable.
 - A minimal reproduction or clear description of the failure mode.
 - Whether the issue could expose code, secrets, credentials, or billing risk.
 

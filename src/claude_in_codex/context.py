@@ -8,8 +8,8 @@ import shlex
 import subprocess
 from dataclasses import dataclass, field
 
-from cc_plugin_codex.config import git_timeout_seconds
-from cc_plugin_codex.schemas import ContextSummary
+from claude_in_codex.config import git_timeout_seconds
+from claude_in_codex.schemas import ContextSummary
 
 MAX_DIFF_BYTES = 200_000
 

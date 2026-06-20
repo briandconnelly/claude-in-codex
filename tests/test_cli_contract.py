@@ -3,8 +3,8 @@
 These guard against a careless edit silently emptying a constant set or letting
 config.py emit a flag the contract does not classify."""
 
-from cc_plugin_codex import cli_contract
-from cc_plugin_codex.config import access_flags, config_mode_flags
+from claude_in_codex import cli_contract
+from claude_in_codex.config import access_flags, config_mode_flags
 
 
 def test_core_and_effort_constants_present():

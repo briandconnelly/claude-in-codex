@@ -9,7 +9,7 @@ schema, or editing the scope text moves the digest and fails this test; an
 internal-only refactor does not.
 
 When this test fails on an intentional contract change:
-  1. bump FINGERPRINT in src/cc_plugin_codex/schemas.py (the `schema-NN` suffix), and
+  1. bump FINGERPRINT in src/claude_in_codex/schemas.py (the `schema-NN` suffix), and
   2. update EXPECTED_CONTRACT_DIGEST below to the printed `actual` value.
 """
 
@@ -19,10 +19,10 @@ from typing import get_args
 
 from fastmcp import Client
 
-from cc_plugin_codex import schemas
-from cc_plugin_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
+from claude_in_codex import schemas
+from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "30c023ac184e4b45020f4d9dde395552426b5e84d0c3a4043c34fa1787b8be2b"
+EXPECTED_CONTRACT_DIGEST = "a0fb22720f151920ccd100f94fc2b4ad263d06b4dca99eb26c146e9150b7491b"
 
 
 async def _contract_surface() -> dict:

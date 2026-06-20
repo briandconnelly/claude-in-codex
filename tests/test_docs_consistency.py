@@ -1,16 +1,16 @@
 import re
 from pathlib import Path
 
-from cc_plugin_codex.schemas import FINGERPRINT
+from claude_in_codex.schemas import FINGERPRINT
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SKILL = ROOT / "skills" / "collaborating-with-claude" / "SKILL.md"
 PACKAGED_SKILL = (
-    ROOT / "plugins" / "cc-plugin-codex" / "skills" / "collaborating-with-claude" / "SKILL.md"
+    ROOT / "plugins" / "claude-in-codex" / "skills" / "collaborating-with-claude" / "SKILL.md"
 )
 SECURITY = ROOT / "SECURITY.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
-_CHANGELOG_FINGERPRINT_RE = re.compile(r"cc-plugin-codex/[0-9.]+/schema-\d+")
+_CHANGELOG_FINGERPRINT_RE = re.compile(r"claude-in-codex/[0-9.]+/schema-\d+")
 BARE_ONLY_UNTRUSTED_WORKSPACES = re.compile(
     r"use\s+`?config_mode=bare`?\s+for\s+untrusted\s+workspaces",
     re.IGNORECASE,

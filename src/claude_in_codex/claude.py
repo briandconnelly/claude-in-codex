@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING
 import anyio
 from anyio.to_thread import run_sync
 
-from cc_plugin_codex import cli_contract, preflight
-from cc_plugin_codex.config import (
+from claude_in_codex import cli_contract, preflight
+from claude_in_codex.config import (
     INDEPENDENT_CRITIC_PROMPT,
     access_flags,
     config_mode_flags,
     is_env_placeholder,
 )
-from cc_plugin_codex.schemas import ErrorInfo
+from claude_in_codex.schemas import ErrorInfo
 
 _BUDGET_REPAIR = (
     "Raise max_budget_usd or reduce context. For small prompts, try at least "
@@ -32,7 +32,7 @@ _LOGIN_MODES = frozenset({"inherit", "scoped", "safe"})
 _LOGIN_CREDENTIAL_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 if TYPE_CHECKING:
-    from cc_plugin_codex.preflight import FlagSupport
+    from claude_in_codex.preflight import FlagSupport
 
 
 @dataclass
@@ -376,6 +376,6 @@ def contract_changed_error() -> ErrorInfo:
         code="cli_contract_changed",
         message="claude rejected a flag or value this plugin sent — its CLI "
         "contract likely changed for your installed version.",
-        repair="Update cc-plugin-codex (or pin claude to a supported version); "
+        repair="Update claude-in-codex (or pin claude to a supported version); "
         "run claude_status to check the version.",
     )

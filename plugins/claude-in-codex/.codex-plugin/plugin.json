@@ -1,9 +1,9 @@
 {
-  "name": "cc-plugin-codex",
-  "version": "0.5.0",
+  "name": "claude-in-codex",
+  "version": "0.6.0",
   "description": "Call Claude Code from Codex for bounded, independent code review and second opinions",
   "author": { "name": "Brian Connelly", "url": "https://github.com/briandconnelly" },
-  "repository": "https://github.com/briandconnelly/cc-plugin-codex",
+  "repository": "https://github.com/briandconnelly/claude-in-codex",
   "license": "MIT",
   "keywords": ["claude", "code-review", "collaboration", "mcp"],
   "skills": "./skills/",
@@ -11,7 +11,7 @@
   "interface": {
     "displayName": "Claude Code (for Codex)",
     "shortDescription": "Ask Claude Code to review and critique your work.",
-    "longDescription": "cc-plugin-codex lets Codex call the Claude Code CLI for bounded, independent critique — code review, adversarial review, and second opinions — with read-only safety and structured findings.",
+    "longDescription": "claude-in-codex lets Codex call the Claude Code CLI for bounded, independent critique — code review, adversarial review, and second opinions — with read-only safety and structured findings.",
     "developerName": "Brian Connelly",
     "category": "Developer Tools",
     "capabilities": ["MCP", "Skills"],

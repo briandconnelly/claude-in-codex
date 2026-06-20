@@ -1,9 +1,26 @@
 # Changelog
 
-All notable changes to `cc-plugin-codex` will be documented in this file.
+All notable changes to `claude-in-codex` will be documented in this file.
 
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
+
+## 0.6.0 - 2026-06-19
+
+### Changed (breaking)
+
+- Renamed the project, package, Python module (`cc_plugin_codex` →
+  `claude_in_codex`), console script (`claude-in-codex-mcp`), MCP server name and
+  tool prefix (`mcp__claude-in-codex__*`), and GitHub repo to **claude-in-codex**,
+  mirroring the sibling `codex-in-claude`.
+- Renamed all environment variables from `CC_PLUGIN_CODEX_*` to
+  `CLAUDE_IN_CODEX_*`. **No back-compat aliases** — update your configuration.
+- Moved the default background-job cache from `~/.cache/cc-plugin-codex/jobs` to
+  `~/.cache/claude-in-codex/jobs`. In-flight jobs created by an older version are
+  not discovered unless `CLAUDE_IN_CODEX_STATE_DIR` points at the old path.
+- Removed the `cc_codex_capabilities` tool; `claude_capabilities` is now the
+  single canonical capabilities tool.
+- Bumped the contract `FINGERPRINT` to `claude-in-codex/0.1/schema-22`.
 
 ## 0.5.0 - 2026-06-17
 

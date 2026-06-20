@@ -38,7 +38,7 @@ jobs:
 
           grep -Fq "\"version\": \"${version}\"" .codex-plugin/plugin.json
           grep -Fq "@${tag}" .mcp.json
-          grep -Fq "cc-plugin-codex==${version}" README.md
+          grep -Fq "claude-in-codex==${version}" README.md
           grep -Fq "## ${version} -" CHANGELOG.md
 
   package:
@@ -74,21 +74,21 @@ jobs:
 
           python -m venv .smoke
           .smoke/bin/python -m pip install --upgrade pip
-          .smoke/bin/python -m pip install dist/cc_plugin_codex-*.whl
+          .smoke/bin/python -m pip install dist/claude_in_codex-*.whl
           .smoke/bin/python - <<'PY'
           from importlib.metadata import distribution
 
-          import cc_plugin_codex
+          import claude_in_codex
 
-          dist = distribution("cc-plugin-codex")
+          dist = distribution("claude-in-codex")
           scripts = [
               ep
               for ep in dist.entry_points
-              if ep.group == "console_scripts" and ep.name == "cc-plugin-codex-mcp"
+              if ep.group == "console_scripts" and ep.name == "claude-in-codex-mcp"
           ]
 
-          assert cc_plugin_codex.__version__ == dist.version
-          assert scripts, "cc-plugin-codex-mcp console script is missing"
+          assert claude_in_codex.__version__ == dist.version
+          assert scripts, "claude-in-codex-mcp console script is missing"
           scripts[0].load()
           PY
 

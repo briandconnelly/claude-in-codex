@@ -34,8 +34,8 @@ def git_repo(tmp_path):
 @pytest.fixture
 def fake_claude(monkeypatch):
     """Replace server.run_claude_async so tests never invoke the real CLI or incur cost."""
-    import cc_plugin_codex.server as srv
-    from cc_plugin_codex.claude import ClaudeRun
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
 
     inner = {
         "summary": "off-by-one bug",

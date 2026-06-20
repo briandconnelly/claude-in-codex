@@ -11,8 +11,8 @@ import time
 import anyio
 import pytest
 
-from cc_plugin_codex import jobs
-from cc_plugin_codex.jobs import JobConfig
+from claude_in_codex import jobs
+from claude_in_codex.jobs import JobConfig
 
 _INNER = {
     "summary": "off-by-one bug",
@@ -83,7 +83,7 @@ def _drift_cmd(message="error: unknown option '--effort'"):
 
 @pytest.fixture(autouse=True)
 def _state_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
 
 
 def _await_done(cwd, job_id, timeout=5.0):
@@ -234,7 +234,7 @@ def test_job_cancel(tmp_path):
 
 
 def test_job_timeout_on_deadline(tmp_path, monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_JOB_MAX_SECONDS", "0")  # deadline = start time
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_MAX_SECONDS", "0")  # deadline = start time
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
     st = jobs.status(cwd, job_id)  # first poll past deadline reaps it
@@ -256,7 +256,7 @@ def test_terminal_job_reaped_after_ttl(tmp_path, monkeypatch):
     job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
     _await_done(cwd, job_id)
     # TTL of 0 means a terminal record is eligible for cleanup on the next call.
-    monkeypatch.setenv("CC_PLUGIN_CODEX_JOB_TTL", "0")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
     time.sleep(0.02)
     assert jobs.status(cwd, job_id) is None  # reaped
 
@@ -356,7 +356,7 @@ def test_failed_job_without_drift_stays_job_failed(tmp_path):
 
 def test_state_root_defaults_under_home(monkeypatch):
     monkeypatch.delenv(jobs.STATE_ENV, raising=False)
-    assert jobs._state_root().parts[-3:] == (".cache", "cc-plugin-codex", "jobs")
+    assert jobs._state_root().parts[-3:] == (".cache", "claude-in-codex", "jobs")
 
 
 def test_pid_helpers_handle_missing_pid():

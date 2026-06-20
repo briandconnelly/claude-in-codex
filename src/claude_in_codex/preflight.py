@@ -17,7 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from cc_plugin_codex import cli_contract
+from claude_in_codex import cli_contract
 
 _LONG_FLAG_RE = re.compile(r"--[a-z][a-z0-9-]+")
 

@@ -7,7 +7,7 @@ import pytest
 from fastmcp import Client
 from tests.conftest import structured
 
-from cc_plugin_codex.server import mcp
+from claude_in_codex.server import mcp
 
 pytestmark = [
     pytest.mark.integration,

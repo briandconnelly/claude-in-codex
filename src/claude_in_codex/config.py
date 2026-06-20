@@ -7,11 +7,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from cc_plugin_codex import cli_contract
+from claude_in_codex import cli_contract
 
 # Re-exported so existing `from ...config import VALID_EFFORTS` callers keep
 # working; the canonical definition lives in cli_contract.
-from cc_plugin_codex.cli_contract import DEFAULT_EFFORT, VALID_EFFORTS
+from claude_in_codex.cli_contract import DEFAULT_EFFORT, VALID_EFFORTS
 
 EMPTY_MCP = '{"mcpServers":{}}'
 
@@ -77,12 +77,12 @@ def _env_int(name: str, default: int) -> int:
 
 def defaults() -> Defaults:
     return Defaults(
-        config_mode=os.environ.get("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit"),
-        access=os.environ.get("CC_PLUGIN_CODEX_ACCESS", "toolless"),
-        model=os.environ.get("CC_PLUGIN_CODEX_MODEL") or None,
-        max_budget_usd=_env_float("CC_PLUGIN_CODEX_MAX_BUDGET_USD", 1.00),
-        timeout_seconds=_env_int("CC_PLUGIN_CODEX_TIMEOUT_SECONDS", 180),
-        effort=sanitize_effort(os.environ.get("CC_PLUGIN_CODEX_EFFORT")),
+        config_mode=os.environ.get("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "inherit"),
+        access=os.environ.get("CLAUDE_IN_CODEX_ACCESS", "toolless"),
+        model=os.environ.get("CLAUDE_IN_CODEX_MODEL") or None,
+        max_budget_usd=_env_float("CLAUDE_IN_CODEX_MAX_BUDGET_USD", 1.00),
+        timeout_seconds=_env_int("CLAUDE_IN_CODEX_TIMEOUT_SECONDS", 180),
+        effort=sanitize_effort(os.environ.get("CLAUDE_IN_CODEX_EFFORT")),
     )
 
 
@@ -107,13 +107,13 @@ def is_env_placeholder(value: str | None) -> bool:
 def placeholder_env_vars() -> list[str]:
     """Names of tracked env vars whose values are unexpanded `${...}` placeholders.
 
-    Scans this plugin's own `CC_PLUGIN_CODEX_*` knobs plus `ANTHROPIC_API_KEY`
+    Scans this plugin's own `CLAUDE_IN_CODEX_*` knobs plus `ANTHROPIC_API_KEY`
     (which Claude Code prefers over the OAuth login, so a placeholder key breaks
     every config_mode). Sorted for stable, deterministic reporting."""
     return sorted(
         name
         for name, value in os.environ.items()
-        if (name.startswith("CC_PLUGIN_CODEX_") or name == "ANTHROPIC_API_KEY")
+        if (name.startswith("CLAUDE_IN_CODEX_") or name == "ANTHROPIC_API_KEY")
         and is_env_placeholder(value)
     )
 
@@ -135,7 +135,7 @@ def supported_majors() -> frozenset[int]:
     """The `claude` CLI major versions this server is built against.
 
     Defaults to cli_contract.SUPPORTED_MAJORS; overridable via
-    CC_PLUGIN_CODEX_SUPPORTED_MAJORS (comma-separated ints) so a user can opt into
+    CLAUDE_IN_CODEX_SUPPORTED_MAJORS (comma-separated ints) so a user can opt into
     an untested major. Any parse error falls back to the built-in set rather than
     raising."""
     raw = os.environ.get(cli_contract.SUPPORTED_MAJORS_ENV)
@@ -171,11 +171,11 @@ def clamp_timeout(value: int) -> int:
 
 
 def max_input_bytes() -> int:
-    return max(1_000, _env_int("CC_PLUGIN_CODEX_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES))
+    return max(1_000, _env_int("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES))
 
 
 def git_timeout_seconds() -> int:
-    return max(1, _env_int("CC_PLUGIN_CODEX_GIT_TIMEOUT_SECONDS", DEFAULT_GIT_TIMEOUT_SECONDS))
+    return max(1, _env_int("CLAUDE_IN_CODEX_GIT_TIMEOUT_SECONDS", DEFAULT_GIT_TIMEOUT_SECONDS))
 
 
 def api_key_present() -> bool:

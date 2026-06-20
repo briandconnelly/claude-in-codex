@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from cc_plugin_codex.normalize import build_prompt, extract_json, normalize_envelope
-from cc_plugin_codex.schemas import FINGERPRINT, Meta
+from claude_in_codex.normalize import build_prompt, extract_json, normalize_envelope
+from claude_in_codex.schemas import FINGERPRINT, Meta
 
 
 def _meta():

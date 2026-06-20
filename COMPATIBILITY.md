@@ -1,6 +1,6 @@
 # Compatibility
 
-`cc-plugin-codex` is an MCP server that the Codex CLI loads and that shells out to
+`claude-in-codex` is an MCP server that the Codex CLI loads and that shells out to
 the Claude Code `claude` CLI.
 It therefore depends on two fast-moving upstreams: the `claude` binary (the
 delegate it drives) and the Codex host (which loads it).
@@ -8,7 +8,7 @@ This document maps every external assumption to where it lives in the code, how 
 break is detected, and what to change when it breaks.
 
 Every `claude`-side assumption is centralized in
-[`src/cc_plugin_codex/cli_contract.py`](./src/cc_plugin_codex/cli_contract.py).
+[`src/claude_in_codex/cli_contract.py`](./src/claude_in_codex/cli_contract.py).
 Changing an assumption should be a one-file edit there.
 
 ## How the plugin degrades
@@ -64,7 +64,7 @@ testing. The drift detection only catches rejection.
 | --- | --- | --- |
 | Plugin manifest (`mcpServers`, `skills`) | `.codex-plugin/plugin.json` | Codex marketplace schema |
 | MCP launch (`uvx --from git+…@tag`) | `.mcp.json` | pinned to a release tag (see below) |
-| Entry point `cc-plugin-codex-mcp` | `pyproject.toml [project.scripts]` | |
+| Entry point `claude-in-codex-mcp` | `pyproject.toml [project.scripts]` | |
 | MCP roots as `file://` URIs | `server.py` `_file_roots` | already tolerant; falls back to server cwd |
 
 ## Versioning & release (lockstep)
@@ -82,13 +82,13 @@ caught before publishing:
 1. `pyproject.toml` `version` ✅
 2. `.codex-plugin/plugin.json` `version` ✅
 3. the `@vX.Y.Z` ref in `.mcp.json` ✅
-4. `README.md` — the pinned `cc-plugin-codex==X.Y.Z` install example ✅
+4. `README.md` — the pinned `claude-in-codex==X.Y.Z` install example ✅
 5. `CHANGELOG.md` — a new `## X.Y.Z - YYYY-MM-DD` section ✅
-6. `FINGERPRINT` in `src/cc_plugin_codex/schemas.py` — **only** when the
+6. `FINGERPRINT` in `src/claude_in_codex/schemas.py` — **only** when the
    agent-visible surface changed (tool names, input/output schemas, the
    `ErrorCode` set, the value enums, or the capability summary); not validated
    by the workflow
-7. the `plugins/cc-plugin-codex/` mirror (`.codex-plugin/plugin.json` and
+7. the `plugins/claude-in-codex/` mirror (`.codex-plugin/plugin.json` and
    `.mcp.json`) — keep in sync with the root copies; not validated by the
    workflow
 
@@ -96,7 +96,7 @@ After the release commit is on `main`, check it out (`git switch main &&
 git pull`) and publish by tagging it and pushing the tag:
 
 ```sh
-git tag -a vX.Y.Z -m "cc-plugin-codex vX.Y.Z"
+git tag -a vX.Y.Z -m "claude-in-codex vX.Y.Z"
 git push origin vX.Y.Z
 ```
 

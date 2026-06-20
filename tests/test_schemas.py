@@ -1,4 +1,4 @@
-from cc_plugin_codex.schemas import (
+from claude_in_codex.schemas import (
     FINGERPRINT,
     RESULT_SCHEMA,
     ErrorInfo,
@@ -11,7 +11,7 @@ from cc_plugin_codex.schemas import (
 
 
 def test_usage_model_is_closed_and_optional():
-    from cc_plugin_codex.schemas import Usage
+    from claude_in_codex.schemas import Usage
 
     u = Usage()  # all fields optional
     assert u.input_tokens is None
@@ -19,7 +19,7 @@ def test_usage_model_is_closed_and_optional():
 
 
 def test_meta_carries_cost_and_usage_fields():
-    from cc_plugin_codex.schemas import Meta, Usage
+    from claude_in_codex.schemas import Meta, Usage
 
     m = Meta(
         cwd="/x",
@@ -62,7 +62,7 @@ def test_meta_carries_security_warnings():
 
 
 def test_finding_supports_line_range():
-    from cc_plugin_codex.schemas import Finding
+    from claude_in_codex.schemas import Finding
 
     f = Finding(
         severity="low",
@@ -77,7 +77,7 @@ def test_finding_supports_line_range():
 
 
 def test_success_result_has_next_steps():
-    from cc_plugin_codex.schemas import Meta, SuccessResult
+    from claude_in_codex.schemas import Meta, SuccessResult
 
     r = SuccessResult(
         tool="claude_ask",
@@ -93,7 +93,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "cc-plugin-codex/0.1/schema-21"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-22"
 
 
 def test_meta_carries_head_and_diff_range():

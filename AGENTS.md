@@ -71,18 +71,18 @@ uv run pytest tests/test_jobs.py --no-cov
   project uses pre-1.0 semantic versioning: minor versions may change the
   agent-visible MCP surface, and patch versions are for compatible fixes.
 - Agent-visible MCP surface changes must bump `FINGERPRINT` in
-  `src/cc_plugin_codex/schemas.py` and update the golden-envelope tests in the
+  `src/claude_in_codex/schemas.py` and update the golden-envelope tests in the
   same PR. This includes tool names, input/output schemas, value enums, error
   codes, and capability text.
 - Claude CLI compatibility assumptions belong in
-  `src/cc_plugin_codex/cli_contract.py`. Keep guarantee-bearing flags fail-closed
+  `src/claude_in_codex/cli_contract.py`. Keep guarantee-bearing flags fail-closed
   rather than silently weakening cost, access, isolation, or behavior guarantees.
 - `.agents/skills` is the canonical repo-owned skill location. Edit skill files
   there, not through tool-specific adapters.
 
 ## Tool-Specific Notes
 
-- Agents with access to `cc-plugin-codex` may request optional second-opinion
+- Agents with access to `claude-in-codex` may request optional second-opinion
   review for security-sensitive, MCP-contract, release, or compatibility changes,
   but it is a paid external call. Do not send secrets or sensitive workspace
   contents to Claude.

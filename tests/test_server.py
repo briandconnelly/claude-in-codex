@@ -6,9 +6,9 @@ import pytest
 from fastmcp import Client
 from tests.conftest import structured
 
-from cc_plugin_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
-from cc_plugin_codex.preflight import FlagSupport
-from cc_plugin_codex.server import CAPABILITY_SUMMARY, _first_root, _resolve_workspace, mcp
+from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
+from claude_in_codex.preflight import FlagSupport
+from claude_in_codex.server import CAPABILITY_SUMMARY, _first_root, _resolve_workspace, mcp
 
 PAID_TOOLS = ("claude_ask", "claude_review_changes", "claude_adversarial_review")
 
@@ -16,7 +16,7 @@ PAID_TOOLS = ("claude_ask", "claude_review_changes", "claude_adversarial_review"
 def _patch_full_flag_support(monkeypatch):
     """Make claude_status' --help probe deterministic: every expected flag present,
     so flags_warning stays None and no real `claude --help` runs."""
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     fs = FlagSupport(
         supported=frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS), help_parsed=True
@@ -213,7 +213,7 @@ async def test_common_optional_params_are_described():
 
 
 async def test_status_reports_config_modes(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -229,12 +229,12 @@ async def test_status_reports_config_modes(monkeypatch):
 
 
 async def test_status_does_not_claim_hooks_disabled_when_bare_unavailable(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bare")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -246,10 +246,10 @@ async def test_status_does_not_claim_hooks_disabled_when_bare_unavailable(monkey
 
 
 async def test_status_claims_hooks_disabled_for_safe_without_api_key(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "safe")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _patch_full_flag_support(monkeypatch)
     async with Client(mcp) as client:
@@ -260,7 +260,7 @@ async def test_status_claims_hooks_disabled_for_safe_without_api_key(monkeypatch
 
 
 async def test_status_does_not_claim_safe_available_when_help_omits_flag(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
 
@@ -275,7 +275,7 @@ async def test_status_does_not_claim_safe_available_when_help_omits_flag(monkeyp
         "flag_support",
         lambda *a, **k: FlagSupport(supported=supported, help_parsed=True),
     )
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "safe")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
     assert data["ready"] is False
@@ -286,10 +286,10 @@ async def test_status_does_not_claim_safe_available_when_help_omits_flag(monkeyp
 
 
 async def test_status_does_not_claim_safe_available_when_claude_missing(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: None)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "safe")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
     assert data["claude_found"] is False
@@ -301,10 +301,10 @@ async def test_status_does_not_claim_safe_available_when_claude_missing(monkeypa
 
 
 async def test_status_reports_cli_missing_before_invalid_defaults(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: None)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
     assert data["ready"] is False
@@ -313,11 +313,11 @@ async def test_status_reports_cli_missing_before_invalid_defaults(monkeypatch):
 
 
 async def test_status_reports_invalid_env_defaults(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "sideways")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_ACCESS", "sideways")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
     async with Client(mcp) as client:
@@ -336,13 +336,13 @@ async def test_status_reports_invalid_env_defaults(monkeypatch):
 
 
 async def test_status_flags_unexpanded_env_placeholders(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
     # Host delivered literal ${...} for both a config knob and the API key.
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "${CC_PLUGIN_CODEX_CLAUDE_CONFIG}")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "${CLAUDE_IN_CODEX_CLAUDE_CONFIG}")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -353,7 +353,7 @@ async def test_status_flags_unexpanded_env_placeholders(monkeypatch):
     placeholder = next(
         e for e in data["default_errors"] if e["code"] == "unexpanded_env_placeholder"
     )
-    assert "CC_PLUGIN_CODEX_CLAUDE_CONFIG" in placeholder["message"]
+    assert "CLAUDE_IN_CODEX_CLAUDE_CONFIG" in placeholder["message"]
     # ...and names the non-empty API key, which would otherwise look valid.
     assert "ANTHROPIC_API_KEY" in placeholder["message"]
     # The misleading per-knob "Unknown config_mode '${...}'" error is suppressed.
@@ -361,13 +361,13 @@ async def test_status_flags_unexpanded_env_placeholders(monkeypatch):
 
 
 async def test_status_no_placeholder_error_for_valid_env(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "readonly")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "scoped")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_ACCESS", "readonly")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -376,12 +376,12 @@ async def test_status_no_placeholder_error_for_valid_env(monkeypatch):
 
 
 async def test_status_warns_api_key_set_in_login_mode(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "inherit")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -393,12 +393,12 @@ async def test_status_warns_api_key_set_in_login_mode(monkeypatch):
 
 
 async def test_status_no_api_key_warning_in_bare_mode(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bare")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -409,12 +409,12 @@ async def test_status_no_api_key_warning_in_bare_mode(monkeypatch):
 
 
 async def test_status_no_api_key_warning_when_unset(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "inherit")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_status", {}))
@@ -423,12 +423,12 @@ async def test_status_no_api_key_warning_when_unset(monkeypatch):
 
 
 async def test_status_no_api_key_warning_for_placeholder_in_login_mode(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(srv, "auth_status", lambda *a, **k: (True, "Logged in"))
     _patch_full_flag_support(monkeypatch)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "inherit")
     # A literal ${...} is non-empty (present) but is diagnosed by the placeholder
     # default_error path, so the override warning must not duplicate it.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}")
@@ -443,7 +443,7 @@ async def test_status_no_api_key_warning_for_placeholder_in_login_mode(monkeypat
 async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
     fake_claude, monkeypatch, tmp_path
 ):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
@@ -473,16 +473,16 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "cc-plugin-codex/0.1/schema-21"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-22"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_MAX_INPUT_BYTES", "1000")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -497,12 +497,12 @@ async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch,
 
 
 async def test_adversarial_rejects_oversized_evidence_before_paid_call(monkeypatch, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_MAX_INPUT_BYTES", "1000")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -528,7 +528,7 @@ async def test_invalid_enum_param_rejected_by_schema(fake_claude):
 async def test_bogus_env_config_mode_is_structured_error(fake_claude, monkeypatch):
     # The structured unsupported_config_mode path is still reachable via a bad
     # env default (not a schema-validated parameter).
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
     async with Client(mcp) as client:
         result = await client.call_tool("claude_ask", {"prompt": "x"}, raise_on_error=False)
     # F3: error envelope rides on a native is_error result, not a "success".
@@ -539,7 +539,7 @@ async def test_bogus_env_config_mode_is_structured_error(fake_claude, monkeypatc
 
 
 async def test_bogus_env_access_is_structured_error(fake_claude, monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_ACCESS", "bogus")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_ACCESS", "bogus")
     async with Client(mcp) as client:
         result = await client.call_tool("claude_ask", {"prompt": "x"}, raise_on_error=False)
     data = structured(result)
@@ -565,8 +565,8 @@ async def test_success_response_carries_request_id(fake_claude):
 
 async def test_status_reports_resolved_defaults(monkeypatch):
     # F5: agents can see the env-driven defaults a no-arg paid call would use.
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
-    monkeypatch.setenv("CC_PLUGIN_CODEX_MAX_BUDGET_USD", "99")  # above clamp
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "scoped")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_BUDGET_USD", "99")  # above clamp
     async with Client(mcp) as client:
         result = await client.call_tool("claude_status", {})
     rd = structured(result)["resolved_defaults"]
@@ -582,7 +582,7 @@ async def test_status_reports_resolved_defaults(monkeypatch):
 async def test_status_reports_readiness(monkeypatch):
     # claude_status must surface auth + version-compatibility for FREE, so an
     # agent can detect a logged-out or incompatible CLI before any paid call.
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
 
@@ -606,7 +606,7 @@ async def test_status_reports_readiness(monkeypatch):
 async def test_status_ready_despite_untested_major(monkeypatch):
     # A claude major outside the tested range is advisory: ready stays True (so an
     # agent does not self-block) but version_warning explains the mismatch.
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
 
@@ -625,7 +625,7 @@ async def test_status_ready_despite_untested_major(monkeypatch):
 
 
 async def test_status_not_ready_when_logged_out(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
 
@@ -644,7 +644,7 @@ async def test_status_not_ready_when_logged_out(monkeypatch):
 
 
 async def test_env_default_config_mode_used(fake_claude, monkeypatch):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "scoped")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "scoped")
     async with Client(mcp) as client:
         result = await client.call_tool("claude_ask", {"prompt": "x"})
     data = structured(result)
@@ -654,7 +654,7 @@ async def test_env_default_config_mode_used(fake_claude, monkeypatch):
 async def test_review_changes_validates_before_context(fake_claude, monkeypatch, tmp_path):
     # A bad env config_mode must error even though cwd is not a git repo —
     # proving option validation happens before git is touched.
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
     monkeypatch.chdir(tmp_path)
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -696,7 +696,7 @@ async def test_review_changes_filters_paths_and_echoes_meta(fake_claude, git_rep
 async def test_review_changes_empty_diff_skips_paid_call(monkeypatch, git_repo):
     import subprocess as _sp
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
 
@@ -716,7 +716,7 @@ async def test_review_changes_empty_diff_skips_paid_call(monkeypatch, git_repo):
 
 
 async def test_review_changes_empty_filtered_diff_is_transparent(monkeypatch, git_repo):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
@@ -751,7 +751,7 @@ async def test_invalid_paths_are_structured_error(fake_claude, git_repo):
 async def test_adversarial_empty_attached_diff_skips_paid_call(monkeypatch, git_repo):
     import subprocess as _sp
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
 
@@ -920,9 +920,9 @@ async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
     # writes a known claude envelope, so no real CLI runs.
     import json as _json
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "off-by-one",
         "verdict": "concerns",
@@ -987,9 +987,9 @@ async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
 
 
 async def test_review_changes_async_spawn_failure_is_structured(monkeypatch, git_repo, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
         srv,
         "build_command",
@@ -1016,9 +1016,9 @@ async def test_review_changes_async_spawn_failure_is_structured(monkeypatch, git
 async def test_review_changes_async_other_oserror_is_internal_error(
     monkeypatch, git_repo, tmp_path
 ):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["claude"], []))
 
     def fake_start_job(*a, **k):
@@ -1041,7 +1041,7 @@ async def test_review_changes_async_other_oserror_is_internal_error(
 
 
 async def test_job_result_not_found_is_structured_error(tmp_path, monkeypatch, git_repo):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     async with Client(mcp) as client:
         result = await client.call_tool(
             "claude_job_result",
@@ -1057,9 +1057,9 @@ async def test_job_consume_result_deletes_finished_record(monkeypatch, git_repo,
     import json as _json
     import time as _time
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "ok",
         "verdict": "pass",
@@ -1115,9 +1115,9 @@ async def test_capabilities_tool_returns_structured_contract():
     # F7: the capability/version contract is available as structured data, not
     # only as a prose resource.
     async with Client(mcp) as client:
-        result = await client.call_tool("cc_codex_capabilities", {})
+        result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "cc-plugin-codex/0.1/schema-21"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-22"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1135,7 +1135,6 @@ async def test_capabilities_tool_returns_structured_contract():
         assert lifecycle in data["free_tools"]
     details = {item["name"]: item for item in data["tool_details"]}
     assert set(details) == set(data["paid_tools"]) | set(data["free_tools"]) - {
-        "cc_codex_capabilities",
         "claude_capabilities",
     }
     assert details["claude_review_changes"]["cost"] == "paid"
@@ -1161,16 +1160,13 @@ async def test_list_tools_includes_new_free_tools():
     assert {"claude_review_dry_run", "claude_job_list", "claude_capabilities"} <= names
 
 
-async def test_claude_capabilities_alias_matches_canonical():
+async def test_claude_capabilities_returns_expected_free_tools():
     async with Client(mcp) as client:
-        canon = structured(await client.call_tool("cc_codex_capabilities", {}))
-        alias = structured(await client.call_tool("claude_capabilities", {}))
-    # request_id-free contract: the two must be byte-for-byte identical.
-    assert canon == alias
-    assert "claude_review_dry_run" in alias["free_tools"]
-    assert "claude_job_list" in alias["free_tools"]
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    assert "claude_review_dry_run" in data["free_tools"]
+    assert "claude_job_list" in data["free_tools"]
     # The readonly redaction-bypass caveat is now in the negative scope.
-    assert any("readonly" in s for s in alias["negative_scope"])
+    assert any("readonly" in s for s in data["negative_scope"])
 
 
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
@@ -1230,7 +1226,7 @@ async def test_dry_run_reports_redaction_count(monkeypatch, git_repo):
 
 
 async def test_dry_run_reports_workspace_hooks(monkeypatch, git_repo):
-    monkeypatch.delenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", raising=False)
+    monkeypatch.delenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", raising=False)
     settings_dir = git_repo / ".claude"
     settings_dir.mkdir()
     (settings_dir / "settings.json").write_text('{"hooks":{"SessionStart":[]}}')
@@ -1247,7 +1243,7 @@ async def test_dry_run_reports_workspace_hooks(monkeypatch, git_repo):
 
 
 async def test_dry_run_does_not_claim_hooks_disabled_when_bare_unavailable(monkeypatch, git_repo):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bare")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bare")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     async with Client(mcp) as client:
         data = structured(
@@ -1260,7 +1256,7 @@ async def test_dry_run_does_not_claim_hooks_disabled_when_bare_unavailable(monke
 
 
 async def test_dry_run_claims_hooks_disabled_for_safe_without_api_key(monkeypatch, git_repo):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "safe")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "safe")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _patch_full_flag_support(monkeypatch)
     async with Client(mcp) as client:
@@ -1274,7 +1270,7 @@ async def test_dry_run_claims_hooks_disabled_for_safe_without_api_key(monkeypatc
 
 
 async def test_dry_run_accepts_per_call_safe_config(monkeypatch, git_repo):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "inherit")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "inherit")
     _patch_full_flag_support(monkeypatch)
     async with Client(mcp) as client:
         data = structured(
@@ -1293,7 +1289,7 @@ async def test_dry_run_accepts_per_call_safe_config(monkeypatch, git_repo):
 
 
 async def test_dry_run_rejects_safe_when_help_omits_flag(monkeypatch, git_repo):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     supported = frozenset(ALWAYS_SEND_FLAGS).union(HELP_GATED_FLAGS) - frozenset({"--safe-mode"})
     monkeypatch.setattr(
@@ -1351,10 +1347,10 @@ async def test_paid_result_reports_workspace_hooks(fake_claude, git_repo):
 async def test_async_empty_diff_skips_job_start(monkeypatch, git_repo, tmp_path):
     import subprocess as _sp
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
         srv,
         "build_command",
@@ -1377,11 +1373,11 @@ async def test_async_result_reports_redacted_paths(monkeypatch, git_repo, tmp_pa
     import subprocess as _sp
     import time as _time
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     (git_repo / ".env").write_text("API_KEY=supersecret\n")
     _sp.run(["git", "add", "-Nf", ".env"], cwd=git_repo, check=True)
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "ok",
         "verdict": "pass",
@@ -1497,8 +1493,8 @@ async def test_meta_echoes_requested_budget(fake_claude, monkeypatch, git_repo):
 
 
 async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
-    import cc_plugin_codex.server as srv
-    from cc_plugin_codex.claude import ClaudeRun
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
 
     captured = {}
     envelope = json.dumps(
@@ -1541,7 +1537,7 @@ async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
 
 async def test_status_auth_detail_is_redacted(monkeypatch):
     # claude_status must not leak the account email/org from `claude auth status`.
-    import cc_plugin_codex.claude as cl
+    import claude_in_codex.claude as cl
 
     class _Proc:
         returncode = 0
@@ -1559,9 +1555,9 @@ async def test_job_list_recovers_job_ids(monkeypatch, git_repo, tmp_path):
     import json as _json
     import time as _time
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "ok",
         "verdict": "pass",
@@ -1622,8 +1618,8 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
     # A non-zero claude exit that still emitted a cost-bearing JSON envelope
     # (e.g. budget_exceeded) must report cost_usd/usage on the error meta, just
     # like the is_error-envelope path does.
-    import cc_plugin_codex.server as srv
-    from cc_plugin_codex.claude import ClaudeRun
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
 
     envelope = json.dumps(
         {
@@ -1675,7 +1671,7 @@ async def test_workspace_error_branch_for_each_tool(tool, args):
 
 
 async def test_job_consume_and_cancel_not_found(tmp_path, monkeypatch, git_repo):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     async with Client(mcp) as client:
         consume = structured(
             await client.call_tool(
@@ -1696,8 +1692,8 @@ async def test_job_consume_and_cancel_not_found(tmp_path, monkeypatch, git_repo)
 
 
 async def test_adversarial_and_async_resolve_error(fake_claude, monkeypatch, git_repo, tmp_path):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("CC_PLUGIN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
     async with Client(mcp) as client:
         adv = structured(
             await client.call_tool(
@@ -1740,9 +1736,9 @@ def _fake_ctx(**over):
     ],
 )
 async def test_invalid_scope_from_gather_context(tool, args, monkeypatch, git_repo, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
         srv, "gather_context", lambda *a, **k: (_ for _ in ()).throw(srv.InvalidScopeError("bad"))
     )
@@ -1765,9 +1761,9 @@ async def test_invalid_scope_from_gather_context(tool, args, monkeypatch, git_re
     ],
 )
 async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_repo, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
         srv, "gather_context", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git exploded"))
     )
@@ -1803,9 +1799,9 @@ async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_r
 async def test_git_environment_errors_from_gather_context(
     tool, args, exc_type, code, repair, monkeypatch, git_repo, tmp_path
 ):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     exc = getattr(srv, exc_type)("boom")
     monkeypatch.setattr(srv, "gather_context", lambda *a, **k: (_ for _ in ()).throw(exc))
     async with Client(mcp) as client:
@@ -1828,9 +1824,9 @@ async def test_git_environment_errors_from_gather_context(
     ],
 )
 async def test_truncated_diff_is_context_too_large(tool, args, monkeypatch, git_repo, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
         srv, "gather_context", lambda *a, **k: _fake_ctx(truncated=True, truncation_hint="too big")
     )
@@ -1846,7 +1842,7 @@ async def test_truncated_diff_is_context_too_large(tool, args, monkeypatch, git_
 
 @pytest.mark.parametrize("tool", ["claude_review_changes", "claude_review_changes_async"])
 async def test_bad_base_ref_is_invalid_base(tool, fake_claude, monkeypatch, git_repo, tmp_path):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
@@ -1869,7 +1865,7 @@ async def test_bad_base_ref_is_invalid_base(tool, fake_claude, monkeypatch, git_
 async def test_nonexistent_base_ref_is_invalid_base(
     tool, args, fake_claude, monkeypatch, git_repo, tmp_path
 ):
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
@@ -1900,8 +1896,8 @@ async def test_adversarial_with_nonempty_diff_calls_claude(fake_claude, git_repo
 
 
 async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
-    import cc_plugin_codex.server as srv
-    from cc_plugin_codex.claude import ClaudeRun
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
 
     async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
         return ClaudeRun(
@@ -1917,13 +1913,13 @@ async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
 
 
 async def test_file_roots_none_ctx_returns_empty():
-    from cc_plugin_codex.server import _file_roots
+    from claude_in_codex.server import _file_roots
 
     assert await _file_roots(None) == []
 
 
 def test_contained_by_value_error(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(
         srv.os.path,
@@ -1934,7 +1930,7 @@ def test_contained_by_value_error(monkeypatch):
 
 
 async def test_status_version_probe_exception_keeps_version_none(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     monkeypatch.setattr(srv.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(
@@ -1950,12 +1946,12 @@ async def test_status_version_probe_exception_keeps_version_none(monkeypatch):
 
 async def test_capabilities_resource_returns_summary():
     async with Client(mcp) as client:
-        contents = await client.read_resource("cc-plugin-codex://capabilities")
-    assert "cc-plugin-codex" in contents[0].text
+        contents = await client.read_resource("claude-in-codex://capabilities")
+    assert "claude-in-codex" in contents[0].text
 
 
 def test_main_runs_stdio(monkeypatch):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     called = {}
     monkeypatch.setattr(srv.mcp, "run", lambda **k: called.update(k))
@@ -1964,9 +1960,9 @@ def test_main_runs_stdio(monkeypatch):
 
 
 async def test_job_cancel_success_via_mcp(monkeypatch, git_repo, tmp_path):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
     async with Client(mcp) as client:
         started = structured(
@@ -2025,7 +2021,7 @@ async def test_tool_schemas_expose_head():
 
 async def test_capabilities_include_head():
     async with Client(mcp) as client:
-        data = structured(await client.call_tool("cc_codex_capabilities", {}))
+        data = structured(await client.call_tool("claude_capabilities", {}))
     details = {d["name"]: d for d in data["tool_details"]}
     for name in (
         "claude_review_changes",
@@ -2039,7 +2035,7 @@ async def test_capabilities_include_head():
 async def test_review_changes_threads_head_into_gather_prompt_and_meta(
     fake_claude, monkeypatch, git_repo
 ):
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
     captured = {}
     real_build_prompt = srv.build_prompt
@@ -2255,9 +2251,9 @@ async def test_dry_run_non_branch_leaves_head_and_range_unset(monkeypatch, git_r
 async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_path):
     import json as _json
 
-    import cc_plugin_codex.server as srv
+    import claude_in_codex.server as srv
 
-    monkeypatch.setenv("CC_PLUGIN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     base, head = _make_branch_with_head(git_repo)
     inner = {
         "summary": "ok",

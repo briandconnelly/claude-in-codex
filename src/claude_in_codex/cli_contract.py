@@ -67,7 +67,7 @@ DEFAULT_EFFORT = "xhigh"
 # A set (not a single int) so a future major can be added without a code change,
 # and overridable via env so a user can opt into an untested major themselves.
 SUPPORTED_MAJORS = frozenset({2})
-SUPPORTED_MAJORS_ENV = "CC_PLUGIN_CODEX_SUPPORTED_MAJORS"
+SUPPORTED_MAJORS_ENV = "CLAUDE_IN_CODEX_SUPPORTED_MAJORS"
 
 # --- JSON envelope keys read from `claude -p --output-format json` ---------------
 # normalize.py / apply_cost_usage parse these tolerantly with .get(); listing them

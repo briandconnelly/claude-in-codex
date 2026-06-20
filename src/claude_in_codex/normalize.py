@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
-from cc_plugin_codex import cli_contract
-from cc_plugin_codex.claude import ClaudeRun, classify_failure
-from cc_plugin_codex.schemas import (
+from claude_in_codex import cli_contract
+from claude_in_codex.claude import ClaudeRun, classify_failure
+from claude_in_codex.schemas import (
     Confidence,
     ContextSummary,
     ErrorInfo,

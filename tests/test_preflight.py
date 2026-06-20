@@ -1,7 +1,7 @@
 """Tests for the `claude --help` flag feature-detection (preflight)."""
 
-from cc_plugin_codex import cli_contract, preflight
-from cc_plugin_codex.preflight import FlagSupport
+from claude_in_codex import cli_contract, preflight
+from claude_in_codex.preflight import FlagSupport
 
 
 def test_parse_supported_extracts_long_flags():

@@ -1,6 +1,6 @@
 [project]
-name = "cc-plugin-codex"
-version = "0.5.0"
+name = "claude-in-codex"
+version = "0.6.0"
 description = "Call Claude Code from Codex for bounded, independent code review and second opinions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,21 +28,21 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/briandconnelly/cc-plugin-codex"
-Repository = "https://github.com/briandconnelly/cc-plugin-codex"
-Issues = "https://github.com/briandconnelly/cc-plugin-codex/issues"
-Changelog = "https://github.com/briandconnelly/cc-plugin-codex/blob/main/CHANGELOG.md"
-Security = "https://github.com/briandconnelly/cc-plugin-codex/blob/main/SECURITY.md"
+Homepage = "https://github.com/briandconnelly/claude-in-codex"
+Repository = "https://github.com/briandconnelly/claude-in-codex"
+Issues = "https://github.com/briandconnelly/claude-in-codex/issues"
+Changelog = "https://github.com/briandconnelly/claude-in-codex/blob/main/CHANGELOG.md"
+Security = "https://github.com/briandconnelly/claude-in-codex/blob/main/SECURITY.md"
 
 [project.scripts]
-cc-plugin-codex-mcp = "cc_plugin_codex.server:main"
+claude-in-codex-mcp = "claude_in_codex.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cc_plugin_codex"]
+packages = ["src/claude_in_codex"]
 
 [dependency-groups]
 dev = [
@@ -86,13 +86,13 @@ unresolved-import = "warn"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=cc_plugin_codex --cov-report=term-missing --strict-markers --strict-config -m 'not integration'"
+addopts = "--cov=claude_in_codex --cov-report=term-missing --strict-markers --strict-config -m 'not integration'"
 markers = [
     "integration: live tests requiring the claude CLI; opt in with `pytest -m integration --no-cov`",
 ]
 
 [tool.coverage.run]
-source = ["src/cc_plugin_codex"]
+source = ["src/claude_in_codex"]
 branch = true
 
 [tool.coverage.report]

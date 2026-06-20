@@ -1,11 +1,11 @@
 ---
 name: collaborating-with-claude
-description: Use when you want an independent second opinion, a code review, or an adversarial critique from Claude Code while working in Codex. Triggers include finalizing risky changes, deciding between approaches, or pressure-testing a plan. Provides the cc-plugin-codex MCP tools and the rules for using them well.
+description: Use when you want an independent second opinion, a code review, or an adversarial critique from Claude Code while working in Codex. Triggers include finalizing risky changes, deciding between approaches, or pressure-testing a plan. Provides the claude-in-codex MCP tools and the rules for using them well.
 ---
 
 # Collaborating with Claude
 
-Use the `cc-plugin-codex` MCP tools to get bounded, independent critique from Claude Code.
+Use the `claude-in-codex` MCP tools to get bounded, independent critique from Claude Code.
 Claude is a reviewer, not a co-pilot: it never edits your code.
 
 **Pass `workspace_root` (an absolute repo path) on every paid call.**
@@ -32,7 +32,7 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 - `claude_status` — free readiness check: reports whether `claude` is installed, authenticated (`claude_authenticated`), version-compatible (`version_supported`), and overall `ready`, plus the resolved defaults a no-arg call would use. Run it first if a call fails, or to confirm readiness before spending.
 - `claude_review_dry_run` — free preview of what a diff review would send: resolved workspace, diff byte size, whether it would be truncated, and which paths would be redacted. No paid call. Run it before a large review to confirm scope and workspace.
 - `claude_job_list` — free list of this workspace's background jobs (id, status, cost), newest first. Use it to recover a `job_id` lost across context compaction or interruption.
-- `cc_codex_capabilities` (alias `claude_capabilities`) — free capability contract: tool inventory, compact per-tool routing metadata, scope, prerequisites, and the fingerprint to pin.
+- `claude_capabilities` — free capability contract: tool inventory, compact per-tool routing metadata, scope, prerequisites, and the fingerprint to pin.
 
 ## Reading results
 
