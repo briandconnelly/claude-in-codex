@@ -9,6 +9,8 @@ COMPATIBILITY.md for the assumption -> upstream-source map.
 
 from __future__ import annotations
 
+import re
+
 CLAUDE_BIN = "claude"
 
 # Core invocation that CANNOT be dropped: -p (print mode) + JSON output. If these
@@ -121,3 +123,25 @@ def is_contract_drift(*texts: str | None) -> bool:
     where `claude` surfaces it."""
     blob = "\n".join(t for t in texts if t).lower()
     return any(pattern in blob for pattern in CONTRACT_DRIFT_STDERR_PATTERNS)
+
+
+# --- Advisory model catalog -----------------------------------------------------
+# Discovery only: surfaced by the claude_models tool and claude://models resource so
+# an agent can pick a `model` override. The `claude` CLI is the real authority and
+# validates the slug at run time, so an unlisted slug may still work and a listed one
+# may be unavailable. These contents are NOT fingerprint-stable (the tool/schema are).
+MODEL_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# (slug, display_name, kind). Aliases first — they track the latest model and are the
+# stable, maintenance-free, recommended value; full IDs are pinned and go stale per
+# release, hence kind="full" so a consumer can prefer aliases.
+KNOWN_MODELS: tuple[tuple[str, str, str], ...] = (
+    ("opus", "Opus (alias → latest Opus)", "alias"),
+    ("sonnet", "Sonnet (alias → latest Sonnet)", "alias"),
+    ("haiku", "Haiku (alias → latest Haiku)", "alias"),
+    ("fable", "Fable (alias → latest Fable)", "alias"),
+    ("claude-opus-4-8", "Opus 4.8", "full"),
+    ("claude-sonnet-4-6", "Sonnet 4.6", "full"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5", "full"),
+    ("claude-fable-5", "Fable 5", "full"),
+)

@@ -23,6 +23,8 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 # Lifecycle states for a background job. Terminal: done|failed|cancelled|timeout.
 # (TTL-expired records are deleted and reported as job_not_found, not a state.)
 JobState = Literal["running", "done", "failed", "cancelled", "timeout"]
+ModelKind = Literal["alias", "full"]
+ModelCatalogSource = Literal["static", "none"]
 
 
 def workspace_warning_for(source: str | None, cwd: str) -> str | None:
@@ -376,6 +378,36 @@ class JobListResult(BaseModel):
     fingerprint: str = FINGERPRINT
 
 
+class ModelInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slug: str
+    display_name: str | None = None
+    # alias slugs (opus/sonnet/...) track the latest model and are the recommended,
+    # stable value; full slugs are pinned exact IDs that go stale each release.
+    kind: ModelKind
+
+
+class ModelCatalogResult(BaseModel):
+    """Advisory list of Claude model slugs for the optional `model` param.
+
+    Discovery only: `source` says where it came from and `advisory` states it is not
+    authoritative (the `claude` CLI validates the real slug at run time). Returned by
+    the claude_models tool and the claude://models resource; deliberately NOT embedded
+    in claude_capabilities, whose payload is fingerprint-cacheable and must stay stable.
+    Claude has no on-disk model cache, so `source` is always "static" (or "none" if the
+    bundled list is somehow empty) — there is no live-cache path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    source: ModelCatalogSource
+    models: list[ModelInfo] = Field(default_factory=list)
+    advisory: str
+    # Set only when source == "none" (the bundled list is empty).
+    unavailable_reason: str | None = None
+    fingerprint: str = FINGERPRINT
+
+
 def _object_union_schema(adapter: TypeAdapter) -> dict:
     """Wrap a model union's anyOf in a top-level object schema.
 
@@ -406,3 +438,4 @@ JOB_STATUS_SCHEMA = _object_union_schema(TypeAdapter(JobStatus | ErrorResult))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.
 DRY_RUN_SCHEMA = _object_union_schema(TypeAdapter(DryRunResult | ErrorResult))
 JOB_LIST_SCHEMA = _object_union_schema(TypeAdapter(JobListResult | ErrorResult))
+MODEL_CATALOG_SCHEMA = ModelCatalogResult.model_json_schema()
