@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
+from claude_in_codex.context import redact_text, redact_tree
 from claude_in_codex.schemas import (
     Confidence,
     ContextSummary,
@@ -45,8 +46,16 @@ _VALID_CONFIDENCE = {"low", "medium", "high"}
 _VALID_SEVERITY = {"critical", "high", "medium", "low", "nit"}
 
 
+def _redact_out(value: str) -> str:
+    """Scrub secrets from one model-derived string before it leaves the process.
+
+    Applied AFTER str()-coercion so a secret hidden in a nested object key (which
+    only becomes text once stringified) is still caught (#66)."""
+    return redact_text(value)[0]
+
+
 def _str_list(value: Any) -> list[str]:
-    return [str(x) for x in value if x] if isinstance(value, list) else []
+    return [_redact_out(str(x)) for x in value if x] if isinstance(value, list) else []
 
 
 def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
@@ -135,13 +144,13 @@ def _clean_findings(raw: Any) -> list[Finding]:
         findings.append(
             Finding(
                 severity=cast("Severity", _clamp(f.get("severity"), _VALID_SEVERITY, "low")),
-                title=str(f["title"]),
-                file=str(f["file"]) if f.get("file") else None,
+                title=_redact_out(str(f["title"])),
+                file=_redact_out(str(f["file"])) if f.get("file") else None,
                 line=line if isinstance(line, int) else None,
                 line_end=line_end if isinstance(line_end, int) else None,
-                evidence=str(f["evidence"]),
-                risk=str(f["risk"]),
-                recommendation=str(f["recommendation"]),
+                evidence=_redact_out(str(f["evidence"])),
+                risk=_redact_out(str(f["risk"])),
+                recommendation=_redact_out(str(f["recommendation"])),
             )
         )
     return findings
@@ -217,20 +226,23 @@ def normalize_envelope(
         )
 
     text = env.get("result", "") or ""
+    # Scrub secrets from the model-derived passthrough before relaying it (#66).
     raw = RawResponse(
-        text=text if detail == "full" else None,
+        text=redact_text(text)[0] if detail == "full" else None,
         session_id=env.get("session_id"),
         model=next(iter(env.get("modelUsage") or {}), None),
     )
-    inner = extract_json(text)
+    inner = extract_json(text)  # parse from the original; structured fields redacted below
 
     # If Claude was blocked by denied tools AND produced nothing usable, surface it.
-    denials = env.get("permission_denials") or []
+    # Denied tool calls are model-derived and may carry secrets in their inputs, so
+    # scrub them before they reach the error message or meta (#66).
+    denials = cast("list", redact_tree(env.get("permission_denials") or []))
     if denials and (inner is None and not text.strip()):
         return _error(
             ErrorInfo(
                 code="claude_permission_error",
-                message=f"claude was denied required tools: {str(denials)[:160]}",
+                message=f"claude was denied required tools: {_redact_out(str(denials))[:160]}",
                 repair="Use access=toolless, or allow the needed read-only tools.",
             ),
             meta,
@@ -239,7 +251,8 @@ def normalize_envelope(
     if inner is None:
         result = SuccessResult(
             tool=tool,
-            summary=text.strip()[:500] or "(no content)",
+            # Redact before truncating so a secret can't survive at the 500-char edge.
+            summary=_redact_out(text).strip()[:500] or "(no content)",
             verdict="unknown",
             confidence="low",
             raw_response=raw,
@@ -252,7 +265,7 @@ def normalize_envelope(
 
     result = SuccessResult(
         tool=tool,
-        summary=str(inner.get("summary", "")),
+        summary=_redact_out(str(inner.get("summary", ""))),
         verdict=cast("Verdict", _clamp(inner.get("verdict"), _VALID_VERDICT, "unknown")),
         confidence=cast("Confidence", _clamp(inner.get("confidence"), _VALID_CONFIDENCE, "low")),
         findings=_clean_findings(inner.get("findings", [])),

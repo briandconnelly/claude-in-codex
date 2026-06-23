@@ -308,6 +308,55 @@ def _redact_key_content(content: str, in_block: bool) -> tuple[str, bool, bool]:
     return emit, True, True
 
 
+def redact_text(text: str) -> tuple[str, bool]:
+    """Best-effort secret redaction for free-form model output (prose).
+
+    Shares the diff path's pattern set (``SECRET_VALUE_PATTERNS``) and the stateful
+    PEM/OpenSSH/PGP key-block handling (``_redact_key_content``), but with no
+    diff-prefix or file-header awareness — every line is treated as content. A
+    multi-line key block stays open until its END marker (or end of text), so an
+    unterminated block fails closed. Returns ``(scrubbed, changed)``; an empty
+    string passes through as ``("", False)``. Defense-in-depth, NOT a guarantee: a
+    key split across separate fields is out of scope (see #66 / SECURITY.md).
+    """
+    if not text:
+        return text, False
+    out_lines: list[str] = []
+    changed = False
+    in_key_block = False
+    # split("\n") (not splitlines) so \n-delimited prose round-trips exactly.
+    for line in text.split("\n"):
+        if in_key_block or _PRIVATE_KEY_BEGIN_RE.search(line):
+            emit, key_changed, in_key_block = _redact_key_content(line, in_key_block)
+            # The key branch preserves any prefix before BEGIN / suffix after END, so
+            # still scan the emitted line for an unrelated token sharing that line.
+            emit, value_changed = _redact_secret_values(emit)
+            line_changed = key_changed or value_changed
+        else:
+            emit, line_changed = _redact_secret_values(line)
+        changed = changed or line_changed
+        out_lines.append(emit)
+    return "\n".join(out_lines), changed
+
+
+def redact_tree(value: object) -> object:
+    """Deep-apply ``redact_text`` to every string in a nested list/dict/str.
+
+    Used to scrub untrusted, model/CLI-derived structured payloads (e.g.
+    ``permission_denials``) while preserving shape. Dict KEYS are redacted as well
+    as values: this data is relayed verbatim into ``meta`` (which is not
+    str()-coerced like the structured findings path), so a secret-shaped key would
+    otherwise survive. Non-string leaves (ints, None, bools) are returned
+    untouched."""
+    if isinstance(value, str):
+        return redact_text(value)[0]
+    if isinstance(value, list):
+        return [redact_tree(item) for item in value]
+    if isinstance(value, dict):
+        return {redact_text(str(key))[0]: redact_tree(item) for key, item in value.items()}
+    return value
+
+
 def _redact(diff: str) -> tuple[str, list[str]]:
     out_lines: list[str] = []
     redacted: list[str] = []

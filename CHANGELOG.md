@@ -11,15 +11,27 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 - Explicit Anthropic data-egress disclosure on the agent-visible surface: each
   paid tool's description now states that context is sent to Anthropic via the
-  `claude` CLI and that best-effort secret redaction is applied only to the
-  server-gathered diff before it is sent — not to free-form inputs, Claude's
-  returned response, or files Claude reads directly under `access=readonly`. A
-  machine-readable `data_egress` field was added to `claude_capabilities`, and
-  `SECURITY.md` now spells out the same redaction limits. Bumps the contract
-  fingerprint to `claude-in-codex/0.1/schema-23`.
+  `claude` CLI and discloses what best-effort secret redaction does and does not
+  cover. A machine-readable `data_egress` field was added to
+  `claude_capabilities`, and `SECURITY.md` spells out the same limits. (Redaction
+  coverage was extended to Claude's returned output in #66 — see the Security
+  entry below for the current scope; free-form inputs and `access=readonly`
+  direct reads remain uncovered.) Part of the contract fingerprint bump to
+  `claude-in-codex/0.1/schema-24`.
 
 ### Security
 
+- Extended best-effort secret redaction to **Claude's returned output**, closing
+  the egress gap the disclosure previously only admitted (#66). A shared
+  `redact_text` helper in `context.py` (reusing the diff path's pattern set and
+  stateful PEM/OpenSSH/PGP key-block logic) now scrubs every model-derived field
+  relayed to the caller: structured `summary`/`findings`/`questions`/`assumptions`/
+  `next_steps`, the `detail=full` raw response text, and model-derived error
+  messages. Redaction runs after string coercion so secrets hidden in nested
+  object keys are caught. The `data_egress` field, paid-tool descriptions, and
+  `SECURITY.md` are updated to state the new coverage; free-form caller inputs
+  are still sent verbatim. Bumps the contract fingerprint to
+  `claude-in-codex/0.1/schema-24`.
 - Hardened diff secret redaction in `context.py` (defense-in-depth on egress to
   Anthropic). Added high-confidence single-token patterns for JWTs, OpenAI
   (`sk-`/`sk-proj-`), Anthropic (`sk-ant-`), Stripe (`sk_live`/`sk_test`), Google

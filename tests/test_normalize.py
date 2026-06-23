@@ -363,3 +363,180 @@ def test_zero_exit_is_error_without_drift_stays_nonzero_exit():
     )
     out = normalize_envelope("claude_review_changes", env, _meta(), detail="summary")
     assert out["error"]["code"] == "nonzero_exit"
+
+
+# --- output redaction: scrub secrets in Claude's returned model output (#66) ---
+
+_SECRET = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def test_structured_summary_is_redacted():
+    inner = {"summary": f"saw token {_SECRET}", "verdict": "concerns", "confidence": "high"}
+    out = normalize_envelope("claude_review_changes", _env(inner), _meta(), detail="summary")
+    assert _SECRET not in out["summary"]
+    assert "[redacted: secret value]" in out["summary"]
+
+
+def test_finding_free_text_fields_are_redacted():
+    inner = {
+        "summary": "ok",
+        "verdict": "fail",
+        "confidence": "high",
+        "findings": [
+            {
+                "severity": "high",
+                "title": f"leaked {_SECRET}",
+                "file": "app.py",
+                "evidence": f"value {_SECRET}",
+                "risk": f"exposes {_SECRET}",
+                "recommendation": f"rotate {_SECRET}",
+            }
+        ],
+    }
+    out = normalize_envelope("claude_review_changes", _env(inner), _meta(), detail="summary")
+    f = out["findings"][0]
+    for field in ("title", "evidence", "risk", "recommendation"):
+        assert _SECRET not in f[field], field
+        assert "[redacted: secret value]" in f[field], field
+
+
+def test_list_fields_are_redacted():
+    inner = {
+        "summary": "ok",
+        "verdict": "unknown",
+        "confidence": "low",
+        "questions": [f"is {_SECRET} valid?"],
+        "assumptions": [f"assumed {_SECRET}"],
+        "next_steps": [f"revoke {_SECRET}"],
+    }
+    out = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    for field in ("questions", "assumptions", "next_steps"):
+        assert _SECRET not in out[field][0], field
+        assert "[redacted: secret value]" in out[field][0], field
+
+
+def test_raw_response_text_is_redacted_on_detail_full():
+    inner = {"summary": f"saw {_SECRET}", "verdict": "concerns", "confidence": "high"}
+    out = normalize_envelope("claude_ask", _env(inner), _meta(), detail="full")
+    assert _SECRET not in out["raw_response"]["text"]
+    assert "[redacted: secret value]" in out["raw_response"]["text"]
+
+
+def test_unstructured_fallback_summary_is_redacted_before_truncation():
+    # No JSON object in result -> fallback summary path (text.strip()[:500]).
+    out = normalize_envelope("claude_ask", _env(f"just prose with {_SECRET}"), _meta(), "summary")
+    assert _SECRET not in out["summary"]
+    assert "[redacted: secret value]" in out["summary"]
+
+
+def test_nested_dict_key_secret_is_redacted_after_coercion():
+    # A malformed finding value whose secret hides in a JSON object KEY must still be
+    # scrubbed once the field is str()-coerced (Codex review of #66).
+    inner = {
+        "summary": "ok",
+        "verdict": "fail",
+        "confidence": "high",
+        "findings": [
+            {
+                "severity": "high",
+                "title": "t",
+                "evidence": {_SECRET: "x"},
+                "risk": "r",
+                "recommendation": "rec",
+            }
+        ],
+    }
+    out = normalize_envelope("claude_review_changes", _env(inner), _meta(), detail="summary")
+    assert _SECRET not in out["findings"][0]["evidence"]
+
+
+def test_error_envelope_result_text_is_redacted():
+    # Error path: classify_failure embeds env["result"] into the user-visible message.
+    env = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": f"unexpected failure near {_SECRET}",
+            "session_id": "s",
+        }
+    )
+    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert out["ok"] is False
+    assert _SECRET not in json.dumps(out)
+
+
+def test_clean_review_prose_is_not_over_redacted():
+    summary = "The retry path lacks a test; verdict concerns. Add coverage for timeouts."
+    inner = {
+        "summary": summary,
+        "verdict": "concerns",
+        "confidence": "medium",
+        "findings": [
+            {
+                "severity": "low",
+                "title": "Missing test",
+                "file": "retry.py",
+                "evidence": "no test exercises the 3-retry branch",
+                "risk": "regressions slip through",
+                "recommendation": "add a test asserting 3 attempts",
+            }
+        ],
+        "next_steps": ["add a retry test"],
+    }
+    out = normalize_envelope("claude_review_changes", _env(inner), _meta(), detail="full")
+    assert out["summary"] == summary
+    assert "[redacted" not in json.dumps(out)
+
+
+def test_permission_denials_are_redacted_in_error_message():
+    # Denied tool calls are model-derived and may carry secrets in their inputs;
+    # the error message that echoes them must be scrubbed (Codex review of #66).
+    env = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "",
+            "session_id": "s",
+            "permission_denials": [{"tool": "Bash", "input": {"command": f"echo {_SECRET}"}}],
+        }
+    )
+    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert out["ok"] is False
+    assert _SECRET not in json.dumps(out)
+
+
+def test_permission_denials_are_redacted_in_meta():
+    inner = {"summary": "ok", "verdict": "pass", "confidence": "high"}
+    env = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps(inner),
+            "session_id": "s",
+            "permission_denials": [{"tool": "Bash", "input": {"command": f"echo {_SECRET}"}}],
+        }
+    )
+    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert out["ok"] is True
+    assert _SECRET not in json.dumps(out["meta"]["permission_denials"])
+
+
+def test_permission_denials_secret_in_dict_key_is_redacted_in_meta():
+    # A secret hidden in a permission_denials object KEY (not just a value) must be
+    # scrubbed before it lands in meta (Codex follow-up review of #66).
+    inner = {"summary": "ok", "verdict": "pass", "confidence": "high"}
+    env = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps(inner),
+            "session_id": "s",
+            "permission_denials": [{"tool_input": {_SECRET: "x"}}],
+        }
+    )
+    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    assert _SECRET not in json.dumps(out["meta"]["permission_denials"])
