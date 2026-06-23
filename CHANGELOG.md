@@ -9,6 +9,12 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Added
 
+- `claude_models` tool and `claude://models` resource: an advisory, free,
+  read-only catalog of the model slugs accepted by the `model` parameter
+  (aliases such as `opus`/`sonnet` plus pinned full IDs, each tagged `kind`).
+  Bundled-static; the `claude` CLI remains the run-time authority. Bumps the
+  contract fingerprint to `claude-in-codex/0.1/schema-25`.
+
 - Explicit Anthropic data-egress disclosure on the agent-visible surface: each
   paid tool's description now states that context is sent to Anthropic via the
   `claude` CLI and discloses what best-effort secret redaction does and does not

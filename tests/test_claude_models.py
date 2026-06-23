@@ -1,8 +1,13 @@
 """Unit tests for the advisory static model catalog."""
 
+import json
+
+from fastmcp import Client
+
 from claude_in_codex import cli_contract
 from claude_in_codex.claude_models import read_model_catalog
 from claude_in_codex.schemas import FINGERPRINT
+from claude_in_codex.server import _model_catalog_payload, mcp
 
 
 def test_every_known_slug_matches_the_pattern():
@@ -39,3 +44,22 @@ def test_each_model_carries_its_kind_and_display_name():
     assert by_slug["opus"].kind == "alias"
     assert by_slug["opus"].display_name == "Opus (alias → latest Opus)"
     assert by_slug["claude-opus-4-8"].kind == "full"
+
+
+def test_payload_is_static_dict_without_none_fields():
+    payload = _model_catalog_payload()
+    assert payload["ok"] is True
+    assert payload["source"] == "static"
+    # exclude_none drops unavailable_reason on the static path.
+    assert "unavailable_reason" not in payload
+    assert payload["models"][0]["kind"] in {"alias", "full"}
+
+
+async def test_tool_and_resource_return_the_same_payload():
+    async with Client(mcp) as client:
+        tool_result = await client.call_tool("claude_models", {})
+        resource = await client.read_resource("claude://models")
+    expected = _model_catalog_payload()
+    assert tool_result.structured_content == expected
+    # The resource returns JSON text with the same content.
+    assert json.loads(resource[0].text) == expected
