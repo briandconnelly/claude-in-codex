@@ -479,7 +479,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-24"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-25"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1123,7 +1123,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-24"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-25"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1236,6 +1236,7 @@ async def test_claude_capabilities_returns_expected_free_tools():
         data = structured(await client.call_tool("claude_capabilities", {}))
     assert "claude_review_dry_run" in data["free_tools"]
     assert "claude_job_list" in data["free_tools"]
+    assert "claude_models" in data["free_tools"]
     # The readonly redaction-bypass caveat is now in the negative scope.
     assert any("readonly" in s for s in data["negative_scope"])
 

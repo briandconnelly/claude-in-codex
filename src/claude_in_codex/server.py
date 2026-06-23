@@ -22,6 +22,7 @@ from claude_in_codex.claude import (
     classify_failure,
     run_claude_async,
 )
+from claude_in_codex.claude_models import read_model_catalog
 from claude_in_codex.config import (
     ENV_PLACEHOLDER_REPAIR,
     MAX_BUDGET_USD,
@@ -65,6 +66,7 @@ from claude_in_codex.schemas import (
     JOB_LIST_SCHEMA,
     JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
+    MODEL_CATALOG_SCHEMA,
     RESULT_SCHEMA,
     STATUS_SCHEMA,
     Access,
@@ -94,17 +96,17 @@ from claude_in_codex.schemas import (
 CAPABILITY_SUMMARY = (
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. It never edits code, grants "
-    "Bash/write tools, or proxies Claude MCP tools; hooks may still run unless "
+    "Bash/write tools, or proxies Claude's own MCP tools; hooks may run unless "
     "config_mode=safe/bare. Paid tools send context to Anthropic; call "
-    "claude_status before spending. claude_review_changes blocks; "
+    "claude_status before spending. Use claude_models (or claude://models) to "
+    "discover valid model slugs before overriding model. "
+    "claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
-    "claude_review_dry_run previews workspace/diff-size/redaction. "
-    "scope=branch reviews base...head locally (head defaults HEAD); no ref "
-    "fetch, GitHub calls, or PR URLs. Findings advisory. "
-    "Pass workspace_root explicitly: defaults to first MCP root, else server cwd; "
-    "with roots it must be inside one. toolless default; readonly lets "
-    "Claude read files directly, bypassing diff redaction. Free-form input capped "
-    "by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
+    "claude_review_dry_run previews diff-size/redaction. "
+    "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
+    "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
+    "toolless default; readonly lets Claude read files, bypassing diff redaction. "
+    "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
 _HEAD_FIELD_DESC = (
@@ -1910,6 +1912,7 @@ def _capabilities_payload() -> dict:
             "claude_job_consume_result",
             "claude_job_cancel",
             "claude_job_list",
+            "claude_models",
         ],
         tool_details=[
             tool_detail(
@@ -2029,6 +2032,14 @@ def _capabilities_payload() -> dict:
                 "compact job summaries newest first",
                 optional=["workspace_root"],
             ),
+            tool_detail(
+                "claude_models",
+                "free",
+                "Discover valid `model` slugs (aliases + pinned full IDs) before "
+                "overriding model on a paid call.",
+                "advisory static model catalog; same payload as the claude://models "
+                "resource; not fingerprint-stable",
+            ),
         ],
         config_modes=["inherit", "scoped", "safe", "bare"],
         access_modes=["toolless", "readonly"],
@@ -2089,6 +2100,35 @@ def claude_capabilities() -> ToolResult:
     fingerprint.
     """
     return _result(_capabilities_payload())
+
+
+def _model_catalog_payload() -> dict:
+    """Single source for the claude_models tool and claude://models resource so their
+    payloads cannot drift."""
+    return read_model_catalog().model_dump(mode="json", exclude_none=True)
+
+
+@mcp.tool(
+    annotations=_FREE_READ_ANNOTATIONS,
+    title="List Claude model slugs",
+    output_schema=MODEL_CATALOG_SCHEMA,
+)
+def claude_models() -> ToolResult:
+    """List Claude model slugs you can pass as `model`. Free — no model call.
+
+    Advisory, bundled-static list. Prefer alias slugs (kind="alias", e.g.
+    'opus'/'sonnet'), which track the latest model, over pinned full IDs. The
+    `claude` CLI is the run-time authority: an unlisted slug may work and a
+    listed one may be unavailable to your account. Same payload as the
+    claude://models resource. Not fingerprint-stable.
+    """
+    return _result(_model_catalog_payload())
+
+
+@mcp.resource("claude://models", mime_type="application/json")
+def claude_models_resource() -> dict:
+    """Advisory Claude model catalog (same payload as the claude_models tool)."""
+    return _model_catalog_payload()
 
 
 @mcp.resource("claude-in-codex://capabilities")
