@@ -58,6 +58,43 @@ the plugin refuses to run (fails closed) rather than silently proceed.
 flag (rather than rejecting it), the loss cannot be detected without behavioral
 testing. The drift detection only catches rejection.
 
+## Detecting drift early (no-spend)
+
+Run-time detection above only fires when a paid call is already in flight. To catch
+drift *before* it reaches a user, [`scripts/check_claude_contract.py`](./scripts/check_claude_contract.py)
+diffs the installed `claude` CLI against `cli_contract.py` using only the free
+local probes (`claude --version`, `claude --help`, and one unknown-flag rejection
+probe). No `-p` print run, no model call, no token spend.
+
+```sh
+uv run python scripts/check_claude_contract.py
+```
+
+It reuses the server's own `preflight._parse_supported` and `config.version_supported`,
+and asserts:
+
+- the core invocation (`-p` / `--output-format`) is still present — **exit 1** if gone;
+- every `ALWAYS_SEND_FLAGS` guarantee-bearing flag is still listed — **exit 1** if any is missing;
+- `HELP_GATED_FLAGS` are present (a miss is a **warning** — the server drops them gracefully);
+- the installed major is in `SUPPORTED_MAJORS` (a miss is a **warning** — version is advisory);
+- an unknown flag is still rejected with a phrasing that matches
+  `CONTRACT_DRIFT_STDERR_PATTERNS` (a miss is a **warning** — upstream may have reworded its error).
+
+Exit codes: `0` holds, `1` drift (a blocker — update `cli_contract.py`), `2` could
+not probe (`claude` missing / timed out / help unparseable — nothing verified).
+
+**What it deliberately does NOT check:** the JSON envelope keys, success subtypes,
+and usage keys (`ENVELOPE_KEYS` / `SUCCESS_SUBTYPES` / `USAGE_KEYS`) cannot be
+observed without a paid `claude -p --output-format json` run, so they are left to
+the no-spend golden-envelope fixture test (`tests/test_golden_envelope.py`) and the
+manual semantic review. Like the run-time detection, this catches *rejection*, not a
+silently no-op'd flag.
+
+CI runs the script as the `Claude CLI contract drift` job in
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml): it installs the latest
+published Claude Code as a live canary against the newest CLI, skips gracefully if
+the CLI is unavailable, and fails the build on a drift exit.
+
 ## Codex-host assumptions
 
 | Assumption | Where | Notes |

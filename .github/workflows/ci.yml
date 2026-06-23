@@ -41,6 +41,53 @@ jobs:
           grep -Fq "claude-in-codex==${version}" README.md
           grep -Fq "## ${version} -" CHANGELOG.md
 
+  claude-contract:
+    name: Claude CLI contract drift
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # This job installs a freshly fetched npm package whose install scripts
+          # run in this workspace. Don't leave the checkout token in git config for
+          # it to read; the job never pushes and only needs `contents: read`.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --locked --python 3.12 --group dev
+
+      # Install the latest published Claude Code so this job is a live drift canary
+      # against the newest CLI. Failure (offline runner, npm hiccup) is non-fatal:
+      # the next step skips gracefully if `claude` is unavailable.
+      - name: Install Claude Code CLI
+        id: install-claude
+        continue-on-error: true
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Check CLI contract drift (no-spend)
+        run: |
+          set -euo pipefail
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "::notice::claude CLI unavailable on this runner; skipping contract drift check."
+            exit 0
+          fi
+          claude --version
+          # Exits 1 on real drift (fails the job); 2 if it could not probe at all.
+          uv run python scripts/check_claude_contract.py
+
   package:
     name: Package checks
     runs-on: ubuntu-latest
