@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-22"
+FINGERPRINT = "claude-in-codex/0.1/schema-23"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -283,6 +283,9 @@ class CapabilitiesResult(BaseModel):
     access_modes: list[str]
     scope: list[str]  # what this server is for
     negative_scope: list[str]  # what it deliberately does NOT do
+    # Machine-readable egress disclosure: where paid-tool context goes and the
+    # precise limits of redaction. Mirrors the per-tool docstring notes.
+    data_egress: str
     prerequisites: list[str]
     deprecation_policy: str
 

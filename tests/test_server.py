@@ -473,7 +473,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-22"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-23"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1117,7 +1117,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-22"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-23"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1153,6 +1153,32 @@ async def test_capabilities_tool_returns_structured_contract():
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
     assert "fingerprint" in data["deprecation_policy"]
+
+
+async def test_capabilities_disclose_data_egress():
+    # The egress disclosure must be machine-readable on the contract, not only prose.
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    egress = data["data_egress"]
+    assert "Anthropic" in egress
+    assert "redact" in egress.lower()
+    # It must name what redaction does NOT cover: caller inputs and readonly reads.
+    assert "readonly" in egress
+
+
+async def test_paid_tool_docstrings_disclose_egress():
+    paid = (
+        "claude_ask",
+        "claude_review_changes",
+        "claude_adversarial_review",
+        "claude_review_changes_async",
+    )
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    for name in paid:
+        desc = tools[name].description or ""
+        assert "Anthropic" in desc, f"{name} docstring omits Anthropic egress"
+        assert "redact" in desc.lower(), f"{name} docstring omits redaction scope"
 
 
 async def test_list_tools_includes_new_free_tools():
