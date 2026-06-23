@@ -51,16 +51,37 @@ SECRET_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Single-token, high-confidence secret shapes. Each is anchored on a vendor prefix
+# with enough trailing entropy that ordinary identifiers do not collide. Kept
+# conservative on purpose: false positives garble otherwise-legitimate diffs.
 SECRET_VALUE_PATTERNS = [
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
+    re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),  # GitHub classic token
+    re.compile(r"github_pat_[0-9A-Za-z_]{22,}"),  # GitHub fine-grained PAT
+    re.compile(r"glpat-[0-9A-Za-z_-]{20,}"),  # GitLab personal access token
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),  # Slack token
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),  # Anthropic API key
+    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),  # OpenAI project key
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI classic key
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{16,}"),  # Stripe secret key
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),  # Google API key
+    re.compile(r"npm_[A-Za-z0-9]{36}"),  # npm automation token
+    re.compile(r"pypi-[A-Za-z0-9_-]{16,}"),  # PyPI upload token
+    re.compile(r"eyJ[A-Za-z0-9_=-]{10,}\.eyJ[A-Za-z0-9_=-]{10,}\.[A-Za-z0-9_=-]{8,}"),  # JWT
     re.compile(r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/=-]{16,}"),
     re.compile(
         r"(?i)((?:(?:api|access|secret|private)?_?(?:key|token|secret)|passw(?:or)?d|pwd|passphrase)\s*[:=]\s*['\"]?)[A-Za-z0-9._~+/=-]{16,}"
     ),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    # Connection-string / URI userinfo password: keep the scheme + user + host so the
+    # diff stays reviewable, drop only the password between ':' and '@'.
+    re.compile(r"([a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s:/@]+(?=@)"),
 ]
+
+# Multi-line key blocks (PEM/PKCS8/OpenSSH/PGP) are redacted statefully in _redact,
+# not line-by-line, so the whole base64 body is dropped rather than only the BEGIN
+# marker. Trailing "[A-Z0-9 ]*" covers "OPENSSH"/"RSA" prefixes and "PGP ... BLOCK".
+_PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----")
+_PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----")
 
 
 @dataclass
@@ -240,31 +261,69 @@ def _redact_secret_values(line: str) -> tuple[str, bool]:
     return out, redacted
 
 
+def _split_diff_prefix(line: str) -> tuple[str, str]:
+    """Split a scannable diff line into its +/-/space marker and its content.
+
+    Lines without a diff marker (e.g. a raw "Authorization:" header) yield an empty
+    prefix so the whole line is treated as content.
+    """
+    if line.startswith(("+", "-", " ")) and not line.startswith(("+++", "---")):
+        return line[0], line[1:]
+    return "", line
+
+
 def _redact(diff: str) -> tuple[str, list[str]]:
     out_lines: list[str] = []
     redacted: list[str] = []
     skipping = False
+    in_key_block = False
     current_path = ""
+
+    def note_redacted() -> None:
+        if current_path and current_path not in redacted:
+            redacted.append(current_path)
+
     for line in diff.splitlines():
         if line.startswith("diff --git "):
             spec = line[len("diff --git ") :]  # "a/<path> b/<path>" (paths may be quoted)
             current_path = _diff_path_from_header(line)
+            in_key_block = False  # never let a key block bleed across files
             skipping = bool(SECRET_PATH_RE.search(spec) or SECRET_PATH_RE.search(current_path))
             if skipping:
                 redacted.append(current_path or spec)
                 out_lines.append(line)  # keep the real header so reviewers see the file
                 out_lines.append("[redacted: secret-looking file not sent]")
                 continue
-        if not skipping:
-            scan_line = (
-                line.startswith(("+", "-", " ")) and not line.startswith(("+++", "---"))
-            ) or line.startswith("Authorization:")
-            emit = line
-            if scan_line:
-                emit, changed = _redact_secret_values(line)
-                if changed and current_path and current_path not in redacted:
-                    redacted.append(current_path)
-            out_lines.append(emit)
+        if skipping:
+            continue
+
+        scan_line = (
+            line.startswith(("+", "-", " ")) and not line.startswith(("+++", "---"))
+        ) or line.startswith("Authorization:")
+        if not scan_line:
+            in_key_block = False  # hunk/metadata boundary ends any open block
+            out_lines.append(line)
+            continue
+
+        prefix, content = _split_diff_prefix(line)
+        if in_key_block:
+            note_redacted()
+            if _PRIVATE_KEY_END_RE.search(content):
+                in_key_block = False
+                out_lines.append(line)  # keep END marker visible
+            else:
+                out_lines.append(f"{prefix}[redacted: secret value]")
+            continue
+        if _PRIVATE_KEY_BEGIN_RE.search(content):
+            in_key_block = True
+            note_redacted()
+            out_lines.append(line)  # keep BEGIN marker visible
+            continue
+
+        emit_content, changed = _redact_secret_values(content)
+        if changed:
+            note_redacted()
+        out_lines.append(f"{prefix}{emit_content}")
     return "\n".join(out_lines), redacted
 
 
