@@ -8,7 +8,13 @@ from tests.conftest import structured
 
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.preflight import FlagSupport
-from claude_in_codex.server import CAPABILITY_SUMMARY, _first_root, _resolve_workspace, mcp
+from claude_in_codex.server import (
+    CAPABILITY_SUMMARY,
+    _capabilities_payload,
+    _first_root,
+    _resolve_workspace,
+    mcp,
+)
 
 PAID_TOOLS = ("claude_ask", "claude_review_changes", "claude_adversarial_review")
 
@@ -473,7 +479,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-22"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-23"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1117,7 +1123,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-22"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-23"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1153,6 +1159,68 @@ async def test_capabilities_tool_returns_structured_contract():
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
     assert "fingerprint" in data["deprecation_policy"]
+
+
+async def test_capabilities_disclose_data_egress():
+    # The egress disclosure must be machine-readable on the contract, not only prose.
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    egress = data["data_egress"]
+    assert "Anthropic" in egress
+    assert "redact" in egress.lower()
+    # It must name what redaction does NOT cover: caller inputs and readonly reads.
+    assert "readonly" in egress
+
+
+async def test_returned_model_output_is_not_redacted(monkeypatch):
+    # Pins the reality behind the egress disclosure: redaction is applied to the
+    # diff sent TO Claude, not to Claude's returned output. If output redaction is
+    # ever added, the data_egress / docstring / SECURITY.md text must change too.
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
+
+    secret = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    inner = {"summary": f"saw token {secret}", "verdict": "concerns", "confidence": "high"}
+    envelope = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps(inner),
+            "session_id": "s",
+            "modelUsage": {"claude-sonnet-4-6": {}},
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    )
+
+    async def fake_run(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
+        return ClaudeRun(stdout=envelope, stderr="", exit_code=0, elapsed_ms=1, timed_out=False)
+
+    monkeypatch.setattr(srv, "run_claude_async", fake_run)
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_ask", {"prompt": "hi"}))
+    assert secret in data["summary"]  # output is passed through verbatim, not scrubbed
+
+    # The disclosure must not falsely claim returned output is redacted.
+    egress = _capabilities_payload()["data_egress"].lower()
+    assert "returned model output" not in egress
+    assert "returned output" not in egress
+
+
+async def test_paid_tool_docstrings_disclose_egress():
+    paid = (
+        "claude_ask",
+        "claude_review_changes",
+        "claude_adversarial_review",
+        "claude_review_changes_async",
+    )
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    for name in paid:
+        desc = tools[name].description or ""
+        assert "Anthropic" in desc, f"{name} docstring omits Anthropic egress"
+        assert "redact" in desc.lower(), f"{name} docstring omits redaction scope"
 
 
 async def test_list_tools_includes_new_free_tools():

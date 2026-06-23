@@ -728,10 +728,12 @@ async def claude_ask(
     """Ask Claude for a free-form second opinion.
 
     Use when the task is a question or design choice, not a git diff review or
-    adversarial attack. Paid external call; read-only; blocks up to
-    timeout_seconds and can be cancelled but not resumed. Free-form input is
-    size-capped before spend. Returns structured ok:true findings or ok:false
-    repair errors.
+    adversarial attack. Paid; read-only; blocks up to timeout_seconds;
+    cancellable, not resumable. Free-form input is size-capped before spend.
+
+    Egress to Anthropic via `claude`: this tool gathers no diff, so nothing is
+    redacted — your prompt/context, Claude's reply, and any access=readonly reads
+    are sent and relayed verbatim.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -815,10 +817,13 @@ async def claude_review_changes(
 ) -> ToolResult:
     """Review a git diff with Claude and wait for the result.
 
-    Use for correctness, regression, security, or test-coverage review of
-    working_tree, staged, or branch diff. Paid external call; read-only; blocks up
-    to timeout_seconds and can be cancelled but not resumed. For long reviews, use
-    claude_review_changes_async. Empty diffs return ok:true without calling Claude.
+    Correctness, security, or test-coverage review of working_tree, staged, or
+    branch diff. Paid; read-only; blocks up to timeout_seconds; cancellable. For
+    long reviews use claude_review_changes_async. Empty diffs skip the call.
+
+    Egress to Anthropic via `claude`: best-effort redaction covers only the
+    gathered diff sent to Claude — not your inputs, its output, or access=readonly
+    reads.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -984,11 +989,13 @@ async def claude_adversarial_review(
 ) -> ToolResult:
     """Have Claude attack a plan, claim, or decision.
 
-    Use to surface counterarguments and failure modes. Include evidence text, and
-    optionally attach a git diff with scope/base. Paid external call; read-only;
-    blocks up to timeout_seconds and can be cancelled but not resumed. Free-form
-    input is size-capped before spend; an empty attached diff returns ok:true
-    without calling Claude.
+    Surface counterarguments and failure modes; include evidence and optionally
+    attach a git diff with scope/base. Paid; read-only; blocks up to
+    timeout_seconds; cancellable. Empty attached diff returns without spending.
+
+    Egress to Anthropic via `claude`: best-effort redaction covers only the
+    gathered diff sent to Claude — not your inputs, its output, or access=readonly
+    reads.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1210,11 +1217,13 @@ async def claude_review_changes_async(
 ) -> ToolResult:
     """Launch a git diff review in the background and return a job_id.
 
-    Use when a diff review may outlive the current turn. Paid external call;
-    creates local job state and cannot be resumed if cancelled. Poll with
-    claude_job_status, read with claude_job_result, delete after reading with
-    claude_job_consume_result, or stop with claude_job_cancel. Empty diffs return
-    ok:true immediately without starting a job.
+    Use when a diff review may outlive the current turn. Paid; creates local job
+    state; not resumable if cancelled. Poll/read/delete/stop via the
+    claude_job_* tools. Empty diffs return without starting a job.
+
+    Egress to Anthropic via `claude`: best-effort redaction covers only the
+    gathered diff sent to Claude — not your inputs, its output, or access=readonly
+    reads.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -2044,6 +2053,16 @@ def _capabilities_payload() -> dict:
             "does NOT fetch refs, call the GitHub API, or accept PR numbers/URLs; "
             "scope=branch base/head must already resolve locally",
         ],
+        data_egress=(
+            "Paid tools (claude_ask, claude_review_changes, claude_adversarial_review, "
+            "claude_review_changes_async) send context to Anthropic via the `claude` CLI. "
+            "Best-effort secret redaction is applied only to the server-gathered git diff "
+            "before it is sent. It does NOT cover your free-form inputs (prompt, context, "
+            "target, evidence, focus), Claude's returned response, or files Claude reads "
+            "directly from the workspace under access=readonly. Use access=toolless and "
+            "config_mode=safe/bare for sensitive workspaces; redaction is defense-in-depth, "
+            "not a guarantee."
+        ),
         prerequisites=[
             "the `claude` CLI installed and authenticated",
             "git, for the diff-bearing tools",
