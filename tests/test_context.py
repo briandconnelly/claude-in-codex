@@ -254,9 +254,10 @@ def test_connection_string_password_is_redacted(git_repo):
     subprocess.run(["git", "add", "-Nf", "settings.py"], cwd=git_repo, check=True)
     res = gather_context(str(git_repo), scope="working_tree", base="main")
     assert "s3cretP4ssw0rd" not in res.text
-    # Non-secret userinfo and host stay visible so the diff is still reviewable.
-    assert "admin" in res.text
-    assert "db.example.com" in res.text
+    # Only the password drops; scheme, user, host, port, and path stay visible so
+    # the diff is still reviewable. Assert the whole transformed URL (rather than a
+    # bare host substring) to pin the exact redaction.
+    assert "postgres://admin:[redacted: secret value]@db.example.com:5432/app" in res.text
     assert "settings.py" in res.redacted_paths
 
 
