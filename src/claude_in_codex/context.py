@@ -272,6 +272,42 @@ def _split_diff_prefix(line: str) -> tuple[str, str]:
     return "", line
 
 
+_REDACTED = "[redacted: secret value]"
+
+
+def _redact_key_content(content: str, in_block: bool) -> tuple[str, bool, bool]:
+    """Redact PEM/OpenSSH/PGP key material within one content line.
+
+    Handles markers that share a physical line (e.g. an escaped one-liner
+    ``key="-----BEGIN...-----\\nMII...\\n-----END...-----"``) as well as true
+    multi-line blocks. The BEGIN/END markers stay visible; only the body between
+    them is dropped, and the open-block state never leaks past an inline END.
+
+    Returns ``(emitted, changed, in_block_after)``.
+    """
+    if in_block:
+        end = _PRIVATE_KEY_END_RE.search(content)
+        if end is None:
+            return _REDACTED, True, True  # still inside the block: drop the whole line
+        # Body may precede the END marker on this closing line; keep END onward.
+        head = content[: end.start()]
+        emit = (_REDACTED if head.strip() else head) + content[end.start() :]
+        return emit, True, False
+
+    begin = _PRIVATE_KEY_BEGIN_RE.search(content)
+    if begin is None:
+        return content, False, False
+    end = _PRIVATE_KEY_END_RE.search(content, begin.end())
+    if end is not None:
+        # Whole key inline on one line: redact between the markers, stay closed.
+        emit = content[: begin.end()] + _REDACTED + content[end.start() :]
+        return emit, True, False
+    # Block opens here; redact any body trailing the BEGIN marker on this line.
+    tail = content[begin.end() :]
+    emit = content[: begin.end()] + (_REDACTED if tail.strip() else tail)
+    return emit, True, True
+
+
 def _redact(diff: str) -> tuple[str, list[str]]:
     out_lines: list[str] = []
     redacted: list[str] = []
@@ -306,18 +342,11 @@ def _redact(diff: str) -> tuple[str, list[str]]:
             continue
 
         prefix, content = _split_diff_prefix(line)
-        if in_key_block:
-            note_redacted()
-            if _PRIVATE_KEY_END_RE.search(content):
-                in_key_block = False
-                out_lines.append(line)  # keep END marker visible
-            else:
-                out_lines.append(f"{prefix}[redacted: secret value]")
-            continue
-        if _PRIVATE_KEY_BEGIN_RE.search(content):
-            in_key_block = True
-            note_redacted()
-            out_lines.append(line)  # keep BEGIN marker visible
+        if in_key_block or _PRIVATE_KEY_BEGIN_RE.search(content):
+            emit_content, changed, in_key_block = _redact_key_content(content, in_key_block)
+            if changed:
+                note_redacted()
+            out_lines.append(f"{prefix}{emit_content}")
             continue
 
         emit_content, changed = _redact_secret_values(content)

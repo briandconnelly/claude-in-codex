@@ -302,6 +302,28 @@ def test_inline_private_key_block_body_is_redacted(git_repo, begin, end):
     assert "config.py" in res.redacted_paths
 
 
+def test_escaped_single_line_private_key_is_redacted(git_repo):
+    # An escaped one-line key (BEGIN, body, and END on a single physical line, as
+    # seen in .env/JSON/CI configs). The body must drop and the block must not
+    # bleed onto the following, unrelated line.
+    body = "MIIEvQIBADANBgkqSECRETKEYBODYdeadbeef0123456789"
+    (git_repo / "config.json").write_text(
+        "{\n"
+        f'  "key": "-----BEGIN PRIVATE KEY-----\\n{body}\\n-----END PRIVATE KEY-----\\n",\n'
+        '  "after": "not-a-secret-value-here"\n'
+        "}\n"
+    )
+    subprocess.run(["git", "add", "-Nf", "config.json"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert body not in res.text
+    assert "[redacted: secret value]" in res.text
+    assert "-----BEGIN PRIVATE KEY-----" in res.text
+    assert "-----END PRIVATE KEY-----" in res.text
+    # The unrelated following line survives: state did not leak past the one-liner.
+    assert "not-a-secret-value-here" in res.text
+    assert "config.json" in res.redacted_paths
+
+
 def test_ordinary_code_is_not_over_redacted(git_repo):
     (git_repo / "ordinary.py").write_text(
         "sky_is_blue = True\n"
