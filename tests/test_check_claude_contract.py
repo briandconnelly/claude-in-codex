@@ -42,6 +42,7 @@ def _full_help():
 def _make_runner(
     *,
     version="2.1.0 (Claude Code)",
+    version_on_stderr=False,
     help_text=None,
     bogus_stderr="unknown option",
     bogus_returncode=1,
@@ -52,10 +53,10 @@ def _make_runner(
     def fake_run(cmd, **_kwargs):
         args = cmd[1:]
         if args == list(cli_contract.VERSION_ARGS):
-            return _completed(stdout=version)
+            return _completed(stderr=version) if version_on_stderr else _completed(stdout=version)
         if args == list(cli_contract.HELP_ARGS):
             return _completed(stdout=help_text)
-        # The bogus-flag drift-signature probe.
+        # The bogus-flag drift-signature probe (auth status --text + bogus flag).
         return _completed(stderr=bogus_stderr, returncode=bogus_returncode)
 
     return fake_run
@@ -100,6 +101,15 @@ def test_absent_help_gated_flag_is_only_warning(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "WARN" in out
     assert "--effort absent" in out
+
+
+def test_version_on_stderr_is_used(monkeypatch, capsys):
+    # A CLI that prints --version to stderr must not be misread as a probe failure.
+    _patch(monkeypatch, _make_runner(version_on_stderr=True))
+    assert check.main() == 0
+    out = capsys.readouterr().out
+    assert "2.1.0 (Claude Code)" in out
+    assert "contract holds" in out
 
 
 def test_unsupported_major_warns_not_fails(monkeypatch, capsys):

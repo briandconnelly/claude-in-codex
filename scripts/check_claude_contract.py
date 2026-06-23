@@ -42,8 +42,11 @@ FAIL = "FAIL"
 
 _PROBE_TIMEOUT_SECONDS = 10
 # A flag that cannot plausibly exist, used only to confirm `claude` still rejects
-# unknown options (at arg-parse, before any model call — zero spend) AND that its
-# rejection phrasing still matches one of CONTRACT_DRIFT_STDERR_PATTERNS.
+# unknown options AND that its rejection phrasing still matches one of
+# CONTRACT_DRIFT_STDERR_PATTERNS. It is appended to the `auth status` subcommand
+# (not a bare top-level invocation) so the probe is guaranteed no-spend even if a
+# future CLI were to accept/ignore unknown options: `auth status` never makes a
+# model call regardless of how the bogus flag is handled.
 _BOGUS_FLAG = "--claude-in-codex-contract-probe-not-a-real-flag"
 
 
@@ -117,12 +120,13 @@ def _check_flags(flags: frozenset[str]) -> bool:
 def _check_drift_signature() -> None:
     """Advisory self-test of the unknown-flag rejection path.
 
-    Confirms `claude` still rejects an unknown flag (proving the zero-spend
-    arg-parse guarantee the whole plugin rests on) AND that its phrasing still
+    Confirms `claude` still rejects an unknown flag (proving the arg-parse
+    rejection guarantee the whole plugin rests on) AND that its phrasing still
     matches a CONTRACT_DRIFT_STDERR_PATTERN, so classify_failure keeps labeling real
     drift as cli_contract_changed. A non-match is only a WARN: it may mean upstream
-    reworded its error, which warrants a human look at the patterns."""
-    bogus = _run(_BOGUS_FLAG)
+    reworded its error, which warrants a human look at the patterns. The probe is
+    appended to the no-spend `auth status` subcommand (see _BOGUS_FLAG)."""
+    bogus = _run(*cli_contract.AUTH_STATUS_ARGS, _BOGUS_FLAG)
     if bogus is None:
         print(f"{WARN}: drift-signature self-test could not run (probe missing/timed out).")
     elif bogus.returncode != 0 and cli_contract.is_contract_drift(bogus.stdout, bogus.stderr):
@@ -141,7 +145,8 @@ def main() -> int:
     version_run = _run(*cli_contract.VERSION_ARGS)
     help_run = _run(*cli_contract.HELP_ARGS)
 
-    version_str = version_run.stdout.strip() if version_run else ""
+    # Prefer stdout but fall back to stderr: some CLIs print --version to stderr.
+    version_str = (version_run.stdout.strip() or version_run.stderr.strip()) if version_run else ""
     help_text = f"{help_run.stdout}\n{help_run.stderr}" if help_run else ""
 
     if not version_str or not help_text.strip():
