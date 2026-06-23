@@ -95,8 +95,8 @@ from claude_in_codex.schemas import (
 
 CAPABILITY_SUMMARY = (
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
-    "adversarial plan review, and second opinions. Never edits code, grants "
-    "Bash/write tools, or proxies MCP tools; hooks may run unless "
+    "adversarial plan review, and second opinions. It never edits code, grants "
+    "Bash/write tools, or proxies Claude's own MCP tools; hooks may run unless "
     "config_mode=safe/bare. Paid tools send context to Anthropic; call "
     "claude_status before spending. Use claude_models (or claude://models) to "
     "discover valid model slugs before overriding model. "
