@@ -479,7 +479,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-23"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-24"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1123,7 +1123,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-23"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-24"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1168,14 +1168,17 @@ async def test_capabilities_disclose_data_egress():
     egress = data["data_egress"]
     assert "Anthropic" in egress
     assert "redact" in egress.lower()
-    # It must name what redaction does NOT cover: caller inputs and readonly reads.
+    # It must state coverage now spans returned output, and still name what is NOT
+    # covered: the caller's free-form inputs and access=readonly direct reads.
+    assert "returned" in egress.lower()
+    assert "verbatim" in egress.lower()
     assert "readonly" in egress
 
 
-async def test_returned_model_output_is_not_redacted(monkeypatch):
-    # Pins the reality behind the egress disclosure: redaction is applied to the
-    # diff sent TO Claude, not to Claude's returned output. If output redaction is
-    # ever added, the data_egress / docstring / SECURITY.md text must change too.
+async def test_returned_model_output_is_redacted(monkeypatch):
+    # Pins the #66 behavior: best-effort secret redaction now covers Claude's
+    # returned output (summary/findings/raw text), not just the diff sent TO Claude.
+    # If this is ever weakened, the data_egress / docstring / SECURITY.md text must change too.
     import claude_in_codex.server as srv
     from claude_in_codex.claude import ClaudeRun
 
@@ -1200,12 +1203,12 @@ async def test_returned_model_output_is_not_redacted(monkeypatch):
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_ask", {"prompt": "hi"}))
-    assert secret in data["summary"]  # output is passed through verbatim, not scrubbed
+    assert secret not in data["summary"]  # returned output is scrubbed
+    assert "[redacted: secret value]" in data["summary"]
 
-    # The disclosure must not falsely claim returned output is redacted.
+    # The disclosure now states returned output is covered.
     egress = _capabilities_payload()["data_egress"].lower()
-    assert "returned model output" not in egress
-    assert "returned output" not in egress
+    assert "returned" in egress and "redact" in egress
 
 
 async def test_paid_tool_docstrings_disclose_egress():

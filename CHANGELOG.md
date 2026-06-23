@@ -15,11 +15,23 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   server-gathered diff before it is sent — not to free-form inputs, Claude's
   returned response, or files Claude reads directly under `access=readonly`. A
   machine-readable `data_egress` field was added to `claude_capabilities`, and
-  `SECURITY.md` now spells out the same redaction limits. Bumps the contract
-  fingerprint to `claude-in-codex/0.1/schema-23`.
+  `SECURITY.md` now spells out the same redaction limits. Part of the contract
+  fingerprint bump to `claude-in-codex/0.1/schema-24` (see the output-redaction
+  entry below for the rest of this unreleased surface change).
 
 ### Security
 
+- Extended best-effort secret redaction to **Claude's returned output**, closing
+  the egress gap the disclosure previously only admitted (#66). A shared
+  `redact_text` helper in `context.py` (reusing the diff path's pattern set and
+  stateful PEM/OpenSSH/PGP key-block logic) now scrubs every model-derived field
+  relayed to the caller: structured `summary`/`findings`/`questions`/`assumptions`/
+  `next_steps`, the `detail=full` raw response text, and model-derived error
+  messages. Redaction runs after string coercion so secrets hidden in nested
+  object keys are caught. The `data_egress` field, paid-tool descriptions, and
+  `SECURITY.md` are updated to state the new coverage; free-form caller inputs
+  are still sent verbatim. Bumps the contract fingerprint to
+  `claude-in-codex/0.1/schema-24`.
 - Hardened diff secret redaction in `context.py` (defense-in-depth on egress to
   Anthropic). Added high-confidence single-token patterns for JWTs, OpenAI
   (`sk-`/`sk-proj-`), Anthropic (`sk-ant-`), Stripe (`sk_live`/`sk_test`), Google

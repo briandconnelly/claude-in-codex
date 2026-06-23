@@ -21,6 +21,7 @@ from claude_in_codex.config import (
     config_mode_flags,
     is_env_placeholder,
 )
+from claude_in_codex.context import redact_text
 from claude_in_codex.schemas import ErrorInfo
 
 _BUDGET_REPAIR = (
@@ -282,7 +283,9 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
         env.get("is_error") or env.get("subtype") not in cli_contract.SUCCESS_SUBTYPES
     ):
         subtype = str(env.get("subtype") or "").lower()
-        result = str(env.get("result") or "")
+        # Model-derived result text is echoed into user-visible error messages below;
+        # scrub secrets first so the error path matches the success-path egress (#66).
+        result = redact_text(str(env.get("result") or ""))[0]
         structured_blob = f"{subtype}\n{result}".lower()
         combined_blob = f"{structured_blob}\n{run.stderr}".lower()
         if _has_logged_out_signal(combined_blob):

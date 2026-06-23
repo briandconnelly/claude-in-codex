@@ -13,6 +13,7 @@ from claude_in_codex.context import (
     NotAGitRepoError,
     _diff_args,
     gather_context,
+    redact_text,
 )
 
 
@@ -592,3 +593,69 @@ def test_branch_paths_filter_with_explicit_head(git_repo):
 def test_explicit_head_rejected_for_non_branch_scope(git_repo, scope):
     with pytest.raises(InvalidHeadError):
         gather_context(str(git_repo), scope=scope, base="main", head="feature")
+
+
+# --- redact_text: free-text (prose) redaction reused by the output path (#66) ---
+
+
+def test_redact_text_replaces_inline_secret():
+    secret = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    out, changed = redact_text(f"you committed {secret}, rotate it")
+    assert secret not in out
+    assert "[redacted: secret value]" in out
+    assert changed is True
+
+
+def test_redact_text_preserves_clean_prose():
+    text = "This finding notes a missing test for the retry path; add coverage."
+    out, changed = redact_text(text)
+    assert out == text
+    assert changed is False
+
+
+def test_redact_text_passes_through_empty():
+    assert redact_text("") == ("", False)
+
+
+def test_redact_text_redacts_multiline_pem_block_in_prose():
+    body = "MIIEvQIBADANBgkqSECRETKEYBODYdeadbeef0123456789"
+    text = (
+        "The file embeds a key:\n"
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        f"{body}\n{body}line2\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "which must be rotated."
+    )
+    out, changed = redact_text(text)
+    assert body not in out
+    assert "[redacted: secret value]" in out
+    # Markers stay visible so the reviewer still learns a key was present.
+    assert "-----BEGIN RSA PRIVATE KEY-----" in out
+    assert "-----END RSA PRIVATE KEY-----" in out
+    assert "which must be rotated." in out
+    assert changed is True
+
+
+def test_redact_text_redacts_token_sharing_a_line_with_key_boundary():
+    # A non-key secret on the same physical line as a PEM END marker must still
+    # be scrubbed, not preserved by the key-block branch (Codex review of #66).
+    token = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    text = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIBODYdeadbeef0123456789\n"
+        f"-----END RSA PRIVATE KEY----- leaked {token}"
+    )
+    out, changed = redact_text(text)
+    assert token not in out
+    assert changed is True
+
+
+def test_redact_tree_redacts_string_leaves_in_nested_structures():
+    from claude_in_codex.context import redact_tree
+
+    token = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    tree = [{"tool": "Bash", "input": {"command": f"echo {token}"}}, [f"x {token}"]]
+    out = redact_tree(tree)
+    blob = repr(out)
+    assert token not in blob
+    assert "[redacted: secret value]" in blob

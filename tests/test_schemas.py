@@ -93,7 +93,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "claude-in-codex/0.1/schema-23"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-24"
 
 
 def test_meta_carries_head_and_diff_range():
