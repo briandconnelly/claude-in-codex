@@ -5,6 +5,20 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
+## Unreleased
+
+### Security
+
+- Hardened diff secret redaction in `context.py` (defense-in-depth on egress to
+  Anthropic). Added high-confidence single-token patterns for JWTs, OpenAI
+  (`sk-`/`sk-proj-`), Anthropic (`sk-ant-`), Stripe (`sk_live`/`sk_test`), Google
+  (`AIza`), GitHub fine-grained (`github_pat_`), GitLab (`glpat-`), npm (`npm_`),
+  PyPI (`pypi-`), and connection-string/URI userinfo passwords. Redaction is now
+  stateful for multi-line `PRIVATE KEY` / OpenSSH / PGP blocks, dropping the whole
+  base64 body (markers stay visible) instead of only the `BEGIN` line. No
+  fingerprint change — this is output-redaction behavior, not an MCP-surface
+  change.
+
 ## 0.6.0 - 2026-06-19
 
 ### Changed (breaking)

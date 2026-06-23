@@ -200,6 +200,147 @@ def test_redacted_paths_are_normalized(git_repo):
     assert all(" b/" not in path for path in res.redacted_paths)
 
 
+def _secret(prefix: str, body: str) -> str:
+    """Join a vendor prefix and a synthetic body at runtime.
+
+    The full token never appears as one contiguous literal in source (the `+` is a
+    runtime op the formatter won't collapse), so GitHub push protection and
+    detect-secrets don't flag these fixtures — while the value the test scans is
+    still the complete, credential-shaped token.
+    """
+    return prefix + body
+
+
+# Each secret is synthetic and non-functional.
+HIGH_CONFIDENCE_SECRETS = [
+    pytest.param(
+        _secret(
+            "eyJ",
+            "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ),
+        id="jwt",
+    ),
+    pytest.param(_secret("sk-proj-", "T3BlbkFJ1234567890abcdefghij"), id="openai-project"),
+    pytest.param(_secret("sk-ant-", "api03-abcdefghij1234567890ABCD"), id="anthropic"),
+    pytest.param(_secret("sk-", "T3BlbkFJ1234567890abcdefghijABCD"), id="openai-classic"),
+    pytest.param(_secret("sk_live_", "51H8xqL2eZvKYlo2Cabcdefghij"), id="stripe-live"),
+    pytest.param(_secret("sk_test_", "51H8xqL2eZvKYlo2Cabcdefghij"), id="stripe-test"),
+    pytest.param(_secret("AIza", "SyB1234567890abcdefghijklmnopqrstuv"), id="google-api-key"),
+    pytest.param(_secret("github_pat_", "11ABCDEFG0abcdefghijkl_l0123456789"), id="github-fg"),
+    pytest.param(_secret("glpat-", "ABCdef1234567890123456"), id="gitlab-pat"),
+    pytest.param(_secret("npm_", "0123456789abcdefghijklmnopqrstuvwxyz"), id="npm-token"),
+    pytest.param(_secret("pypi-", "AgEIcHlwaS5vcmcabcdefghij"), id="pypi-token"),
+]
+
+
+@pytest.mark.parametrize("secret", HIGH_CONFIDENCE_SECRETS)
+def test_high_confidence_secret_prefixes_are_redacted(git_repo, secret):
+    # Embed as a bare call argument (no key=value keyword) so only the prefix
+    # pattern can catch it, not the generic assignment pattern.
+    (git_repo / "leak.py").write_text(f'connect("{secret}")\n')
+    subprocess.run(["git", "add", "-Nf", "leak.py"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert secret not in res.text
+    assert "[redacted: secret value]" in res.text
+    assert "leak.py" in res.redacted_paths
+
+
+def test_connection_string_password_is_redacted(git_repo):
+    (git_repo / "settings.py").write_text(
+        'DATABASE_URL = "postgres://admin:s3cretP4ssw0rd@db.example.com:5432/app"\n'
+    )
+    subprocess.run(["git", "add", "-Nf", "settings.py"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert "s3cretP4ssw0rd" not in res.text
+    # Only the password drops; scheme, user, host, port, and path stay visible so
+    # the diff is still reviewable. Assert the whole transformed URL (rather than a
+    # bare host substring) to pin the exact redaction.
+    assert "postgres://admin:[redacted: secret value]@db.example.com:5432/app" in res.text
+    assert "settings.py" in res.redacted_paths
+
+
+# An OpenSSH/PEM/PGP block embedded in an ordinary (non-secret-path) file: the
+# whole base64 body must drop, not just the BEGIN marker line.
+PRIVATE_KEY_BLOCKS = [
+    pytest.param(
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----END OPENSSH PRIVATE KEY-----",
+        id="openssh",
+    ),
+    pytest.param(
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----",
+        id="rsa-pem",
+    ),
+    pytest.param(
+        "-----BEGIN PRIVATE KEY-----",
+        "-----END PRIVATE KEY-----",
+        id="pkcs8",
+    ),
+    pytest.param(
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        "-----END PGP PRIVATE KEY BLOCK-----",
+        id="pgp",
+    ),
+]
+
+
+@pytest.mark.parametrize(("begin", "end"), PRIVATE_KEY_BLOCKS)
+def test_inline_private_key_block_body_is_redacted(git_repo, begin, end):
+    body_marker = "MIIEvQIBADANBgkqSECRETKEYBODYdeadbeef0123456789"
+    (git_repo / "config.py").write_text(
+        f'PEM = """\n{begin}\n{body_marker}\n{body_marker}line2\n{end}\n"""\n'
+    )
+    subprocess.run(["git", "add", "-Nf", "config.py"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert body_marker not in res.text
+    assert "[redacted: secret value]" in res.text
+    # Markers stay visible so a reviewer can see a key was present.
+    assert begin in res.text
+    assert end in res.text
+    assert "config.py" in res.redacted_paths
+
+
+def test_escaped_single_line_private_key_is_redacted(git_repo):
+    # An escaped one-line key (BEGIN, body, and END on a single physical line, as
+    # seen in .env/JSON/CI configs). The body must drop and the block must not
+    # bleed onto the following, unrelated line.
+    body = "MIIEvQIBADANBgkqSECRETKEYBODYdeadbeef0123456789"
+    (git_repo / "config.json").write_text(
+        "{\n"
+        f'  "key": "-----BEGIN PRIVATE KEY-----\\n{body}\\n-----END PRIVATE KEY-----\\n",\n'
+        '  "after": "not-a-secret-value-here"\n'
+        "}\n"
+    )
+    subprocess.run(["git", "add", "-Nf", "config.json"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert body not in res.text
+    assert "[redacted: secret value]" in res.text
+    assert "-----BEGIN PRIVATE KEY-----" in res.text
+    assert "-----END PRIVATE KEY-----" in res.text
+    # The unrelated following line survives: state did not leak past the one-liner.
+    assert "not-a-secret-value-here" in res.text
+    assert "config.json" in res.redacted_paths
+
+
+def test_ordinary_code_is_not_over_redacted(git_repo):
+    (git_repo / "ordinary.py").write_text(
+        "sky_is_blue = True\n"
+        'ai_model = "fast"\n'
+        "risky = compute()\n"
+        "skip = False\n"
+        "glpatch = apply(diff)\n"
+        'homepage = "https://example.com/path"\n'
+        'greeting = "eyJhbGci is not a token here"\n'
+    )
+    subprocess.run(["git", "add", "-Nf", "ordinary.py"], cwd=git_repo, check=True)
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+    assert "[redacted" not in res.text
+    assert "ordinary.py" not in res.redacted_paths
+
+
 def test_git_timeout_is_bounded(monkeypatch, git_repo):
     import claude_in_codex.context as ctx
 
