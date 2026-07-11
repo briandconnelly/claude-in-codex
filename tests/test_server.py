@@ -479,7 +479,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-25"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-26"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1123,7 +1123,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-25"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-26"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -2388,3 +2388,31 @@ async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_p
     assert res["ok"] is True
     assert res["meta"]["head"] == head
     assert res["meta"]["diff_range"] == f"{base}...{head}"
+
+
+async def test_invalid_enum_argument_returns_envelope():
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_review_dry_run", {"scope": "bogus"}, raise_on_error=False
+        )
+    assert res.is_error is True
+    payload = structured(res)
+    assert payload["ok"] is False
+    err = payload["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["offending_param"] == "scope"
+    assert "working_tree" in err["repair"]
+
+
+async def test_missing_required_argument_returns_envelope():
+    async with Client(mcp) as client:
+        res = await client.call_tool("claude_review_dry_run", {}, raise_on_error=False)
+    assert res.is_error is True
+    err = structured(res)["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["offending_param"] == "scope"
+
+
+def test_capability_summary_names_error_carrier():
+    assert "structuredContent" in CAPABILITY_SUMMARY
+    assert "ok:false" in CAPABILITY_SUMMARY

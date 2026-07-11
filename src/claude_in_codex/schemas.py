@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail value
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-25"
+FINGERPRINT = "claude-in-codex/0.1/schema-26"
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -73,6 +73,9 @@ ErrorCode = Literal[
     # A tracked env var (CLAUDE_IN_CODEX_* or ANTHROPIC_API_KEY) arrived as a
     # literal `${...}` placeholder — the MCP host did not expand env substitutions.
     "unexpanded_env_placeholder",
+    # An argument failed inputSchema validation before the tool body ran (caught
+    # by ValidationEnvelopeMiddleware, so it still returns the ok:false envelope).
+    "invalid_arguments",
     "invalid_scope",
     "invalid_base",
     "invalid_head",

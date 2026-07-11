@@ -9,6 +9,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Added
 
+- Argument-validation failures now return the standard `ok:false` envelope
+  (new error code `invalid_arguments`) instead of prose-only text, and the
+  capability summary names the error carrier. Bumps the contract fingerprint
+  to `claude-in-codex/0.1/schema-26`.
+
 - `claude_models` tool and `claude://models` resource: an advisory, free,
   read-only catalog of the model slugs accepted by the `model` parameter
   (aliases such as `opus`/`sonnet` plus pinned full IDs, each tagged `kind`).

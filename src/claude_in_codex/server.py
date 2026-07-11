@@ -12,8 +12,9 @@ from urllib.parse import unquote, urlparse
 
 from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from claude_in_codex import __version__, cli_contract, jobs, preflight
 from claude_in_codex.claude import (
@@ -105,8 +106,8 @@ CAPABILITY_SUMMARY = (
     "claude_review_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
     "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
-    "toolless default; readonly lets Claude read files, bypassing diff redaction. "
-    "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
+    "toolless default; readonly reads files. Errors return ok:false in structuredContent "
+    "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint"
 )
 
 _HEAD_FIELD_DESC = (
@@ -223,6 +224,38 @@ def _err(
         ),
         meta=meta,
     ).model_dump(mode="json", exclude_none=True)
+
+
+class ValidationEnvelopeMiddleware(Middleware):
+    """Return the ok:false envelope for pre-handler argument-validation failures.
+
+    Without this, FastMCP converts a pydantic ValidationError into isError:true
+    with prose-only content — no code, no repair, no structuredContent — an
+    undisclosed third error carrier. Tool bodies validate their own arguments
+    before constructing models, so a ValidationError reaching this middleware is
+    an argument-shape failure, not an internal bug."""
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        try:
+            return await call_next(context)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            loc = first.get("loc") or ("arguments",)
+            field = ".".join(str(part) for part in loc)
+            expected = (first.get("ctx") or {}).get("expected")
+            message = f"Invalid argument '{field}': {first.get('msg', 'invalid value')}."
+            if expected:
+                repair = f"Set {field} to one of: {expected}, then retry the same call."
+            else:
+                repair = (
+                    f"Fix the '{field}' argument to match the tool's inputSchema, "
+                    "then retry the same call."
+                )
+            meta = _meta("", "inherit", "toolless", 0, 0, None)
+            return _result(_err("invalid_arguments", message, repair, meta, offending=field))
+
+
+mcp.add_middleware(ValidationEnvelopeMiddleware())
 
 
 def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
