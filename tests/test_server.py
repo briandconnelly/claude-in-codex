@@ -2487,7 +2487,11 @@ async def test_async_same_key_different_args_returns_existing_job(git_repo, monk
         first = structured(
             await client.call_tool(
                 "claude_review_changes_async",
-                {"scope": "working_tree", "workspace_root": str(git_repo), "idempotency_key": "key-2"},
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "key-2",
+                },
             )
         )
         second = structured(
