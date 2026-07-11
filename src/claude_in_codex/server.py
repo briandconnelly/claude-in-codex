@@ -1227,6 +1227,20 @@ async def claude_adversarial_review(
     return _result(out)
 
 
+async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | None:
+    """Best-effort launch dedupe: JobStatus of a live/unexpired job started with
+    this key, or None. Checked twice per launch — fast path at entry, and again
+    just before spawn — to narrow the check-then-spawn window. The jobs lock is
+    process-local and state lives on disk, so cross-process races remain
+    possible: dedupe is spend protection, not a transactional guarantee."""
+    if not idempotency_key:
+        return None
+    existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
+    if existing is None:
+        return None
+    return await run_sync(lambda: jobs.status(cwd, existing))
+
+
 # Starting a background job commits to spend (the job runs to completion or its
 # best-effort budget stop threshold even if never polled), but returns immediately
 # without blocking.
@@ -1284,7 +1298,9 @@ async def claude_review_changes_async(
             "job with this key already exists in this workspace (within the job "
             "TTL), its status is returned instead of starting a duplicate paid "
             "job. After a dropped connection, retry with the same key or check "
-            "claude_job_list before re-launching."
+            "claude_job_list before re-launching. The key alone determines the "
+            "match; do not reuse a key with different arguments — the existing "
+            "job's status is returned unchanged."
         ),
     ] = None,
     ctx: Context | None = None,
@@ -1318,12 +1334,9 @@ async def claude_review_changes_async(
     )
     if err:
         return _result(err)
-    if idempotency_key:
-        existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
-        if existing:
-            data = await run_sync(lambda: jobs.status(cwd, existing))
-            if data is not None:
-                return _result(data)
+    match = await _idempotent_match(cwd, idempotency_key)
+    if match is not None:
+        return _result(match)
     # A background job is bounded by its wall-clock deadline, not the synchronous
     # timeout_seconds; report that everywhere so meta stays consistent with the job.
     job_timeout = jobs.max_seconds()
@@ -1422,6 +1435,9 @@ async def claude_review_changes_async(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         idempotency_key=idempotency_key,
     )
+    match = await _idempotent_match(cwd, idempotency_key)
+    if match is not None:
+        return _result(match)
     try:
         job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
     except (FileNotFoundError, PermissionError):
