@@ -474,3 +474,18 @@ def test_job_running_result_error_carries_repair_call(tmp_path, monkeypatch):
     assert err["repair_tool"] == "claude_job_status"
     assert err["repair_arguments"] == {"job_id": job_id}
     jobs.cancel(str(tmp_path), job_id)
+
+
+def test_find_by_idempotency_key_matches_live_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg(idempotency_key="key-1"))
+    assert jobs.find_by_idempotency_key(str(tmp_path), "key-1") == job_id
+    assert jobs.find_by_idempotency_key(str(tmp_path), "other-key") is None
+    jobs.cancel(str(tmp_path), job_id)
+
+
+def test_find_by_idempotency_key_ignores_keyless_jobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg())
+    assert jobs.find_by_idempotency_key(str(tmp_path), "key-1") is None
+    jobs.cancel(str(tmp_path), job_id)

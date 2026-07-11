@@ -1277,13 +1277,23 @@ async def claude_review_changes_async(
         float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
+    idempotency_key: Annotated[
+        str | None,
+        Field(
+            description="Optional client-chosen key making launch retry-safe: if a "
+            "job with this key already exists in this workspace (within the job "
+            "TTL), its status is returned instead of starting a duplicate paid "
+            "job. After a dropped connection, retry with the same key or check "
+            "claude_job_list before re-launching."
+        ),
+    ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
     """Launch a git diff review in the background and return a job_id.
 
-    Use when a diff review may outlive the current turn. Paid; creates local job
-    state; not resumable if cancelled. Poll/read/delete/stop via the
-    claude_job_* tools. Empty diffs return without starting a job.
+    Paid; not resumable if cancelled. Poll/read/delete/stop via claude_job_*
+    tools. Empty diffs skip the job. With idempotency_key, a duplicate launch
+    returns the existing job instead of spending again.
 
     Egress to Anthropic via `claude`: best-effort redaction covers the gathered
     diff and returned output, not free-form inputs or direct access=readonly reads.
@@ -1308,6 +1318,12 @@ async def claude_review_changes_async(
     )
     if err:
         return _result(err)
+    if idempotency_key:
+        existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
+        if existing:
+            data = await run_sync(lambda: jobs.status(cwd, existing))
+            if data is not None:
+                return _result(data)
     # A background job is bounded by its wall-clock deadline, not the synchronous
     # timeout_seconds; report that everywhere so meta stays consistent with the job.
     job_timeout = jobs.max_seconds()
@@ -1404,6 +1420,7 @@ async def claude_review_changes_async(
         paths=effective_paths,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        idempotency_key=idempotency_key,
     )
     try:
         job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))

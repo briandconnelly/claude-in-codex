@@ -192,6 +192,7 @@ class JobConfig:
     paths: list[str] | None = None
     redacted_paths: list[str] | None = None
     security_warnings: list[str] | None = None
+    idempotency_key: str | None = None
 
 
 def _write_stdin(proc: subprocess.Popen, stdin_text: str) -> None:
@@ -241,6 +242,7 @@ def start_job(
     meta = {
         "job_id": job_id,
         "kind": cfg.kind,
+        "idempotency_key": cfg.idempotency_key,
         "pid": proc.pid,
         "started_epoch": started,
         "started_at": datetime.now(UTC).isoformat(),
@@ -267,6 +269,31 @@ def start_job(
     _write_meta(jd, meta)
     _enforce_count_cap(cwd)
     return job_id, meta["started_at"]
+
+
+def find_by_idempotency_key(cwd: str, key: str) -> str | None:
+    """Newest non-expired job started with this idempotency key, or None.
+
+    Dedup window and scope: per workspace, for the lifetime of the job record
+    (its TTL) — the same window in which claude_job_list can see the job."""
+    with _JOBS_LOCK:
+        ws = _ws_dir(cwd)
+        if not ws.is_dir():
+            return None
+        matches: list[tuple[float, str]] = []
+        for jd in ws.iterdir():
+            if not jd.is_dir():
+                continue
+            meta = _read_meta(jd)
+            if meta is None or meta.get("idempotency_key") != key:
+                continue
+            state = _status_of(jd, meta)
+            if state in _TERMINAL and _expired(meta):
+                continue
+            matches.append((meta.get("started_epoch", 0.0), meta.get("job_id", jd.name)))
+        if not matches:
+            return None
+        return max(matches)[1]
 
 
 def _status_of(jd: Path, meta: dict) -> str:

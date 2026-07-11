@@ -441,8 +441,11 @@ RESULT_SCHEMA = _object_union_schema(TypeAdapter(SuccessResult | ErrorResult))
 STATUS_SCHEMA = StatusResult.model_json_schema()
 CAPABILITIES_SCHEMA = CapabilitiesResult.model_json_schema()
 # A failed *_async launch returns the error envelope; an empty diff returns a
-# SuccessResult without starting a job.
-JOB_STARTED_SCHEMA = _object_union_schema(TypeAdapter(JobStarted | SuccessResult | ErrorResult))
+# SuccessResult without starting a job; an idempotency_key match returns the
+# existing job's JobStatus instead of a new JobStarted.
+JOB_STARTED_SCHEMA = _object_union_schema(
+    TypeAdapter(JobStarted | JobStatus | SuccessResult | ErrorResult)
+)
 JOB_STATUS_SCHEMA = _object_union_schema(TypeAdapter(JobStatus | ErrorResult))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.
 DRY_RUN_SCHEMA = _object_union_schema(TypeAdapter(DryRunResult | ErrorResult))

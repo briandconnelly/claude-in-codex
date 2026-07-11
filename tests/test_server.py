@@ -2453,3 +2453,25 @@ async def test_job_not_found_carries_repair_tool(tmp_path):
     err = structured(res)["error"]
     assert err["code"] == "job_not_found"
     assert err["repair_tool"] == "claude_job_list"
+
+
+async def test_async_same_idempotency_key_returns_existing_job(git_repo, monkeypatch):
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    args = {
+        "scope": "working_tree",
+        "workspace_root": str(git_repo),
+        "idempotency_key": "key-1",
+    }
+    async with Client(mcp) as client:
+        first = structured(await client.call_tool("claude_review_changes_async", args))
+        second = structured(await client.call_tool("claude_review_changes_async", args))
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": first["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert first["ok"] is True
+    assert second["job_id"] == first["job_id"]
+    assert second["status"] == "running"
