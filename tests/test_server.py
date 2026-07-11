@@ -2433,3 +2433,23 @@ async def test_validation_middleware_reraises_internal_model_errors():
 
     with pytest.raises(ValidationError):
         await ValidationEnvelopeMiddleware().on_call_tool(None, call_next)
+
+
+def test_invalid_scope_error_carries_allowed_values():
+    from claude_in_codex.server import _invalid_scope_error, _meta
+
+    payload = _invalid_scope_error(_meta("", "inherit", "toolless", 0, 0, None), "bogus")
+    err = payload["error"]
+    assert err["allowed_values"] == ["working_tree", "staged", "branch"]
+
+
+async def test_job_not_found_carries_repair_tool(tmp_path):
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_job_status",
+            {"job_id": "nope", "workspace_root": str(tmp_path)},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    assert err["code"] == "job_not_found"
+    assert err["repair_tool"] == "claude_job_list"

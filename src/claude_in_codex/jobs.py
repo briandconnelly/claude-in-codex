@@ -579,9 +579,19 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
     env = _read_envelope(jd)
     if env:
         apply_cost_usage(bmeta, env)
+    repair_tool = None
+    repair_arguments = None
+    if code == "job_running":
+        repair_tool = "claude_job_status"
+        repair_arguments = {"job_id": meta.get("job_id")}
     return ErrorResult(
         error=ErrorInfo(
-            code=cast("ErrorCode", code), message=message, repair=repair, retryable=retryable
+            code=cast("ErrorCode", code),
+            message=message,
+            repair=repair,
+            retryable=retryable,
+            repair_tool=repair_tool,
+            repair_arguments=repair_arguments,
         ),
         meta=bmeta,
     ).model_dump(mode="json", exclude_none=True)

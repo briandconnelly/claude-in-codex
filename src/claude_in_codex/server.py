@@ -215,6 +215,10 @@ def _err(
     meta: Meta,
     offending: str | None = None,
     retryable: bool = False,
+    *,
+    allowed_values: list[str] | None = None,
+    repair_tool: str | None = None,
+    repair_arguments: dict | None = None,
 ) -> dict:
     return ErrorResult(
         error=ErrorInfo(
@@ -223,6 +227,9 @@ def _err(
             repair=repair,
             offending_param=offending,
             retryable=retryable,
+            allowed_values=allowed_values,
+            repair_tool=repair_tool,
+            repair_arguments=repair_arguments,
         ),
         meta=meta,
     ).model_dump(mode="json", exclude_none=True)
@@ -276,6 +283,17 @@ def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
     )
 
 
+def _job_not_found_error(job_id: str, meta: Meta) -> dict:
+    return _err(
+        "job_not_found",
+        f"No job '{job_id}' in this workspace.",
+        "Check the job_id, or start a new job; records expire after the TTL.",
+        meta,
+        offending="job_id",
+        repair_tool="claude_job_list",
+    )
+
+
 _INVALID_HEAD_REPAIR = (
     "Pass a local-resolvable git ref or commit for head and only with scope=branch; "
     "omit head to compare against HEAD. The server does not fetch refs, call GitHub, "
@@ -318,6 +336,7 @@ def _invalid_scope_error(meta: Meta, scope: str | None, *, scope_optional: bool 
         repair,
         meta,
         offending="scope",
+        allowed_values=["working_tree", "staged", "branch"],
     )
 
 
@@ -557,6 +576,7 @@ def _resolve(
             "Use one of: inherit, scoped, safe, bare.",
             safe_meta,
             offending="config_mode",
+            allowed_values=["inherit", "scoped", "safe", "bare"],
         )
     if ac not in ("toolless", "readonly"):
         safe_meta = _meta(
@@ -579,6 +599,7 @@ def _resolve(
             "Use one of: toolless, readonly.",
             safe_meta,
             offending="access",
+            allowed_values=["toolless", "readonly"],
         )
 
     if cm == "safe":
@@ -604,6 +625,7 @@ def _resolve(
                 "Update Claude Code, or use config_mode inherit/scoped/bare.",
                 safe_meta,
                 offending="config_mode",
+                allowed_values=["inherit", "scoped", "bare"],
             )
 
     meta = _meta(
@@ -663,6 +685,7 @@ def _resolve_config_mode_only(
             "Use one of: inherit, scoped, safe, bare.",
             meta,
             offending="config_mode",
+            allowed_values=["inherit", "scoped", "safe", "bare"],
         )
     if cm == "safe":
         fs = preflight.flag_support()
@@ -673,6 +696,7 @@ def _resolve_config_mode_only(
                 "Update Claude Code, or use config_mode inherit/scoped/bare.",
                 meta,
                 offending="config_mode",
+                allowed_values=["inherit", "scoped", "bare"],
             )
     return cm, None
 
@@ -1454,15 +1478,7 @@ async def claude_job_status(
     data = await run_sync(lambda: jobs.status(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(data)
 
 
@@ -1491,15 +1507,7 @@ async def claude_job_result(
     payload, found = await run_sync(lambda: jobs.result(cwd, job_id, False))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(payload)
 
 
@@ -1528,15 +1536,7 @@ async def claude_job_consume_result(
     payload, found = await run_sync(lambda: jobs.result(cwd, job_id, True))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(payload)
 
 
@@ -1565,15 +1565,7 @@ async def claude_job_cancel(
     data = await run_sync(lambda: jobs.cancel(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(data)
 
 
@@ -1726,6 +1718,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 message=f"Unknown config_mode '{d.config_mode}'.",
                 repair="Set CLAUDE_IN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
                 offending_param="config_mode",
+                allowed_values=["inherit", "scoped", "safe", "bare"],
             )
         )
     if d.access not in ("toolless", "readonly") and not access_is_placeholder:
@@ -1735,6 +1728,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 message=f"Unknown access '{d.access}'.",
                 repair="Set CLAUDE_IN_CODEX_ACCESS to one of: toolless, readonly.",
                 offending_param="access",
+                allowed_values=["toolless", "readonly"],
             )
         )
     if d.config_mode == "safe" and found and not safe_available(fs.help_parsed, fs.supported):
@@ -1747,6 +1741,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                     "inherit, scoped, or bare."
                 ),
                 offending_param="config_mode",
+                allowed_values=["inherit", "scoped", "bare"],
             )
         )
     if d.config_mode == "bare" and found and not bare_available():

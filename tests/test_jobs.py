@@ -462,3 +462,15 @@ def test_terminal_nondone_result_surfaces_cost(tmp_path):
     assert found and payload["ok"] is False
     assert payload["error"]["code"] == "job_cancelled"
     assert payload["meta"]["cost_usd"] == 0.0123  # envelope cost surfaced
+
+
+def test_job_running_result_error_carries_repair_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg())
+    payload, found = jobs.result(str(tmp_path), job_id)
+    assert found
+    err = payload["error"]
+    assert err["code"] == "job_running"
+    assert err["repair_tool"] == "claude_job_status"
+    assert err["repair_arguments"] == {"job_id": job_id}
+    jobs.cancel(str(tmp_path), job_id)

@@ -198,6 +198,12 @@ class ErrorInfo(BaseModel):
     repair: str
     offending_param: str | None = None
     retryable: bool = False
+    # Structured repair (house convention, additive; omitted when not mechanical):
+    # allowed_values lists the valid values for offending_param; repair_tool plus
+    # repair_arguments name a directly callable follow-up.
+    allowed_values: list[str] | None = None
+    repair_tool: str | None = None
+    repair_arguments: dict | None = None
 
 
 class ErrorResult(BaseModel):
