@@ -106,8 +106,10 @@ CAPABILITY_SUMMARY = (
     "claude_review_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
     "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
-    "toolless default; readonly reads files. Errors return ok:false in structuredContent "
-    "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint"
+    "toolless default; readonly lets Claude read files, bypassing diff redaction. "
+    "Failures return isError:true with an ok:false envelope (code/message/repair) in "
+    "structuredContent. "
+    "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
 _HEAD_FIELD_DESC = (
@@ -231,14 +233,19 @@ class ValidationEnvelopeMiddleware(Middleware):
 
     Without this, FastMCP converts a pydantic ValidationError into isError:true
     with prose-only content — no code, no repair, no structuredContent — an
-    undisclosed third error carrier. Tool bodies validate their own arguments
-    before constructing models, so a ValidationError reaching this middleware is
-    an argument-shape failure, not an internal bug."""
+    undisclosed third error carrier. FastMCP's own argument-coercion errors carry
+    a pydantic ValidationError whose `.title` is `call[<tool_name>]`; a
+    ValidationError raised by a tool body's internal model construction instead
+    has the model class name as its `.title`. That `call[...]` prefix is what
+    distinguishes an argument-shape failure from an internal bug — only the
+    former is converted into this envelope."""
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         try:
             return await call_next(context)
         except ValidationError as exc:
+            if not exc.title.startswith("call["):
+                raise  # internal model bug, not an argument-shape failure
             first = exc.errors()[0]
             loc = first.get("loc") or ("arguments",)
             field = ".".join(str(part) for part in loc)

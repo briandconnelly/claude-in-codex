@@ -187,7 +187,9 @@ async def test_capability_summary_declares_tier_and_blocking():
     summary = CAPABILITY_SUMMARY.lower()
     assert "experimental" in summary
     assert "cancel" in summary
-    assert len(CAPABILITY_SUMMARY) < 900
+    # Ceiling exists to keep first-read instructions compact; raised to 1100 to
+    # accommodate the error-carrier disclosure (isError/ok:false envelope).
+    assert len(CAPABILITY_SUMMARY) < 1100
 
 
 async def test_tool_descriptions_are_concise_and_disambiguating():
@@ -2416,3 +2418,18 @@ async def test_missing_required_argument_returns_envelope():
 def test_capability_summary_names_error_carrier():
     assert "structuredContent" in CAPABILITY_SUMMARY
     assert "ok:false" in CAPABILITY_SUMMARY
+
+
+async def test_validation_middleware_reraises_internal_model_errors():
+    from pydantic import BaseModel, ValidationError
+
+    from claude_in_codex.server import ValidationEnvelopeMiddleware
+
+    class Inner(BaseModel):
+        x: int
+
+    async def call_next(context):
+        Inner(x="nope")  # internal model bug, not argument coercion
+
+    with pytest.raises(ValidationError):
+        await ValidationEnvelopeMiddleware().on_call_tool(None, call_next)
