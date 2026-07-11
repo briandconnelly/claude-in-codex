@@ -99,7 +99,7 @@ CAPABILITY_SUMMARY = (
     "adversarial plan review, and second opinions. It never edits code, grants "
     "Bash/write tools, or proxies Claude's own MCP tools; hooks may run unless "
     "config_mode=safe/bare. Paid tools send context to Anthropic; call "
-    "claude_status before spending. Use claude_models (or claude://models) to "
+    "claude_status before spending. Use claude_models (or claude-in-codex://models) to "
     "discover valid model slugs before overriding model. "
     "claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
@@ -2105,7 +2105,7 @@ def _capabilities_payload() -> dict:
                 "free",
                 "Discover valid `model` slugs (aliases + pinned full IDs) before "
                 "overriding model on a paid call.",
-                "advisory static model catalog; same payload as the claude://models "
+                "advisory static model catalog; same payload as the claude-in-codex://models "
                 "resource; not fingerprint-stable",
             ),
         ],
@@ -2171,7 +2171,7 @@ def claude_capabilities() -> ToolResult:
 
 
 def _model_catalog_payload() -> dict:
-    """Single source for the claude_models tool and claude://models resource so their
+    """Single source for the claude_models tool and claude-in-codex://models resource so their
     payloads cannot drift."""
     return read_model_catalog().model_dump(mode="json", exclude_none=True)
 
@@ -2188,14 +2188,21 @@ def claude_models() -> ToolResult:
     'opus'/'sonnet'), which track the latest model, over pinned full IDs. The
     `claude` CLI is the run-time authority: an unlisted slug may work and a
     listed one may be unavailable to your account. Same payload as the
-    claude://models resource. Not fingerprint-stable.
+    claude-in-codex://models resource. Not fingerprint-stable.
     """
     return _result(_model_catalog_payload())
 
 
-@mcp.resource("claude://models", mime_type="application/json")
+@mcp.resource("claude-in-codex://models", mime_type="application/json")
 def claude_models_resource() -> dict:
     """Advisory Claude model catalog (same payload as the claude_models tool)."""
+    return _model_catalog_payload()
+
+
+@mcp.resource("claude://models", mime_type="application/json")
+def claude_models_resource_deprecated() -> dict:
+    """DEPRECATED alias of claude-in-codex://models (same payload); it remains
+    available for a compatibility window per the deprecation policy."""
     return _model_catalog_payload()
 
 

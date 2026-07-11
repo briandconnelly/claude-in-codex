@@ -401,7 +401,7 @@ class ModelCatalogResult(BaseModel):
 
     Discovery only: `source` says where it came from and `advisory` states it is not
     authoritative (the `claude` CLI validates the real slug at run time). Returned by
-    the claude_models tool and the claude://models resource; deliberately NOT embedded
+    the claude_models tool and the claude-in-codex://models resource; deliberately NOT embedded
     in claude_capabilities, whose payload is fingerprint-cacheable and must stay stable.
     Claude has no on-disk model cache, so `source` is always "static" (or "none" if the
     bundled list is somehow empty) — there is no live-cache path.
