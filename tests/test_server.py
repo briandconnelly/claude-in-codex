@@ -187,7 +187,9 @@ async def test_capability_summary_declares_tier_and_blocking():
     summary = CAPABILITY_SUMMARY.lower()
     assert "experimental" in summary
     assert "cancel" in summary
-    assert len(CAPABILITY_SUMMARY) < 900
+    # Ceiling exists to keep first-read instructions compact; raised to 1100 to
+    # accommodate the error-carrier disclosure (isError/ok:false envelope).
+    assert len(CAPABILITY_SUMMARY) < 1100
 
 
 async def test_tool_descriptions_are_concise_and_disambiguating():
@@ -479,7 +481,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-25"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-26"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -835,12 +837,14 @@ async def test_adversarial_bad_base_ref_is_structured_error(fake_claude, monkeyp
 
 
 async def test_paid_tools_declare_cost_safety_hints():
-    # F4: paid, non-idempotent calls expose machine-readable hints, not just prose.
+    # Paid tools spend money and send context to Anthropic, so they are not
+    # read-only; they are non-destructive (no writes/shell) and non-idempotent
+    # (each call spends).
     tools = await _tools_by_name()
     for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann is not None, name
-        assert ann.readOnlyHint is True, name
+        assert ann.readOnlyHint is False, name
         assert ann.destructiveHint is False, name
         assert ann.idempotentHint is False, name
 
@@ -849,14 +853,18 @@ async def test_job_tools_declare_state_hints():
     tools = await _tools_by_name()
     assert tools["claude_review_changes_async"].annotations.readOnlyHint is False
     assert tools["claude_review_changes_async"].annotations.idempotentHint is False
+    # Job polling performs lazy maintenance while reading (deadline kills,
+    # TTL deletion), so it is not read-only, though it never alters a
+    # terminal job's stored result.
     assert tools["claude_job_status"].annotations.readOnlyHint is False
-    assert tools["claude_job_status"].annotations.idempotentHint is False
     assert tools["claude_job_result"].annotations.readOnlyHint is False
-    assert tools["claude_job_result"].annotations.idempotentHint is False
+    # Consume irreversibly deletes the stored record.
     assert tools["claude_job_consume_result"].annotations.readOnlyHint is False
+    assert tools["claude_job_consume_result"].annotations.destructiveHint is True
     assert tools["claude_job_consume_result"].annotations.idempotentHint is False
+    # Cancel is idempotent: already-terminal jobs are returned unchanged.
     assert tools["claude_job_cancel"].annotations.readOnlyHint is False
-    assert tools["claude_job_cancel"].annotations.idempotentHint is False
+    assert tools["claude_job_cancel"].annotations.idempotentHint is True
 
 
 async def test_review_uses_workspace_root_over_cwd(fake_claude, monkeypatch, git_repo, tmp_path):
@@ -1123,7 +1131,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-25"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-26"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -2388,3 +2396,279 @@ async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_p
     assert res["ok"] is True
     assert res["meta"]["head"] == head
     assert res["meta"]["diff_range"] == f"{base}...{head}"
+
+
+async def test_invalid_enum_argument_returns_envelope():
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_review_dry_run", {"scope": "bogus"}, raise_on_error=False
+        )
+    assert res.is_error is True
+    payload = structured(res)
+    assert payload["ok"] is False
+    err = payload["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["offending_param"] == "scope"
+    assert "working_tree" in err["repair"]
+
+
+async def test_missing_required_argument_returns_envelope():
+    async with Client(mcp) as client:
+        res = await client.call_tool("claude_review_dry_run", {}, raise_on_error=False)
+    assert res.is_error is True
+    err = structured(res)["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["offending_param"] == "scope"
+
+
+async def test_invalid_enum_argument_carries_allowed_values():
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_review_dry_run", {"scope": "bogus"}, raise_on_error=False
+        )
+    err = structured(res)["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["allowed_values"] == ["working_tree", "staged", "branch"]
+
+
+def test_capability_summary_names_error_carrier():
+    assert "structuredContent" in CAPABILITY_SUMMARY
+    assert "ok:false" in CAPABILITY_SUMMARY
+
+
+async def test_validation_middleware_reraises_internal_model_errors():
+    from pydantic import BaseModel, ValidationError
+
+    from claude_in_codex.server import ValidationEnvelopeMiddleware
+
+    class Inner(BaseModel):
+        x: int
+
+    async def call_next(context):
+        Inner(x="nope")  # internal model bug, not argument coercion
+
+    with pytest.raises(ValidationError):
+        await ValidationEnvelopeMiddleware().on_call_tool(None, call_next)
+
+
+def test_invalid_scope_error_carries_allowed_values():
+    from claude_in_codex.server import _invalid_scope_error, _meta
+
+    payload = _invalid_scope_error(_meta("", "inherit", "toolless", 0, 0, None), "bogus")
+    err = payload["error"]
+    assert err["allowed_values"] == ["working_tree", "staged", "branch"]
+
+
+async def test_job_not_found_carries_repair_tool(tmp_path):
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_job_status",
+            {"job_id": "nope", "workspace_root": str(tmp_path)},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    assert err["code"] == "job_not_found"
+    assert err["repair_tool"] == "claude_job_list"
+
+
+async def test_async_same_idempotency_key_returns_existing_job(git_repo, monkeypatch):
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    args = {
+        "scope": "working_tree",
+        "workspace_root": str(git_repo),
+        "idempotency_key": "key-1",
+    }
+    async with Client(mcp) as client:
+        first = structured(await client.call_tool("claude_review_changes_async", args))
+        second = structured(await client.call_tool("claude_review_changes_async", args))
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": first["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert first["ok"] is True
+    assert second["job_id"] == first["job_id"]
+    assert second["status"] == "running"
+
+
+async def test_async_same_key_different_args_returns_existing_job(git_repo, monkeypatch):
+    """The key alone determines the dedupe match, even if the retry's args differ."""
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    async with Client(mcp) as client:
+        first = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "key-2",
+                },
+            )
+        )
+        second = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "staged", "workspace_root": str(git_repo), "idempotency_key": "key-2"},
+            )
+        )
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": first["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert second["job_id"] == first["job_id"]
+
+
+async def test_async_reservation_contention_returns_existing_job(git_repo, monkeypatch):
+    """Force both launches past the cheap entry fast-path (by making it always
+    report no match) so the second launch's dedupe is resolved entirely by the
+    atomic pre-spawn reservation, not the advisory find_by_idempotency_key scan."""
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(srv.jobs, "find_by_idempotency_key", lambda *a, **k: None)
+    args = {
+        "scope": "working_tree",
+        "workspace_root": str(git_repo),
+        "idempotency_key": "contention-key",
+    }
+    async with Client(mcp) as client:
+        first = structured(await client.call_tool("claude_review_changes_async", args))
+        second = structured(await client.call_tool("claude_review_changes_async", args))
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": first["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert first["ok"] is True
+    assert second["job_id"] == first["job_id"]
+
+
+async def test_async_reservation_holder_with_no_record_is_internal_error(git_repo, monkeypatch):
+    """A reservation marker whose job record never landed (e.g. crashed between
+    reserve and spawn, before it could be reaped) surfaces a retryable error
+    instead of silently starting a duplicate paid job."""
+    import claude_in_codex.server as srv
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ghost = "g" * 32
+    assert jobs.reserve_idempotency_key(str(git_repo), "ghost-key", ghost) is None
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "ghost-key",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "internal_error"
+    assert result["error"]["offending_param"] == "idempotency_key"
+    assert result["error"]["retryable"] is True
+    jobs.release_idempotency_key(str(git_repo), "ghost-key", ghost)
+
+
+async def test_async_spawn_failure_releases_reservation(monkeypatch, git_repo, tmp_path):
+    """On a spawn failure, the reservation is released so a retry with the same
+    key is not stuck forever behind a job that never started."""
+    import claude_in_codex.server as srv
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        srv, "build_command", lambda *a, **k: (["definitely-no-such-claude-binary-xyz"], [])
+    )
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "release-key",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "claude_not_found"
+    # Reservation was released: a fresh reserve for the same key succeeds outright.
+    assert jobs.reserve_idempotency_key(str(git_repo), "release-key", "b" * 32) is None
+    jobs.release_idempotency_key(str(git_repo), "release-key", "b" * 32)
+
+
+async def test_async_oserror_spawn_failure_releases_reservation(monkeypatch, git_repo, tmp_path):
+    import claude_in_codex.server as srv
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["claude"], []))
+
+    def fake_start_job(*a, **k):
+        raise OSError("boom")
+
+    monkeypatch.setattr(srv.jobs, "start_job", fake_start_job)
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "release-key-2",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "internal_error"
+    assert jobs.reserve_idempotency_key(str(git_repo), "release-key-2", "b" * 32) is None
+    jobs.release_idempotency_key(str(git_repo), "release-key-2", "b" * 32)
+
+
+async def test_annotation_contract():
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    # Paid tools spend money and send context to Anthropic: not read-only,
+    # non-destructive, non-idempotent (each call spends), open-world.
+    for name in ("claude_ask", "claude_review_changes", "claude_adversarial_review"):
+        ann = tools[name].annotations
+        assert ann.readOnlyHint is False, name
+        assert ann.destructiveHint is False, name
+        assert ann.idempotentHint is False, name
+        assert ann.openWorldHint is True, name
+    # Job polling performs lazy maintenance while reading (deadline kills, TTL
+    # deletion): not read-only, but never alters a terminal job's stored result.
+    for name in ("claude_job_status", "claude_job_result", "claude_job_list"):
+        assert tools[name].annotations.readOnlyHint is False, name
+    # Consume irreversibly deletes the stored result record.
+    consume = tools["claude_job_consume_result"].annotations
+    assert consume.readOnlyHint is False
+    assert consume.destructiveHint is True
+    # Cancel is idempotent: already-terminal jobs are returned unchanged.
+    cancel = tools["claude_job_cancel"].annotations
+    assert cancel.readOnlyHint is False
+    assert cancel.idempotentHint is True
+    # Pure reads: no spend, no job-lifecycle side effects.
+    for name in ("claude_status", "claude_capabilities", "claude_models", "claude_review_dry_run"):
+        ann = tools[name].annotations
+        assert ann.readOnlyHint is True, name
+        assert ann.destructiveHint is None, name
+        assert ann.idempotentHint is None, name
+    assert tools["claude_status"].annotations.openWorldHint is False
+
+
+def test_capabilities_documents_annotations_policy():
+    policy = _capabilities_payload()["annotations_policy"]
+    assert "readOnlyHint" in policy
+    assert "lazy maintenance" in policy

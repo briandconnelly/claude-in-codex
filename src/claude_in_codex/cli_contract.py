@@ -126,7 +126,7 @@ def is_contract_drift(*texts: str | None) -> bool:
 
 
 # --- Advisory model catalog -----------------------------------------------------
-# Discovery only: surfaced by the claude_models tool and claude://models resource so
+# Discovery only: surfaced by the claude_models tool and claude-in-codex://models resource so
 # an agent can pick a `model` override. The `claude` CLI is the real authority and
 # validates the slug at run time, so an unlisted slug may still work and a listed one
 # may be unavailable. These contents are NOT fingerprint-stable (the tool/schema are).

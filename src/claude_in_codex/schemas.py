@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import json
+from typing import Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 # Bump this whenever the agent-visible surface changes: tool names, input or
-# output schemas, the ErrorCode set, the config_mode/access/scope/detail value
-# sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-25"
+# output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
+# value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
+FINGERPRINT = "claude-in-codex/0.1/schema-26"
+
+# Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
+# bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
+FINGERPRINT_COVERS = [
+    "tool records (names, descriptions, titles, annotations, input/output schemas)",
+    "resource and resource-template records and prompt scaffolds",
+    "error-code catalog",
+    "config_mode/access/scope/detail/effort value sets",
+    "capability summary and capabilities payload",
+]
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
@@ -73,6 +84,9 @@ ErrorCode = Literal[
     # A tracked env var (CLAUDE_IN_CODEX_* or ANTHROPIC_API_KEY) arrived as a
     # literal `${...}` placeholder — the MCP host did not expand env substitutions.
     "unexpanded_env_placeholder",
+    # An argument failed inputSchema validation before the tool body ran (caught
+    # by ValidationEnvelopeMiddleware, so it still returns the ok:false envelope).
+    "invalid_arguments",
     "invalid_scope",
     "invalid_base",
     "invalid_head",
@@ -195,6 +209,12 @@ class ErrorInfo(BaseModel):
     repair: str
     offending_param: str | None = None
     retryable: bool = False
+    # Structured repair (house convention, additive; omitted when not mechanical):
+    # allowed_values lists the valid values for offending_param; repair_tool plus
+    # repair_arguments name a directly callable follow-up.
+    allowed_values: list[str] | None = None
+    repair_tool: str | None = None
+    repair_arguments: dict | None = None
 
 
 class ErrorResult(BaseModel):
@@ -276,6 +296,7 @@ class CapabilitiesResult(BaseModel):
     name: str
     version: str
     fingerprint: str = FINGERPRINT
+    fingerprint_covers: list[str] = Field(default_factory=list)
     transport: str
     stability: str
     paid_tools: list[str]
@@ -290,6 +311,7 @@ class CapabilitiesResult(BaseModel):
     data_egress: str
     prerequisites: list[str]
     deprecation_policy: str
+    annotations_policy: str
 
 
 class JobStarted(BaseModel):
@@ -392,7 +414,7 @@ class ModelCatalogResult(BaseModel):
 
     Discovery only: `source` says where it came from and `advisory` states it is not
     authoritative (the `claude` CLI validates the real slug at run time). Returned by
-    the claude_models tool and the claude://models resource; deliberately NOT embedded
+    the claude_models tool and the claude-in-codex://models resource; deliberately NOT embedded
     in claude_capabilities, whose payload is fingerprint-cacheable and must stay stable.
     Claude has no on-disk model cache, so `source` is always "static" (or "none" if the
     bundled list is somehow empty) — there is no live-cache path.
@@ -406,6 +428,47 @@ class ModelCatalogResult(BaseModel):
     # Set only when source == "none" (the bundled list is empty).
     unavailable_reason: str | None = None
     fingerprint: str = FINGERPRINT
+
+
+# Advertised-schema slimming (F1): FastMCP inlines $defs into every tools/list
+# entry, so the 25-property Meta model repeats 2-3x per tool and pydantic `title`
+# decoration rides along on every field. The slimmed schema is what agents SEE;
+# the wire payload still carries the full Meta, whose field contract
+# claude_capabilities documents. Measured effect: tools/list 113,495 -> 62,642 bytes.
+_META_STUB = {
+    "type": "object",
+    "description": (
+        "Execution metadata: cwd, workspace_source/warning, config_mode, access, "
+        "scope, base/head/diff_range, paths, timeout_seconds, elapsed_ms, "
+        "requested_max_budget_usd, truncated/truncation_hint, command_exit_code, "
+        "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
+        "usage, job_id, request_id, fingerprint. Full contract: claude_capabilities."
+    ),
+}
+
+
+def _strip_titles(node: object) -> object:
+    """Drop pydantic-generated schema `title` decoration.
+
+    Only string-valued `title` keys are decoration; a dict-valued `title` key is a
+    real property definition (Finding.title) and MUST survive."""
+    if isinstance(node, dict):
+        return {
+            k: _strip_titles(v)
+            for k, v in node.items()
+            if not (k == "title" and isinstance(v, str))
+        }
+    if isinstance(node, list):
+        return [_strip_titles(v) for v in node]
+    return node
+
+
+def _slim(schema: dict) -> dict:
+    """Shrink an advertised output schema without changing the wire payload."""
+    out = json.loads(json.dumps(schema))  # deep copy; schema is JSON-safe
+    if "Meta" in out.get("$defs", {}):
+        out["$defs"]["Meta"] = dict(_META_STUB)
+    return cast("dict", _strip_titles(out))
 
 
 def _object_union_schema(adapter: TypeAdapter) -> dict:
@@ -427,15 +490,19 @@ def _object_union_schema(adapter: TypeAdapter) -> dict:
     }
 
 
-# Advertised output schemas (convention: a discriminated ok:true|false union).
-RESULT_SCHEMA = _object_union_schema(TypeAdapter(SuccessResult | ErrorResult))
-STATUS_SCHEMA = StatusResult.model_json_schema()
-CAPABILITIES_SCHEMA = CapabilitiesResult.model_json_schema()
+# Advertised output schemas (convention: a discriminated ok:true|false union),
+# slimmed for discovery cost — see _slim above.
+RESULT_SCHEMA = _slim(_object_union_schema(TypeAdapter(SuccessResult | ErrorResult)))
+STATUS_SCHEMA = _slim(StatusResult.model_json_schema())
+CAPABILITIES_SCHEMA = _slim(CapabilitiesResult.model_json_schema())
 # A failed *_async launch returns the error envelope; an empty diff returns a
-# SuccessResult without starting a job.
-JOB_STARTED_SCHEMA = _object_union_schema(TypeAdapter(JobStarted | SuccessResult | ErrorResult))
-JOB_STATUS_SCHEMA = _object_union_schema(TypeAdapter(JobStatus | ErrorResult))
+# SuccessResult without starting a job; an idempotency_key match returns the
+# existing job's JobStatus instead of a new JobStarted.
+JOB_STARTED_SCHEMA = _slim(
+    _object_union_schema(TypeAdapter(JobStarted | JobStatus | SuccessResult | ErrorResult))
+)
+JOB_STATUS_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStatus | ErrorResult)))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.
-DRY_RUN_SCHEMA = _object_union_schema(TypeAdapter(DryRunResult | ErrorResult))
-JOB_LIST_SCHEMA = _object_union_schema(TypeAdapter(JobListResult | ErrorResult))
-MODEL_CATALOG_SCHEMA = ModelCatalogResult.model_json_schema()
+DRY_RUN_SCHEMA = _slim(_object_union_schema(TypeAdapter(DryRunResult | ErrorResult)))
+JOB_LIST_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobListResult | ErrorResult)))
+MODEL_CATALOG_SCHEMA = _slim(ModelCatalogResult.model_json_schema())

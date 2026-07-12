@@ -9,6 +9,31 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Added
 
+- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-26`):
+  - Argument-validation failures now return the standard `ok:false` envelope
+    (new error code `invalid_arguments`) instead of prose-only text; the
+    capability summary names the error carrier.
+  - Structured repair fields on the error envelope: `allowed_values`,
+    `repair_tool`, `repair_arguments` (additive; omitted when not mechanical).
+  - `idempotency_key` on `claude_review_changes_async`: a duplicate launch
+    within the job TTL returns the existing job instead of spending again
+    (atomic per-workspace on-disk reservation; same-key launches cannot
+    double-spawn on a shared local filesystem).
+  - Canonical `claude-in-codex://models` resource URI; `claude://models`
+    remains as a deprecated alias for a compatibility window.
+  - `fingerprint_covers` and `annotations_policy` fields on
+    `claude_capabilities`; the pinned contract digest now covers full tool and
+    resource records (descriptions, titles, annotations), resource templates,
+    and prompts, and `fingerprint_covers` states that coverage.
+  - Honest tool annotations: paid tools and job status/result/list polls are
+    advertised `readOnlyHint:false` (spend/egress and lazy job maintenance are
+    observable effects); `claude_job_consume_result` is `destructiveHint:true`;
+    `claude_job_cancel` is `idempotentHint:true`; a new `annotations_policy`
+    field on `claude_capabilities` states the policy.
+  - Advertised output schemas slimmed (Meta stubbed, pydantic titles stripped):
+    `tools/list` wire size roughly halved (113,495 → 62,642 bytes); a new
+    `tests/test_discovery_cost.py` ratchets the budget.
+
 - `claude_models` tool and `claude://models` resource: an advisory, free,
   read-only catalog of the model slugs accepted by the `model` parameter
   (aliases such as `opus`/`sonnet` plus pinned full IDs, each tagged `kind`).

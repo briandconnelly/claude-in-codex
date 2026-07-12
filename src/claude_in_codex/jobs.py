@@ -97,6 +97,87 @@ def _job_dir(cwd: str, job_id: str) -> Path:
     return _ws_dir(cwd) / job_id
 
 
+def _reservation_path(cwd: str, key: str) -> Path:
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return _ws_dir(cwd) / f"idem-{digest}.json"
+
+
+def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
+    """Atomically reserve (workspace, key) for job_id.
+
+    Returns None if we won the reservation, else the job_id that holds it.
+    The marker is published via write-to-temp-then-os.link: the payload is
+    fully written to a private temp file first, then published with
+    os.link(tmp, path), which atomically fails with FileExistsError if the
+    marker already exists — on a local filesystem this is atomic across
+    processes, and unlike a bare O_CREAT|O_EXCL open it never exposes a
+    partially-written marker to a racing reader (link() only publishes a fully
+    written inode). A stale marker (its job record is gone AND the marker is
+    older than the job TTL) is replaced. Written before the job spawns; the
+    caller removes it via release_idempotency_key on spawn failure.
+
+    Replacing a judged-stale marker (unlink then link) has a narrow TOCTOU
+    window between two concurrent replacers; a stale marker only exists after
+    a crash or TTL expiry, so this is accepted rather than closed with
+    quarantine-rename."""
+    path = _reservation_path(cwd, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"job_id": job_id, "created_epoch": time.time()})
+    tag = f"{os.getpid()}.{threading.get_ident()}.{uuid4().hex}"
+    tmp_path = path.with_name(f".{path.name}.{tag}.tmp")
+    while True:
+        tmp_path.write_text(payload)
+        try:
+            try:
+                os.link(tmp_path, path)
+            except FileExistsError:
+                pass  # fall through to the staleness check below
+            except OSError:
+                # Filesystem without hardlink support (e.g. some SMB/FUSE
+                # mounts): degrade to a best-effort replace instead of failing
+                # the keyed launch outright. Not atomic-exclusive, but matches
+                # the previous best-effort (pre-hardlink) behavior.
+                tmp_path.replace(path)
+                return None
+            else:
+                return None
+        finally:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+        try:
+            holder = json.loads(path.read_text())
+        except FileNotFoundError:
+            # The marker vanished between our link-failure and this read —
+            # another caller released or replaced it in that gap. Retry
+            # without unlinking; blindly unlinking here could delete a marker
+            # published concurrently by that other caller.
+            continue
+        except (OSError, json.JSONDecodeError):
+            holder = None
+        if isinstance(holder, dict) and holder.get("job_id"):
+            held_id = str(holder["job_id"])
+            record_alive = _read_meta(_job_dir(cwd, held_id)) is not None
+            created = holder.get("created_epoch") or 0
+            if record_alive or (time.time() - created) <= ttl_seconds():
+                return held_id
+        # Stale or unreadable marker: remove and retry the exclusive create.
+        with contextlib.suppress(OSError):
+            path.unlink()
+        continue
+
+
+def release_idempotency_key(cwd: str, key: str, job_id: str) -> None:
+    """Drop our reservation (spawn failed). Only removes our own marker."""
+    path = _reservation_path(cwd, key)
+    try:
+        holder = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(holder, dict) and holder.get("job_id") == job_id:
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
 def _pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
@@ -192,6 +273,7 @@ class JobConfig:
     paths: list[str] | None = None
     redacted_paths: list[str] | None = None
     security_warnings: list[str] | None = None
+    idempotency_key: str | None = None
 
 
 def _write_stdin(proc: subprocess.Popen, stdin_text: str) -> None:
@@ -206,12 +288,20 @@ def _write_stdin(proc: subprocess.Popen, stdin_text: str) -> None:
 
 
 def start_job(
-    cmd: list[str], cwd: str, cfg: JobConfig, stdin_text: str | None = None
+    cmd: list[str],
+    cwd: str,
+    cfg: JobConfig,
+    stdin_text: str | None = None,
+    *,
+    job_id: str | None = None,
 ) -> tuple[str, str]:
     """Spawn the claude command detached and persist its record.
 
+    job_id lets a caller pre-reserve the id (e.g. via reserve_idempotency_key)
+    before spawning; when omitted, one is generated here as before.
+
     Returns (job_id, started_at_iso)."""
-    job_id = uuid4().hex
+    job_id = job_id or uuid4().hex
     jd = _job_dir(cwd, job_id)
     jd.mkdir(parents=True, exist_ok=True)
     # Best-effort: results contain the diff; keep the workspace tree user-only.
@@ -241,6 +331,7 @@ def start_job(
     meta = {
         "job_id": job_id,
         "kind": cfg.kind,
+        "idempotency_key": cfg.idempotency_key,
         "pid": proc.pid,
         "started_epoch": started,
         "started_at": datetime.now(UTC).isoformat(),
@@ -267,6 +358,31 @@ def start_job(
     _write_meta(jd, meta)
     _enforce_count_cap(cwd)
     return job_id, meta["started_at"]
+
+
+def find_by_idempotency_key(cwd: str, key: str) -> str | None:
+    """Newest non-expired job started with this idempotency key, or None.
+
+    Dedup window and scope: per workspace, for the lifetime of the job record
+    (its TTL) — the same window in which claude_job_list can see the job."""
+    with _JOBS_LOCK:
+        ws = _ws_dir(cwd)
+        if not ws.is_dir():
+            return None
+        matches: list[tuple[float, str]] = []
+        for jd in ws.iterdir():
+            if not jd.is_dir():
+                continue
+            meta = _read_meta(jd)
+            if meta is None or meta.get("idempotency_key") != key:
+                continue
+            state = _status_of(jd, meta)
+            if state in _TERMINAL and _expired(meta):
+                continue
+            matches.append((meta.get("started_epoch", 0.0), meta.get("job_id", jd.name)))
+        if not matches:
+            return None
+        return max(matches)[1]
 
 
 def _status_of(jd: Path, meta: dict) -> str:
@@ -320,6 +436,8 @@ def _reap_workspace(cwd: str) -> None:
     now = time.time()
     for jd in ws.iterdir():
         if not jd.is_dir():
+            if jd.name.startswith("idem-") and jd.name.endswith(".json"):
+                _reap_stale_marker(cwd, jd, now, ttl)
             continue
         meta = _read_meta(jd)
         if meta is None:
@@ -329,6 +447,26 @@ def _reap_workspace(cwd: str) -> None:
             end = meta.get("completed_epoch") or meta.get("started_epoch") or now
             if now - end > ttl:
                 _rmtree(jd)
+
+
+def _reap_stale_marker(cwd: str, marker: Path, now: float, ttl: int) -> None:
+    """Delete an idempotency marker whose reserved job record no longer exists
+    AND whose creation predates the TTL — same staleness rule used by
+    reserve_idempotency_key."""
+    try:
+        holder = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(holder, dict):
+        return
+    held_id = holder.get("job_id")
+    created = holder.get("created_epoch") or 0
+    if now - created <= ttl:
+        return
+    if held_id and _read_meta(_job_dir(cwd, str(held_id))) is not None:
+        return
+    with contextlib.suppress(OSError):
+        marker.unlink()
 
 
 def _expired(meta: dict) -> bool:
@@ -579,9 +717,19 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
     env = _read_envelope(jd)
     if env:
         apply_cost_usage(bmeta, env)
+    repair_tool = None
+    repair_arguments = None
+    if code == "job_running":
+        repair_tool = "claude_job_status"
+        repair_arguments = {"job_id": meta.get("job_id")}
     return ErrorResult(
         error=ErrorInfo(
-            code=cast("ErrorCode", code), message=message, repair=repair, retryable=retryable
+            code=cast("ErrorCode", code),
+            message=message,
+            repair=repair,
+            retryable=retryable,
+            repair_tool=repair_tool,
+            repair_arguments=repair_arguments,
         ),
         meta=bmeta,
     ).model_dump(mode="json", exclude_none=True)

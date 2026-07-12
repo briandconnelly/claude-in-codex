@@ -9,11 +9,13 @@ import subprocess
 from dataclasses import dataclass
 from typing import Annotated, Literal, cast
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from claude_in_codex import __version__, cli_contract, jobs, preflight
 from claude_in_codex.claude import (
@@ -63,6 +65,7 @@ from claude_in_codex.schemas import (
     CAPABILITIES_SCHEMA,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
+    FINGERPRINT_COVERS,
     JOB_LIST_SCHEMA,
     JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
@@ -98,7 +101,7 @@ CAPABILITY_SUMMARY = (
     "adversarial plan review, and second opinions. It never edits code, grants "
     "Bash/write tools, or proxies Claude's own MCP tools; hooks may run unless "
     "config_mode=safe/bare. Paid tools send context to Anthropic; call "
-    "claude_status before spending. Use claude_models (or claude://models) to "
+    "claude_status before spending. Use claude_models (or claude-in-codex://models) to "
     "discover valid model slugs before overriding model. "
     "claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
@@ -106,6 +109,8 @@ CAPABILITY_SUMMARY = (
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
     "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
     "toolless default; readonly lets Claude read files, bypassing diff redaction. "
+    "Tool semantic and argument-validation failures return isError:true with an "
+    "ok:false envelope (code/message/repair) in structuredContent. "
     "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
@@ -123,26 +128,50 @@ PRACTICAL_MIN_BUDGET_HINT = (
 
 mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
 
-# Paid tools read code but are NOT idempotent (each call spends money and re-invokes
-# Claude) and are explicitly non-destructive (no writes/shell). openWorld: they reach
-# an external service (Anthropic).
+# readOnlyHint tracks observable effects, disclosed via annotations_policy in
+# claude_capabilities. Paid tools spend money and send context to an external
+# service (Anthropic), so they are advertised non-read-only to keep client
+# confirmation in the loop; they are non-destructive (no writes/shell) and
+# non-idempotent (each call spends). Job-lifecycle polling tools perform lazy
+# maintenance while reading (deadline kill, TTL deletion), so they are also
+# non-read-only even though they never alter a terminal job's stored result.
 _PAID_ANNOTATIONS = {
-    "readOnlyHint": True,
+    "readOnlyHint": False,
     "openWorldHint": True,
     "destructiveHint": False,
     "idempotentHint": False,
 }
-# Free read-only tools are safely repeatable.
-_FREE_READ_ANNOTATIONS = {
-    "readOnlyHint": True,
+_FREE_READ_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
+# Job lifecycle calls perform lazy maintenance while reading: polling enforces the
+# job deadline (an overdue job is killed and marked timeout) and deletes
+# TTL-expired records — observable mutations, so they are not read-only. They
+# never alter a terminal job's stored result.
+_JOB_LIFECYCLE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "openWorldHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+}
+# Cancel mutates local job state; repeating it returns the terminal job unchanged.
+_JOB_CANCEL_ANNOTATIONS = {
+    "readOnlyHint": False,
     "openWorldHint": False,
     "destructiveHint": False,
     "idempotentHint": True,
 }
-# Local job lifecycle mutations change only this server's job state.
-_LOCAL_MUTATION_ANNOTATIONS = {
+# Consume irreversibly deletes the stored result record (a second call cannot re-fetch it).
+_JOB_CONSUME_ANNOTATIONS = {
     "readOnlyHint": False,
     "openWorldHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+}
+# Starting a background job commits to spend and creates persistent local job
+# state: the job runs to completion or its best-effort budget stop threshold
+# even if never polled, but the launch returns immediately without blocking.
+_ASYNC_START_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "openWorldHint": True,
     "destructiveHint": False,
     "idempotentHint": False,
 }
@@ -212,6 +241,10 @@ def _err(
     meta: Meta,
     offending: str | None = None,
     retryable: bool = False,
+    *,
+    allowed_values: list[str] | None = None,
+    repair_tool: str | None = None,
+    repair_arguments: dict | None = None,
 ) -> dict:
     return ErrorResult(
         error=ErrorInfo(
@@ -220,9 +253,80 @@ def _err(
             repair=repair,
             offending_param=offending,
             retryable=retryable,
+            allowed_values=allowed_values,
+            repair_tool=repair_tool,
+            repair_arguments=repair_arguments,
         ),
         meta=meta,
     ).model_dump(mode="json", exclude_none=True)
+
+
+class ValidationEnvelopeMiddleware(Middleware):
+    """Return the ok:false envelope for pre-handler argument-validation failures.
+
+    Without this, FastMCP converts a pydantic ValidationError into isError:true
+    with prose-only content — no code, no repair, no structuredContent — an
+    undisclosed third error carrier. FastMCP's own argument-coercion errors carry
+    a pydantic ValidationError whose `.title` is `call[<tool_name>]`; a
+    ValidationError raised by a tool body's internal model construction instead
+    has the model class name as its `.title`. That `call[...]` prefix is what
+    distinguishes an argument-shape failure from an internal bug — only the
+    former is converted into this envelope."""
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        try:
+            return await call_next(context)
+        except ValidationError as exc:
+            if not exc.title.startswith("call["):
+                raise  # internal model bug, not an argument-shape failure
+            first = exc.errors()[0]
+            loc = first.get("loc") or ("arguments",)
+            field = ".".join(str(part) for part in loc)
+            expected = (first.get("ctx") or {}).get("expected")
+            message = f"Invalid argument '{field}': {first.get('msg', 'invalid value')}."
+            if expected:
+                repair = f"Set {field} to one of: {expected}, then retry the same call."
+            else:
+                repair = (
+                    f"Fix the '{field}' argument to match the tool's inputSchema, "
+                    "then retry the same call."
+                )
+            allowed = await self._allowed_values(context, loc)
+            # Placeholder meta: arguments never validated, so no resolved
+            # cwd/config exists for this call — the error block is the contract.
+            meta = _meta("", "inherit", "toolless", 0, 0, None)
+            return _result(
+                _err(
+                    "invalid_arguments",
+                    message,
+                    repair,
+                    meta,
+                    offending=field,
+                    allowed_values=allowed,
+                )
+            )
+
+    @staticmethod
+    async def _allowed_values(context, loc) -> list[str] | None:
+        """Enum choices for the failing argument, from the tool's published
+        inputSchema — structural, not parsed from pydantic's prose."""
+        name = getattr(getattr(context, "message", None), "name", None)
+        if not name or not loc:
+            return None
+        try:
+            tool = await mcp.get_tool(str(name))
+        except Exception:
+            return None
+        prop = (getattr(tool, "parameters", None) or {}).get("properties", {}).get(str(loc[0]))
+        if not isinstance(prop, dict):
+            return None
+        enum = prop.get("enum")
+        if isinstance(enum, list) and all(isinstance(v, str) for v in enum):
+            return enum
+        return None
+
+
+mcp.add_middleware(ValidationEnvelopeMiddleware())
 
 
 def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
@@ -233,6 +337,17 @@ def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
         "omit paths or pass [] for an unfiltered diff.",
         meta,
         offending="paths",
+    )
+
+
+def _job_not_found_error(job_id: str, meta: Meta) -> dict:
+    return _err(
+        "job_not_found",
+        f"No job '{job_id}' in this workspace.",
+        "Check the job_id, or start a new job; records expire after the TTL.",
+        meta,
+        offending="job_id",
+        repair_tool="claude_job_list",
     )
 
 
@@ -278,6 +393,7 @@ def _invalid_scope_error(meta: Meta, scope: str | None, *, scope_optional: bool 
         repair,
         meta,
         offending="scope",
+        allowed_values=["working_tree", "staged", "branch"],
     )
 
 
@@ -517,6 +633,7 @@ def _resolve(
             "Use one of: inherit, scoped, safe, bare.",
             safe_meta,
             offending="config_mode",
+            allowed_values=["inherit", "scoped", "safe", "bare"],
         )
     if ac not in ("toolless", "readonly"):
         safe_meta = _meta(
@@ -539,6 +656,7 @@ def _resolve(
             "Use one of: toolless, readonly.",
             safe_meta,
             offending="access",
+            allowed_values=["toolless", "readonly"],
         )
 
     if cm == "safe":
@@ -564,6 +682,7 @@ def _resolve(
                 "Update Claude Code, or use config_mode inherit/scoped/bare.",
                 safe_meta,
                 offending="config_mode",
+                allowed_values=["inherit", "scoped", "bare"],
             )
 
     meta = _meta(
@@ -623,6 +742,7 @@ def _resolve_config_mode_only(
             "Use one of: inherit, scoped, safe, bare.",
             meta,
             offending="config_mode",
+            allowed_values=["inherit", "scoped", "safe", "bare"],
         )
     if cm == "safe":
         fs = preflight.flag_support()
@@ -633,6 +753,7 @@ def _resolve_config_mode_only(
                 "Update Claude Code, or use config_mode inherit/scoped/bare.",
                 meta,
                 offending="config_mode",
+                allowed_values=["inherit", "scoped", "bare"],
             )
     return cm, None
 
@@ -729,13 +850,13 @@ async def claude_ask(
 ) -> ToolResult:
     """Ask Claude for a free-form second opinion.
 
-    Use when the task is a question or design choice, not a git diff review or
-    adversarial attack. Paid; read-only; blocks up to timeout_seconds;
-    cancellable, not resumable. Free-form input is size-capped before spend.
+    Use for a question or design choice, not a diff review or adversarial
+    attack. Paid (context goes to Anthropic); no workspace writes; blocks up
+    to timeout_seconds; cancellable, not resumable. Free-form input is
+    size-capped before spend.
 
-    Egress to Anthropic via `claude`: gathers no diff. Your prompt/context and any
-    access=readonly reads are sent verbatim; Claude's returned reply is best-effort
-    secret-redacted before relay.
+    Egress to Anthropic via `claude`: no diff gathered; prompt/context and any
+    access=readonly reads sent verbatim; reply is best-effort secret-redacted.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -817,11 +938,12 @@ async def claude_review_changes(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Review a git diff with Claude and wait for the result.
+    """Review a git diff with Claude (blocking).
 
-    Correctness, security, or test-coverage review of working_tree, staged, or
-    branch diff. Paid; read-only; blocks up to timeout_seconds; cancellable. For
-    long reviews use claude_review_changes_async. Empty diffs skip the call.
+    Correctness/security/tests review of working_tree, staged, or branch diff.
+    Paid (context goes to Anthropic); no workspace writes; blocks up to
+    timeout_seconds; cancellable. For long reviews use claude_review_changes_async.
+    Empty diffs skip the call.
 
     Egress to Anthropic via `claude`: best-effort redaction covers the gathered
     diff and returned output, not free-form inputs or direct access=readonly reads.
@@ -988,11 +1110,12 @@ async def claude_adversarial_review(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Have Claude attack a plan, claim, or decision.
+    """Have Claude attack a plan or decision.
 
     Surface counterarguments and failure modes; include evidence and optionally
-    attach a git diff with scope/base. Paid; read-only; blocks up to
-    timeout_seconds; cancellable. Empty attached diff returns without spending.
+    attach a diff (scope/base). Paid (context goes to Anthropic); no workspace
+    writes; blocks up to timeout_seconds; cancellable. Empty attached diff
+    returns without spending.
 
     Egress to Anthropic via `claude`: best-effort redaction covers the gathered
     diff and returned output, not free-form inputs or direct access=readonly reads.
@@ -1163,15 +1286,20 @@ async def claude_adversarial_review(
     return _result(out)
 
 
-# Starting a background job commits to spend (the job runs to completion or its
-# best-effort budget stop threshold even if never polled), but returns immediately
-# without blocking.
-_ASYNC_START_ANNOTATIONS = {
-    "readOnlyHint": False,
-    "openWorldHint": True,
-    "destructiveHint": False,
-    "idempotentHint": False,
-}
+async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | None:
+    """Launch dedupe: JobStatus of a live/unexpired job started with this key, or
+    None. This fast path runs once at entry as a cheap early return. The
+    pre-spawn leg (in claude_review_changes_async, just before jobs.start_job) is
+    now an atomic on-disk reservation via jobs.reserve_idempotency_key, which
+    publishes a fully-written marker via an atomic os.link, so same-key launches
+    cannot double-spawn on one local filesystem — this fast path is advisory
+    only. NFS-style filesystems without atomic hardlinks remain a caveat."""
+    if not idempotency_key:
+        return None
+    existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
+    if existing is None:
+        return None
+    return await run_sync(lambda: jobs.status(cwd, existing))
 
 
 @mcp.tool(
@@ -1213,13 +1341,26 @@ async def claude_review_changes_async(
         float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
+    idempotency_key: Annotated[
+        str | None,
+        Field(
+            description="Optional client-chosen key making launch retry-safe "
+            "(atomic per workspace via an on-disk reservation): if a "
+            "job with this key already exists in this workspace (within the job "
+            "TTL), its status is returned instead of starting a duplicate paid "
+            "job. After a dropped connection, retry with the same key or check "
+            "claude_job_list before re-launching. The key alone determines the "
+            "match; do not reuse a key with different arguments — the existing "
+            "job's status is returned unchanged."
+        ),
+    ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
     """Launch a git diff review in the background and return a job_id.
 
-    Use when a diff review may outlive the current turn. Paid; creates local job
-    state; not resumable if cancelled. Poll/read/delete/stop via the
-    claude_job_* tools. Empty diffs return without starting a job.
+    Paid; not resumable if cancelled. Poll/read/delete/stop via claude_job_*
+    tools. Empty diffs skip the job. With idempotency_key, a duplicate launch
+    returns the existing job instead of spending again.
 
     Egress to Anthropic via `claude`: best-effort redaction covers the gathered
     diff and returned output, not free-form inputs or direct access=readonly reads.
@@ -1244,6 +1385,9 @@ async def claude_review_changes_async(
     )
     if err:
         return _result(err)
+    match = await _idempotent_match(cwd, idempotency_key)
+    if match is not None:
+        return _result(match)
     # A background job is bounded by its wall-clock deadline, not the synchronous
     # timeout_seconds; report that everywhere so meta stays consistent with the job.
     job_timeout = jobs.max_seconds()
@@ -1340,10 +1484,49 @@ async def claude_review_changes_async(
         paths=effective_paths,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        idempotency_key=idempotency_key,
     )
+    reserved_job_id: str | None = None
+    if idempotency_key:
+        candidate = uuid4().hex
+        holder = await run_sync(
+            lambda: jobs.reserve_idempotency_key(cwd, idempotency_key, candidate)
+        )
+        if holder is not None:
+            data = await run_sync(lambda: jobs.status(cwd, holder))
+            if data is not None:
+                return _result(data)
+            # Holder vanished between reserve and status (crashed pre-spawn and
+            # reaped): fall through and launch fresh under a new reservation.
+            holder2 = await run_sync(
+                lambda: jobs.reserve_idempotency_key(cwd, idempotency_key, candidate)
+            )
+            if holder2 is not None:
+                data = await run_sync(lambda: jobs.status(cwd, holder2))
+                if data is not None:
+                    return _result(data)
+                return _result(
+                    _err(
+                        "internal_error",
+                        "idempotency_key reservation is held by a job that has no record.",
+                        "Retry, or omit idempotency_key to force a new launch.",
+                        meta,
+                        offending="idempotency_key",
+                        retryable=True,
+                    )
+                )
+            reserved_job_id = candidate
+        else:
+            reserved_job_id = candidate
     try:
-        job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
+        job_id, started_at = await run_sync(
+            lambda: jobs.start_job(cmd, cwd, cfg, prompt, job_id=reserved_job_id)
+        )
     except (FileNotFoundError, PermissionError):
+        if idempotency_key and reserved_job_id:
+            await run_sync(
+                lambda: jobs.release_idempotency_key(cwd, idempotency_key, reserved_job_id)
+            )
         return _result(
             _err(
                 "claude_not_found",
@@ -1353,6 +1536,10 @@ async def claude_review_changes_async(
             )
         )
     except OSError as e:
+        if idempotency_key and reserved_job_id:
+            await run_sync(
+                lambda: jobs.release_idempotency_key(cwd, idempotency_key, reserved_job_id)
+            )
         return _result(
             _err(
                 "internal_error",
@@ -1390,7 +1577,7 @@ async def claude_review_changes_async(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_LIFECYCLE_ANNOTATIONS,
     title="Background job status",
     output_schema=JOB_STATUS_SCHEMA,
 )
@@ -1402,7 +1589,10 @@ async def claude_job_status(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Check a background review job without fetching the full result.
+    """Check a background review job without fetching the full result. Polling
+    performs lazy maintenance: an overdue job is killed and marked timeout, and
+    TTL-expired records are deleted; a terminal job's stored result is never
+    altered.
 
     Use after claude_review_changes_async. Returns status, elapsed time,
     result_available, polling hints, and cost when available. If
@@ -1414,20 +1604,12 @@ async def claude_job_status(
     data = await run_sync(lambda: jobs.status(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(data)
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_LIFECYCLE_ANNOTATIONS,
     title="Background job result",
     output_schema=RESULT_SCHEMA,
 )
@@ -1440,10 +1622,13 @@ async def claude_job_result(
     ctx: Context | None = None,
 ) -> ToolResult:
     """Fetch a finished background review without deleting the job record.
+    Polling performs lazy maintenance: an overdue job is killed and marked
+    timeout, and TTL-expired records are deleted; a terminal job's stored
+    result is never altered.
 
     Use when claude_job_status reports result_available=true. Returns the same
-    structured review envelope as claude_review_changes, with meta.job_id set. To
-    fetch and delete the stored record, use claude_job_consume_result.
+    structured envelope as claude_review_changes, with meta.job_id set. Use
+    claude_job_consume_result to fetch and delete instead.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1451,20 +1636,12 @@ async def claude_job_result(
     payload, found = await run_sync(lambda: jobs.result(cwd, job_id, False))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(payload)
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_CONSUME_ANNOTATIONS,
     title="Consume background job result",
     output_schema=RESULT_SCHEMA,
 )
@@ -1480,7 +1657,8 @@ async def claude_job_consume_result(
 
     Use only when you no longer need to poll or re-read the job. Returns the same
     structured envelope as claude_job_result, then deletes completed job state.
-    Non-done jobs are not deleted.
+    Non-done jobs are not deleted. Deletion is irreversible; the result cannot be
+    re-fetched afterward.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1488,20 +1666,12 @@ async def claude_job_consume_result(
     payload, found = await run_sync(lambda: jobs.result(cwd, job_id, True))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(payload)
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_CANCEL_ANNOTATIONS,
     title="Cancel background job",
     output_schema=JOB_STATUS_SCHEMA,
 )
@@ -1525,15 +1695,7 @@ async def claude_job_cancel(
     data = await run_sync(lambda: jobs.cancel(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
-        return _result(
-            _err(
-                "job_not_found",
-                f"No job '{job_id}' in this workspace.",
-                "Check the job_id, or start a new job; records expire after the TTL.",
-                meta,
-                offending="job_id",
-            )
-        )
+        return _result(_job_not_found_error(job_id, meta))
     return _result(data)
 
 
@@ -1634,7 +1796,7 @@ async def claude_review_dry_run(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_LIFECYCLE_ANNOTATIONS,
     title="List background jobs",
     output_schema=JOB_LIST_SCHEMA,
 )
@@ -1649,7 +1811,9 @@ async def claude_job_list(
 
     Use to recover job_ids lost across context compaction or interruption. Returns
     each job's id, kind, status, start time, result_available, expiry, and cost when
-    terminal. Like the other lifecycle tools it refreshes statuses (not read-only).
+    terminal. Listing performs lazy maintenance: an overdue job is killed and marked
+    timeout, and TTL-expired records are deleted; a terminal job's stored result is
+    never altered.
     """
     cwd, ws_err, _ = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1686,6 +1850,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 message=f"Unknown config_mode '{d.config_mode}'.",
                 repair="Set CLAUDE_IN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
                 offending_param="config_mode",
+                allowed_values=["inherit", "scoped", "safe", "bare"],
             )
         )
     if d.access not in ("toolless", "readonly") and not access_is_placeholder:
@@ -1695,6 +1860,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 message=f"Unknown access '{d.access}'.",
                 repair="Set CLAUDE_IN_CODEX_ACCESS to one of: toolless, readonly.",
                 offending_param="access",
+                allowed_values=["toolless", "readonly"],
             )
         )
     if d.config_mode == "safe" and found and not safe_available(fs.help_parsed, fs.supported):
@@ -1707,6 +1873,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                     "inherit, scoped, or bare."
                 ),
                 offending_param="config_mode",
+                allowed_values=["inherit", "scoped", "bare"],
             )
         )
     if d.config_mode == "bare" and found and not bare_available():
@@ -2037,7 +2204,7 @@ def _capabilities_payload() -> dict:
                 "free",
                 "Discover valid `model` slugs (aliases + pinned full IDs) before "
                 "overriding model on a paid call.",
-                "advisory static model catalog; same payload as the claude://models "
+                "advisory static model catalog; same payload as the claude-in-codex://models "
                 "resource; not fingerprint-stable",
             ),
         ],
@@ -2083,6 +2250,21 @@ def _capabilities_payload() -> dict:
             "with replacement guidance; removals/renames and schema/error changes "
             "bump the fingerprint."
         ),
+        annotations_policy=(
+            "readOnlyHint tracks observable effects: paid tools (claude_ask, "
+            "claude_review_changes, claude_adversarial_review, "
+            "claude_review_changes_async) spend money and send context to "
+            "Anthropic, so they are not read-only; claude_job_status/"
+            "claude_job_result/claude_job_list perform lazy maintenance while "
+            "reading (deadline kills, TTL deletion) and are not read-only, though "
+            "they never alter a terminal job's stored result; "
+            "claude_job_consume_result irreversibly deletes the stored record "
+            "(destructiveHint true); claude_job_cancel mutates job state but is "
+            "idempotent — already-terminal jobs are returned unchanged "
+            "(idempotentHint true); claude_status, claude_capabilities, "
+            "claude_models, and claude_review_dry_run are pure reads."
+        ),
+        fingerprint_covers=list(FINGERPRINT_COVERS),
     )
     return result.model_dump(mode="json", exclude_none=True)
 
@@ -2103,7 +2285,7 @@ def claude_capabilities() -> ToolResult:
 
 
 def _model_catalog_payload() -> dict:
-    """Single source for the claude_models tool and claude://models resource so their
+    """Single source for the claude_models tool and claude-in-codex://models resource so their
     payloads cannot drift."""
     return read_model_catalog().model_dump(mode="json", exclude_none=True)
 
@@ -2120,14 +2302,21 @@ def claude_models() -> ToolResult:
     'opus'/'sonnet'), which track the latest model, over pinned full IDs. The
     `claude` CLI is the run-time authority: an unlisted slug may work and a
     listed one may be unavailable to your account. Same payload as the
-    claude://models resource. Not fingerprint-stable.
+    claude-in-codex://models resource. Not fingerprint-stable.
     """
     return _result(_model_catalog_payload())
 
 
-@mcp.resource("claude://models", mime_type="application/json")
+@mcp.resource("claude-in-codex://models", mime_type="application/json")
 def claude_models_resource() -> dict:
     """Advisory Claude model catalog (same payload as the claude_models tool)."""
+    return _model_catalog_payload()
+
+
+@mcp.resource("claude://models", mime_type="application/json")
+def claude_models_resource_deprecated() -> dict:
+    """DEPRECATED alias of claude-in-codex://models (same payload); it remains
+    available for a compatibility window per the deprecation policy."""
     return _model_catalog_payload()
 
 

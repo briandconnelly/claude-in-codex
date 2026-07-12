@@ -2,10 +2,12 @@
 
 `FINGERPRINT` (schemas.py) is bumped by hand, so nothing otherwise fails when the
 agent-visible contract changes but the fingerprint is left stale. This test pins a
-digest of that contract surface — tool names, every tool's input/output schema, the
-capabilities payload (minus the fingerprint/version fields themselves), the error-code
-catalog, and the capability summary. Adding/removing/renaming a tool, changing a
-schema, or editing the scope text moves the digest and fails this test; an
+digest of that contract surface — the full normalized tool records (names,
+descriptions, titles, annotations, input/output schemas), resource and
+resource-template records, prompt scaffolds, the capabilities payload (minus the
+fingerprint/version fields themselves), the error-code catalog, and the capability
+summary. Adding/removing/renaming a tool, changing a schema or description or
+annotation, or editing the scope text moves the digest and fails this test; an
 internal-only refactor does not.
 
 When this test fails on an intentional contract change:
@@ -22,20 +24,33 @@ from fastmcp import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "5f2f5cb491e2123e305ad86bbb5de8fa7f5fd81c5a13b144dd9832aa2ddf3b3d"
+EXPECTED_CONTRACT_DIGEST = "3ef1af28c9f94439f1a4fea95298c4070227befafa0990c32fa301a7fc961e73"
 
 
 async def _contract_surface() -> dict:
     async with Client(mcp) as client:
         tools = await client.list_tools()
-    tool_surface = {t.name: {"input": t.inputSchema, "output": t.outputSchema} for t in tools}
+        resources = await client.list_resources()
+        templates = await client.list_resource_templates()
+        prompts = await client.list_prompts()
     capabilities = _capabilities_payload()
     # Strip the bump-tracked fields so the digest reflects contract SHAPE only;
     # otherwise bumping FINGERPRINT/version would circularly change the digest.
     capabilities.pop("fingerprint", None)
     capabilities.pop("version", None)
     return {
-        "tools": tool_surface,
+        # Full normalized records: descriptions, titles, and annotations are part
+        # of the agent-visible contract, not just the schemas. `meta` (FastMCP's
+        # own {"fastmcp": {"tags": [...]}} block) is kept — verified identical
+        # ({"fastmcp": {"tags": []}}) across every tool/resource in this server
+        # and free of any fastmcp-version string, so it is stable contract shape,
+        # not framework noise.
+        "tools": {t.name: t.model_dump(mode="json", exclude_none=True) for t in tools},
+        "resources": {str(r.uri): r.model_dump(mode="json", exclude_none=True) for r in resources},
+        "resource_templates": {
+            str(t.uriTemplate): t.model_dump(mode="json", exclude_none=True) for t in templates
+        },
+        "prompts": {p.name: p.model_dump(mode="json", exclude_none=True) for p in prompts},
         "capabilities": capabilities,
         "error_codes": sorted(get_args(schemas.ErrorCode)),
         "capability_summary": CAPABILITY_SUMMARY,
@@ -63,3 +78,26 @@ async def test_capabilities_payload_reports_current_fingerprint():
 
 async def test_contract_digest_is_deterministic():
     assert _digest(await _contract_surface()) == _digest(await _contract_surface())
+
+
+async def test_capabilities_payload_discloses_fingerprint_coverage():
+    covers = _capabilities_payload()["fingerprint_covers"]
+    assert covers, "fingerprint_covers must be a non-empty list"
+    assert any("resource" in item for item in covers)
+
+
+async def test_contract_surface_includes_resources():
+    surface = await _contract_surface()
+    assert "claude-in-codex://models" in surface["resources"]
+    assert "claude-in-codex://capabilities" in surface["resources"]
+
+
+async def test_contract_surface_pins_annotations_and_descriptions():
+    surface = await _contract_surface()
+    ask = surface["tools"]["claude_ask"]
+    assert ask["annotations"]["readOnlyHint"] is False
+    assert "description" in ask
+    models = surface["resources"]["claude-in-codex://models"]
+    assert "description" in models
+    assert "resource_templates" in surface
+    assert "prompts" in surface

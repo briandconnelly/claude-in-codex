@@ -58,8 +58,16 @@ def test_payload_is_static_dict_without_none_fields():
 async def test_tool_and_resource_return_the_same_payload():
     async with Client(mcp) as client:
         tool_result = await client.call_tool("claude_models", {})
-        resource = await client.read_resource("claude://models")
+        resource = await client.read_resource("claude-in-codex://models")
     expected = _model_catalog_payload()
     assert tool_result.structured_content == expected
     # The resource returns JSON text with the same content.
     assert json.loads(resource[0].text) == expected
+
+
+async def test_models_resource_served_at_canonical_and_deprecated_uris():
+    async with Client(mcp) as client:
+        new = await client.read_resource("claude-in-codex://models")
+        old = await client.read_resource("claude://models")
+    assert json.loads(new[0].text) == json.loads(old[0].text)
+    assert json.loads(new[0].text)["ok"] is True
