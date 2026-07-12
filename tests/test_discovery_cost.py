@@ -12,7 +12,7 @@ from fastmcp import Client
 from claude_in_codex.schemas import RESULT_SCHEMA
 from claude_in_codex.server import mcp
 
-# Measured 54,295 bytes after slimming (baseline was 107,427); headroom for the
+# Measured 62,642 bytes after slimming (baseline was 113,495); headroom for the
 # additive fields from this remediation PR. Raising this budget is a reviewed,
 # deliberate act — do not bump it to make a failing test pass.
 WIRE_BUDGET_BYTES = 64_000

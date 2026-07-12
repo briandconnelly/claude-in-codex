@@ -9,8 +9,8 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 # Bump this whenever the agent-visible surface changes: tool names, input or
-# output schemas, the ErrorCode set, the config_mode/access/scope/detail value
-# sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
+# output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
+# value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
 FINGERPRINT = "claude-in-codex/0.1/schema-26"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
@@ -434,7 +434,7 @@ class ModelCatalogResult(BaseModel):
 # entry, so the 25-property Meta model repeats 2-3x per tool and pydantic `title`
 # decoration rides along on every field. The slimmed schema is what agents SEE;
 # the wire payload still carries the full Meta, whose field contract
-# claude_capabilities documents. Measured effect: tools/list 107,427 -> ~54,300 bytes.
+# claude_capabilities documents. Measured effect: tools/list 113,495 -> 62,642 bytes.
 _META_STUB = {
     "type": "object",
     "description": (

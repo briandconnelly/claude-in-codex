@@ -273,6 +273,8 @@ class ValidationEnvelopeMiddleware(Middleware):
                     f"Fix the '{field}' argument to match the tool's inputSchema, "
                     "then retry the same call."
                 )
+            # Placeholder meta: arguments never validated, so no resolved
+            # cwd/config exists for this call — the error block is the contract.
             meta = _meta("", "inherit", "toolless", 0, 0, None)
             return _result(_err("invalid_arguments", message, repair, meta, offending=field))
 
@@ -1291,7 +1293,8 @@ async def claude_review_changes_async(
     idempotency_key: Annotated[
         str | None,
         Field(
-            description="Optional client-chosen key making launch retry-safe: if a "
+            description="Optional client-chosen key making launch retry-safe "
+            "(best-effort): if a "
             "job with this key already exists in this workspace (within the job "
             "TTL), its status is returned instead of starting a duplicate paid "
             "job. After a dropped connection, retry with the same key or check "
@@ -2160,7 +2163,9 @@ def _capabilities_payload() -> dict:
             "claude_job_result/claude_job_list lazily materialize deadline/TTL "
             "state transitions without changing any job's outcome and are "
             "read-only; claude_job_consume_result irreversibly deletes the stored "
-            "record (destructiveHint true); claude_review_changes_async commits "
+            "record (destructiveHint true); claude_job_cancel mutates job state "
+            "but is idempotent — already-terminal jobs are returned unchanged "
+            "(idempotentHint true); claude_review_changes_async commits "
             "spend and creates job state (readOnlyHint false)."
         ),
         fingerprint_covers=list(FINGERPRINT_COVERS),
