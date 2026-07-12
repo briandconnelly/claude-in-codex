@@ -148,7 +148,9 @@ _JOB_CONSUME_ANNOTATIONS = {
     "destructiveHint": True,
     "idempotentHint": False,
 }
-# Starting a background job commits to spend and creates persistent local job state.
+# Starting a background job commits to spend and creates persistent local job
+# state: the job runs to completion or its best-effort budget stop threshold
+# even if never polled, but the launch returns immediately without blocking.
 _ASYNC_START_ANNOTATIONS = {
     "readOnlyHint": False,
     "openWorldHint": True,
