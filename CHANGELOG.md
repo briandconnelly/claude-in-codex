@@ -22,8 +22,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   - Canonical `claude-in-codex://models` resource URI; `claude://models`
     remains as a deprecated alias for a compatibility window.
   - `fingerprint_covers` and `annotations_policy` fields on
-    `claude_capabilities`; resource URIs are now part of the pinned contract
-    digest.
+    `claude_capabilities`; the pinned contract digest now covers full tool and
+    resource records (descriptions, titles, annotations), resource templates,
+    and prompts, and `fingerprint_covers` states that coverage.
   - Honest tool annotations: paid tools and job status/result/list polls are
     advertised `readOnlyHint:false` (spend/egress and lazy job maintenance are
     observable effects); `claude_job_consume_result` is `destructiveHint:true`;

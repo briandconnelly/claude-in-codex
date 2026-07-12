@@ -5,8 +5,10 @@ a known JSON envelope, so the full start -> status -> result/cancel/timeout flow
 exercised deterministically and for free.
 """
 
+import errno
 import json
 import os
+import pathlib
 import time
 
 import anyio
@@ -599,6 +601,50 @@ def test_reserve_idempotency_key_replaces_stale_marker(tmp_path, monkeypatch):
     # "z"*32 has no job record and the marker is past the (zeroed) TTL: replaced.
     assert jobs.reserve_idempotency_key(str(tmp_path), "stale-key", "a" * 32) is None
     jobs.release_idempotency_key(str(tmp_path), "stale-key", "a" * 32)
+
+
+def test_reserve_idempotency_key_retries_on_vanished_marker(tmp_path, monkeypatch):
+    """A read that races a concurrent release/replace can see FileNotFoundError; the
+    reservation must retry without unlinking (not treat it as a corrupt marker)."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
+    path = jobs._reservation_path(str(tmp_path), "vanish-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"job_id": "z" * 32, "created_epoch": time.time() - 10}))
+
+    original_read_text = pathlib.Path.read_text
+    calls = {"n": 0}
+
+    def flaky_read_text(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError()
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", flaky_read_text)
+    assert jobs.reserve_idempotency_key(str(tmp_path), "vanish-key", "a" * 32) is None
+    monkeypatch.setattr(pathlib.Path, "read_text", original_read_text)
+
+    holder = json.loads(path.read_text())
+    assert holder["job_id"] == "a" * 32
+
+
+def test_reserve_idempotency_key_falls_back_without_hardlinks(tmp_path, monkeypatch):
+    """os.link failing with something other than FileExistsError (e.g. a filesystem
+    without hardlink support) degrades to a best-effort os.replace instead of
+    failing the keyed launch outright."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+
+    def no_hardlinks(_src, _dst):
+        raise OSError(errno.EPERM, "hardlinks not supported")
+
+    monkeypatch.setattr(jobs.os, "link", no_hardlinks)
+    assert jobs.reserve_idempotency_key(str(tmp_path), "no-hardlink-key", "a" * 32) is None
+    path = jobs._reservation_path(str(tmp_path), "no-hardlink-key")
+    holder = json.loads(path.read_text())
+    assert holder["job_id"] == "a" * 32
+    # No leftover temp file from the fallback path.
+    assert list(path.parent.glob(".*tmp")) == []
 
 
 def test_release_idempotency_key_missing_marker_is_noop(tmp_path, monkeypatch):

@@ -114,7 +114,12 @@ def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
     partially-written marker to a racing reader (link() only publishes a fully
     written inode). A stale marker (its job record is gone AND the marker is
     older than the job TTL) is replaced. Written before the job spawns; the
-    caller removes it via release_idempotency_key on spawn failure."""
+    caller removes it via release_idempotency_key on spawn failure.
+
+    Replacing a judged-stale marker (unlink then link) has a narrow TOCTOU
+    window between two concurrent replacers; a stale marker only exists after
+    a crash or TTL expiry, so this is accepted rather than closed with
+    quarantine-rename."""
     path = _reservation_path(cwd, key)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"job_id": job_id, "created_epoch": time.time()})
@@ -123,28 +128,42 @@ def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
     while True:
         tmp_path.write_text(payload)
         try:
-            os.link(tmp_path, path)
-        except FileExistsError:
-            with contextlib.suppress(OSError):
-                tmp_path.unlink()
             try:
-                holder = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                holder = None
-            if isinstance(holder, dict) and holder.get("job_id"):
-                held_id = str(holder["job_id"])
-                record_alive = _read_meta(_job_dir(cwd, held_id)) is not None
-                created = holder.get("created_epoch") or 0
-                if record_alive or (time.time() - created) <= ttl_seconds():
-                    return held_id
-            # Stale or unreadable marker: remove and retry the exclusive create.
-            with contextlib.suppress(OSError):
-                path.unlink()
-            continue
-        else:
+                os.link(tmp_path, path)
+            except FileExistsError:
+                pass  # fall through to the staleness check below
+            except OSError:
+                # Filesystem without hardlink support (e.g. some SMB/FUSE
+                # mounts): degrade to a best-effort replace instead of failing
+                # the keyed launch outright. Not atomic-exclusive, but matches
+                # the previous best-effort (pre-hardlink) behavior.
+                tmp_path.replace(path)
+                return None
+            else:
+                return None
+        finally:
             with contextlib.suppress(OSError):
                 tmp_path.unlink()
-            return None
+        try:
+            holder = json.loads(path.read_text())
+        except FileNotFoundError:
+            # The marker vanished between our link-failure and this read —
+            # another caller released or replaced it in that gap. Retry
+            # without unlinking; blindly unlinking here could delete a marker
+            # published concurrently by that other caller.
+            continue
+        except (OSError, json.JSONDecodeError):
+            holder = None
+        if isinstance(holder, dict) and holder.get("job_id"):
+            held_id = str(holder["job_id"])
+            record_alive = _read_meta(_job_dir(cwd, held_id)) is not None
+            created = holder.get("created_epoch") or 0
+            if record_alive or (time.time() - created) <= ttl_seconds():
+                return held_id
+        # Stale or unreadable marker: remove and retry the exclusive create.
+        with contextlib.suppress(OSError):
+            path.unlink()
+        continue
 
 
 def release_idempotency_key(cwd: str, key: str, job_id: str) -> None:

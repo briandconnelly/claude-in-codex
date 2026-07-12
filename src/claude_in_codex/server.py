@@ -850,13 +850,13 @@ async def claude_ask(
 ) -> ToolResult:
     """Ask Claude for a free-form second opinion.
 
-    Use when the task is a question or design choice, not a git diff review or
-    adversarial attack. Paid; read-only; blocks up to timeout_seconds;
-    cancellable, not resumable. Free-form input is size-capped before spend.
+    Use for a question or design choice, not a diff review or adversarial
+    attack. Paid (context goes to Anthropic); no workspace writes; blocks up
+    to timeout_seconds; cancellable, not resumable. Free-form input is
+    size-capped before spend.
 
-    Egress to Anthropic via `claude`: gathers no diff. Your prompt/context and any
-    access=readonly reads are sent verbatim; Claude's returned reply is best-effort
-    secret-redacted before relay.
+    Egress to Anthropic via `claude`: no diff gathered; prompt/context and any
+    access=readonly reads sent verbatim; reply is best-effort secret-redacted.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -938,11 +938,12 @@ async def claude_review_changes(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Review a git diff with Claude and wait for the result.
+    """Review a git diff with Claude (blocking).
 
-    Correctness, security, or test-coverage review of working_tree, staged, or
-    branch diff. Paid; read-only; blocks up to timeout_seconds; cancellable. For
-    long reviews use claude_review_changes_async. Empty diffs skip the call.
+    Correctness/security/tests review of working_tree, staged, or branch diff.
+    Paid (context goes to Anthropic); no workspace writes; blocks up to
+    timeout_seconds; cancellable. For long reviews use claude_review_changes_async.
+    Empty diffs skip the call.
 
     Egress to Anthropic via `claude`: best-effort redaction covers the gathered
     diff and returned output, not free-form inputs or direct access=readonly reads.
@@ -1109,11 +1110,12 @@ async def claude_adversarial_review(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Have Claude attack a plan, claim, or decision.
+    """Have Claude attack a plan or decision.
 
     Surface counterarguments and failure modes; include evidence and optionally
-    attach a git diff with scope/base. Paid; read-only; blocks up to
-    timeout_seconds; cancellable. Empty attached diff returns without spending.
+    attach a diff (scope/base). Paid (context goes to Anthropic); no workspace
+    writes; blocks up to timeout_seconds; cancellable. Empty attached diff
+    returns without spending.
 
     Egress to Anthropic via `claude`: best-effort redaction covers the gathered
     diff and returned output, not free-form inputs or direct access=readonly reads.
@@ -1288,10 +1290,10 @@ async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | Non
     """Launch dedupe: JobStatus of a live/unexpired job started with this key, or
     None. This fast path runs once at entry as a cheap early return. The
     pre-spawn leg (in claude_review_changes_async, just before jobs.start_job) is
-    now an atomic on-disk reservation via jobs.reserve_idempotency_key, so
-    same-key launches cannot double-spawn on a shared local filesystem — this
-    fast path is advisory only. The reservation relies on O_CREAT|O_EXCL being
-    atomic; NFS-style filesystems without that guarantee remain a caveat."""
+    now an atomic on-disk reservation via jobs.reserve_idempotency_key, which
+    publishes a fully-written marker via an atomic os.link, so same-key launches
+    cannot double-spawn on one local filesystem — this fast path is advisory
+    only. NFS-style filesystems without atomic hardlinks remain a caveat."""
     if not idempotency_key:
         return None
     existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
