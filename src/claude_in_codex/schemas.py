@@ -16,11 +16,11 @@ FINGERPRINT = "claude-in-codex/0.1/schema-26"
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
 FINGERPRINT_COVERS = [
-    "tool names and input/output schemas",
+    "tool records (names, descriptions, titles, annotations, input/output schemas)",
+    "resource and resource-template records and prompt scaffolds",
     "error-code catalog",
     "config_mode/access/scope/detail/effort value sets",
     "capability summary and capabilities payload",
-    "resource URIs",
 ]
 
 Severity = Literal["critical", "high", "medium", "low", "nit"]

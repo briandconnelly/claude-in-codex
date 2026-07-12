@@ -291,10 +291,39 @@ class ValidationEnvelopeMiddleware(Middleware):
                     f"Fix the '{field}' argument to match the tool's inputSchema, "
                     "then retry the same call."
                 )
+            allowed = await self._allowed_values(context, loc)
             # Placeholder meta: arguments never validated, so no resolved
             # cwd/config exists for this call — the error block is the contract.
             meta = _meta("", "inherit", "toolless", 0, 0, None)
-            return _result(_err("invalid_arguments", message, repair, meta, offending=field))
+            return _result(
+                _err(
+                    "invalid_arguments",
+                    message,
+                    repair,
+                    meta,
+                    offending=field,
+                    allowed_values=allowed,
+                )
+            )
+
+    @staticmethod
+    async def _allowed_values(context, loc) -> list[str] | None:
+        """Enum choices for the failing argument, from the tool's published
+        inputSchema — structural, not parsed from pydantic's prose."""
+        name = getattr(getattr(context, "message", None), "name", None)
+        if not name or not loc:
+            return None
+        try:
+            tool = await mcp.get_tool(str(name))
+        except Exception:
+            return None
+        prop = (getattr(tool, "parameters", None) or {}).get("properties", {}).get(str(loc[0]))
+        if not isinstance(prop, dict):
+            return None
+        enum = prop.get("enum")
+        if isinstance(enum, list) and all(isinstance(v, str) for v in enum):
+            return enum
+        return None
 
 
 mcp.add_middleware(ValidationEnvelopeMiddleware())

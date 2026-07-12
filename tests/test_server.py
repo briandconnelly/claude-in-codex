@@ -2421,6 +2421,16 @@ async def test_missing_required_argument_returns_envelope():
     assert err["offending_param"] == "scope"
 
 
+async def test_invalid_enum_argument_carries_allowed_values():
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_review_dry_run", {"scope": "bogus"}, raise_on_error=False
+        )
+    err = structured(res)["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["allowed_values"] == ["working_tree", "staged", "branch"]
+
+
 def test_capability_summary_names_error_carrier():
     assert "structuredContent" in CAPABILITY_SUMMARY
     assert "ok:false" in CAPABILITY_SUMMARY
