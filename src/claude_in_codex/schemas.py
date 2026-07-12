@@ -310,6 +310,7 @@ class CapabilitiesResult(BaseModel):
     data_egress: str
     prerequisites: list[str]
     deprecation_policy: str
+    annotations_policy: str
 
 
 class JobStarted(BaseModel):

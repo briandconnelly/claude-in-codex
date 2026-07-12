@@ -837,28 +837,33 @@ async def test_adversarial_bad_base_ref_is_structured_error(fake_claude, monkeyp
 
 
 async def test_paid_tools_declare_cost_safety_hints():
-    # F4: paid, non-idempotent calls expose machine-readable hints, not just prose.
+    # F4/F6: paid tools are read-only in outcome (spend money, persist nothing);
+    # destructiveHint/idempotentHint are left undefined per spec when readOnlyHint
+    # is true.
     tools = await _tools_by_name()
     for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann is not None, name
         assert ann.readOnlyHint is True, name
-        assert ann.destructiveHint is False, name
-        assert ann.idempotentHint is False, name
+        assert ann.destructiveHint is None, name
+        assert ann.idempotentHint is None, name
 
 
 async def test_job_tools_declare_state_hints():
     tools = await _tools_by_name()
     assert tools["claude_review_changes_async"].annotations.readOnlyHint is False
     assert tools["claude_review_changes_async"].annotations.idempotentHint is False
-    assert tools["claude_job_status"].annotations.readOnlyHint is False
-    assert tools["claude_job_status"].annotations.idempotentHint is False
-    assert tools["claude_job_result"].annotations.readOnlyHint is False
-    assert tools["claude_job_result"].annotations.idempotentHint is False
+    # Job reads are read-only in outcome: polling/listing lazily materializes
+    # deadline/TTL transitions but never changes what a job returns.
+    assert tools["claude_job_status"].annotations.readOnlyHint is True
+    assert tools["claude_job_result"].annotations.readOnlyHint is True
+    # Consume irreversibly deletes the stored record.
     assert tools["claude_job_consume_result"].annotations.readOnlyHint is False
+    assert tools["claude_job_consume_result"].annotations.destructiveHint is True
     assert tools["claude_job_consume_result"].annotations.idempotentHint is False
+    # Cancel is idempotent: already-terminal jobs are returned unchanged.
     assert tools["claude_job_cancel"].annotations.readOnlyHint is False
-    assert tools["claude_job_cancel"].annotations.idempotentHint is False
+    assert tools["claude_job_cancel"].annotations.idempotentHint is True
 
 
 async def test_review_uses_workspace_root_over_cwd(fake_claude, monkeypatch, git_repo, tmp_path):
@@ -2505,3 +2510,34 @@ async def test_async_same_key_different_args_returns_existing_job(git_repo, monk
             {"job_id": first["job_id"], "workspace_root": str(git_repo)},
         )
     assert second["job_id"] == first["job_id"]
+
+
+async def test_annotation_contract():
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    # Job reads are read-only in outcome; polls must not pay mutation friction.
+    for name in ("claude_job_status", "claude_job_result", "claude_job_list"):
+        assert tools[name].annotations.readOnlyHint is True, name
+    # Consume irreversibly deletes the stored result record.
+    consume = tools["claude_job_consume_result"].annotations
+    assert consume.readOnlyHint is False
+    assert consume.destructiveHint is True
+    # Cancel is idempotent: already-terminal jobs are returned unchanged.
+    cancel = tools["claude_job_cancel"].annotations
+    assert cancel.readOnlyHint is False
+    assert cancel.idempotentHint is True
+    # Read-only tools no longer assert hints the spec leaves undefined there.
+    for name in ("claude_ask", "claude_review_changes", "claude_status", "claude_capabilities"):
+        ann = tools[name].annotations
+        assert ann.readOnlyHint is True, name
+        assert ann.destructiveHint is None, name
+        assert ann.idempotentHint is None, name
+    # Paid tools reach Anthropic; free reads do not.
+    assert tools["claude_ask"].annotations.openWorldHint is True
+    assert tools["claude_status"].annotations.openWorldHint is False
+
+
+def test_capabilities_documents_annotations_policy():
+    policy = _capabilities_payload()["annotations_policy"]
+    assert "readOnlyHint" in policy
+    assert "outcome" in policy

@@ -127,26 +127,31 @@ PRACTICAL_MIN_BUDGET_HINT = (
 
 mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
 
-# Paid tools read code but are NOT idempotent (each call spends money and re-invokes
-# Claude) and are explicitly non-destructive (no writes/shell). openWorld: they reach
-# an external service (Anthropic).
-_PAID_ANNOTATIONS = {
-    "readOnlyHint": True,
-    "openWorldHint": True,
-    "destructiveHint": False,
-    "idempotentHint": False,
-}
-# Free read-only tools are safely repeatable.
-_FREE_READ_ANNOTATIONS = {
-    "readOnlyHint": True,
+# readOnlyHint tracks observable OUTCOME, not I/O (disclosed via annotations_policy
+# in claude_capabilities): paid tools spend money but persist nothing; job reads
+# lazily materialize deadline/TTL transitions without changing any job's outcome.
+# destructiveHint/idempotentHint are omitted on read-only tools — the spec assigns
+# them meaning only when readOnlyHint is false.
+_PAID_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": True}
+_FREE_READ_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
+# Cancel mutates local job state; repeating it returns the terminal job unchanged.
+_JOB_CANCEL_ANNOTATIONS = {
+    "readOnlyHint": False,
     "openWorldHint": False,
     "destructiveHint": False,
     "idempotentHint": True,
 }
-# Local job lifecycle mutations change only this server's job state.
-_LOCAL_MUTATION_ANNOTATIONS = {
+# Consume irreversibly deletes the stored result record (a second call cannot re-fetch it).
+_JOB_CONSUME_ANNOTATIONS = {
     "readOnlyHint": False,
     "openWorldHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+}
+# Starting a background job commits to spend and creates persistent local job state.
+_ASYNC_START_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "openWorldHint": True,
     "destructiveHint": False,
     "idempotentHint": False,
 }
@@ -1242,17 +1247,6 @@ async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | Non
     return await run_sync(lambda: jobs.status(cwd, existing))
 
 
-# Starting a background job commits to spend (the job runs to completion or its
-# best-effort budget stop threshold even if never polled), but returns immediately
-# without blocking.
-_ASYNC_START_ANNOTATIONS = {
-    "readOnlyHint": False,
-    "openWorldHint": True,
-    "destructiveHint": False,
-    "idempotentHint": False,
-}
-
-
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Review changes with Claude (background)",
@@ -1488,7 +1482,7 @@ async def claude_review_changes_async(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_FREE_READ_ANNOTATIONS,
     title="Background job status",
     output_schema=JOB_STATUS_SCHEMA,
 )
@@ -1500,7 +1494,9 @@ async def claude_job_status(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Check a background review job without fetching the full result.
+    """Check a background review job without fetching the full result. Read-only
+    in outcome: polling lazily materializes deadline timeouts and TTL expiry but
+    never changes what the job returns.
 
     Use after claude_review_changes_async. Returns status, elapsed time,
     result_available, polling hints, and cost when available. If
@@ -1517,7 +1513,7 @@ async def claude_job_status(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_FREE_READ_ANNOTATIONS,
     title="Background job result",
     output_schema=RESULT_SCHEMA,
 )
@@ -1530,6 +1526,8 @@ async def claude_job_result(
     ctx: Context | None = None,
 ) -> ToolResult:
     """Fetch a finished background review without deleting the job record.
+    Read-only in outcome: polling lazily materializes deadline timeouts and TTL
+    expiry but never changes what the job returns.
 
     Use when claude_job_status reports result_available=true. Returns the same
     structured review envelope as claude_review_changes, with meta.job_id set. To
@@ -1546,7 +1544,7 @@ async def claude_job_result(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_CONSUME_ANNOTATIONS,
     title="Consume background job result",
     output_schema=RESULT_SCHEMA,
 )
@@ -1562,7 +1560,8 @@ async def claude_job_consume_result(
 
     Use only when you no longer need to poll or re-read the job. Returns the same
     structured envelope as claude_job_result, then deletes completed job state.
-    Non-done jobs are not deleted.
+    Non-done jobs are not deleted. Deletion is irreversible; the result cannot be
+    re-fetched afterward.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1575,7 +1574,7 @@ async def claude_job_consume_result(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_JOB_CANCEL_ANNOTATIONS,
     title="Cancel background job",
     output_schema=JOB_STATUS_SCHEMA,
 )
@@ -1700,7 +1699,7 @@ async def claude_review_dry_run(
 
 
 @mcp.tool(
-    annotations=_LOCAL_MUTATION_ANNOTATIONS,
+    annotations=_FREE_READ_ANNOTATIONS,
     title="List background jobs",
     output_schema=JOB_LIST_SCHEMA,
 )
@@ -1715,7 +1714,8 @@ async def claude_job_list(
 
     Use to recover job_ids lost across context compaction or interruption. Returns
     each job's id, kind, status, start time, result_available, expiry, and cost when
-    terminal. Like the other lifecycle tools it refreshes statuses (not read-only).
+    terminal. Read-only in outcome: listing lazily materializes deadline timeouts and
+    TTL expiry but never changes what any job returns.
     """
     cwd, ws_err, _ = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -2151,6 +2151,15 @@ def _capabilities_payload() -> dict:
             "Deprecated tools remain discoverable during their compatibility window "
             "with replacement guidance; removals/renames and schema/error changes "
             "bump the fingerprint."
+        ),
+        annotations_policy=(
+            "readOnlyHint tracks observable outcome, not I/O: paid tools spend "
+            "money but persist nothing and are read-only; claude_job_status/"
+            "claude_job_result/claude_job_list lazily materialize deadline/TTL "
+            "state transitions without changing any job's outcome and are "
+            "read-only; claude_job_consume_result irreversibly deletes the stored "
+            "record (destructiveHint true); claude_review_changes_async commits "
+            "spend and creates job state (readOnlyHint false)."
         ),
         fingerprint_covers=list(FINGERPRINT_COVERS),
     )
