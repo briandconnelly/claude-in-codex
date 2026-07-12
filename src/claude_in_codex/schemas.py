@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 from uuid import uuid4
 
@@ -429,6 +430,47 @@ class ModelCatalogResult(BaseModel):
     fingerprint: str = FINGERPRINT
 
 
+# Advertised-schema slimming (F1): FastMCP inlines $defs into every tools/list
+# entry, so the 25-property Meta model repeats 2-3x per tool and pydantic `title`
+# decoration rides along on every field. The slimmed schema is what agents SEE;
+# the wire payload still carries the full Meta, whose field contract
+# claude_capabilities documents. Measured effect: tools/list 107,427 -> ~54,300 bytes.
+_META_STUB = {
+    "type": "object",
+    "description": (
+        "Execution metadata: cwd, workspace_source/warning, config_mode, access, "
+        "scope, base/head/diff_range, paths, timeout_seconds, elapsed_ms, "
+        "requested_max_budget_usd, truncated/truncation_hint, command_exit_code, "
+        "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
+        "usage, job_id, request_id, fingerprint. Full contract: claude_capabilities."
+    ),
+}
+
+
+def _strip_titles(node: object) -> object:
+    """Drop pydantic-generated schema `title` decoration.
+
+    Only string-valued `title` keys are decoration; a dict-valued `title` key is a
+    real property definition (Finding.title) and MUST survive."""
+    if isinstance(node, dict):
+        return {
+            k: _strip_titles(v)
+            for k, v in node.items()
+            if not (k == "title" and isinstance(v, str))
+        }
+    if isinstance(node, list):
+        return [_strip_titles(v) for v in node]
+    return node
+
+
+def _slim(schema: dict) -> dict:
+    """Shrink an advertised output schema without changing the wire payload."""
+    out = json.loads(json.dumps(schema))  # deep copy; schema is JSON-safe
+    if "Meta" in out.get("$defs", {}):
+        out["$defs"]["Meta"] = dict(_META_STUB)
+    return _strip_titles(out)
+
+
 def _object_union_schema(adapter: TypeAdapter) -> dict:
     """Wrap a model union's anyOf in a top-level object schema.
 
@@ -448,18 +490,19 @@ def _object_union_schema(adapter: TypeAdapter) -> dict:
     }
 
 
-# Advertised output schemas (convention: a discriminated ok:true|false union).
-RESULT_SCHEMA = _object_union_schema(TypeAdapter(SuccessResult | ErrorResult))
-STATUS_SCHEMA = StatusResult.model_json_schema()
-CAPABILITIES_SCHEMA = CapabilitiesResult.model_json_schema()
+# Advertised output schemas (convention: a discriminated ok:true|false union),
+# slimmed for discovery cost — see _slim above.
+RESULT_SCHEMA = _slim(_object_union_schema(TypeAdapter(SuccessResult | ErrorResult)))
+STATUS_SCHEMA = _slim(StatusResult.model_json_schema())
+CAPABILITIES_SCHEMA = _slim(CapabilitiesResult.model_json_schema())
 # A failed *_async launch returns the error envelope; an empty diff returns a
 # SuccessResult without starting a job; an idempotency_key match returns the
 # existing job's JobStatus instead of a new JobStarted.
-JOB_STARTED_SCHEMA = _object_union_schema(
-    TypeAdapter(JobStarted | JobStatus | SuccessResult | ErrorResult)
+JOB_STARTED_SCHEMA = _slim(
+    _object_union_schema(TypeAdapter(JobStarted | JobStatus | SuccessResult | ErrorResult))
 )
-JOB_STATUS_SCHEMA = _object_union_schema(TypeAdapter(JobStatus | ErrorResult))
+JOB_STATUS_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStatus | ErrorResult)))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.
-DRY_RUN_SCHEMA = _object_union_schema(TypeAdapter(DryRunResult | ErrorResult))
-JOB_LIST_SCHEMA = _object_union_schema(TypeAdapter(JobListResult | ErrorResult))
-MODEL_CATALOG_SCHEMA = ModelCatalogResult.model_json_schema()
+DRY_RUN_SCHEMA = _slim(_object_union_schema(TypeAdapter(DryRunResult | ErrorResult)))
+JOB_LIST_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobListResult | ErrorResult)))
+MODEL_CATALOG_SCHEMA = _slim(ModelCatalogResult.model_json_schema())
