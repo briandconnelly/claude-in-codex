@@ -2513,6 +2513,119 @@ async def test_async_same_key_different_args_returns_existing_job(git_repo, monk
     assert second["job_id"] == first["job_id"]
 
 
+async def test_async_reservation_contention_returns_existing_job(git_repo, monkeypatch):
+    """Force both launches past the cheap entry fast-path (by making it always
+    report no match) so the second launch's dedupe is resolved entirely by the
+    atomic pre-spawn reservation, not the advisory find_by_idempotency_key scan."""
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(srv.jobs, "find_by_idempotency_key", lambda *a, **k: None)
+    args = {
+        "scope": "working_tree",
+        "workspace_root": str(git_repo),
+        "idempotency_key": "contention-key",
+    }
+    async with Client(mcp) as client:
+        first = structured(await client.call_tool("claude_review_changes_async", args))
+        second = structured(await client.call_tool("claude_review_changes_async", args))
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": first["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert first["ok"] is True
+    assert second["job_id"] == first["job_id"]
+
+
+async def test_async_reservation_holder_with_no_record_is_internal_error(git_repo, monkeypatch):
+    """A reservation marker whose job record never landed (e.g. crashed between
+    reserve and spawn, before it could be reaped) surfaces a retryable error
+    instead of silently starting a duplicate paid job."""
+    import claude_in_codex.server as srv
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ghost = "g" * 32
+    assert jobs.reserve_idempotency_key(str(git_repo), "ghost-key", ghost) is None
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "ghost-key",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "internal_error"
+    assert result["error"]["offending_param"] == "idempotency_key"
+    assert result["error"]["retryable"] is True
+    jobs.release_idempotency_key(str(git_repo), "ghost-key", ghost)
+
+
+async def test_async_spawn_failure_releases_reservation(monkeypatch, git_repo, tmp_path):
+    """On a spawn failure, the reservation is released so a retry with the same
+    key is not stuck forever behind a job that never started."""
+    import claude_in_codex.server as srv
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        srv, "build_command", lambda *a, **k: (["definitely-no-such-claude-binary-xyz"], [])
+    )
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "release-key",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "claude_not_found"
+    # Reservation was released: a fresh reserve for the same key succeeds outright.
+    assert jobs.reserve_idempotency_key(str(git_repo), "release-key", "b" * 32) is None
+    jobs.release_idempotency_key(str(git_repo), "release-key", "b" * 32)
+
+
+async def test_async_oserror_spawn_failure_releases_reservation(monkeypatch, git_repo, tmp_path):
+    import claude_in_codex.server as srv
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["claude"], []))
+
+    def fake_start_job(*a, **k):
+        raise OSError("boom")
+
+    monkeypatch.setattr(srv.jobs, "start_job", fake_start_job)
+    async with Client(mcp) as client:
+        result = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "release-key-2",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "internal_error"
+    assert jobs.reserve_idempotency_key(str(git_repo), "release-key-2", "b" * 32) is None
+    jobs.release_idempotency_key(str(git_repo), "release-key-2", "b" * 32)
+
+
 async def test_annotation_contract():
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}

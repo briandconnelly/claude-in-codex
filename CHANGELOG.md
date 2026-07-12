@@ -17,7 +17,8 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
     `repair_tool`, `repair_arguments` (additive; omitted when not mechanical).
   - `idempotency_key` on `claude_review_changes_async`: a duplicate launch
     within the job TTL returns the existing job instead of spending again
-    (best-effort, double-checked dedupe, per-workspace).
+    (atomic per-workspace on-disk reservation; same-key launches cannot
+    double-spawn on a shared local filesystem).
   - Canonical `claude-in-codex://models` resource URI; `claude://models`
     remains as a deprecated alias for a compatibility window.
   - `fingerprint_covers` and `annotations_policy` fields on

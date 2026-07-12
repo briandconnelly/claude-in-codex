@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Annotated, Literal, cast
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
@@ -1255,11 +1256,13 @@ async def claude_adversarial_review(
 
 
 async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | None:
-    """Best-effort launch dedupe: JobStatus of a live/unexpired job started with
-    this key, or None. Checked twice per launch — fast path at entry, and again
-    just before spawn — to narrow the check-then-spawn window. The jobs lock is
-    process-local and state lives on disk, so cross-process races remain
-    possible: dedupe is spend protection, not a transactional guarantee."""
+    """Launch dedupe: JobStatus of a live/unexpired job started with this key, or
+    None. This fast path runs once at entry as a cheap early return. The
+    pre-spawn leg (in claude_review_changes_async, just before jobs.start_job) is
+    now an atomic on-disk reservation via jobs.reserve_idempotency_key, so
+    same-key launches cannot double-spawn on a shared local filesystem — this
+    fast path is advisory only. The reservation relies on O_CREAT|O_EXCL being
+    atomic; NFS-style filesystems without that guarantee remain a caveat."""
     if not idempotency_key:
         return None
     existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
@@ -1311,7 +1314,7 @@ async def claude_review_changes_async(
         str | None,
         Field(
             description="Optional client-chosen key making launch retry-safe "
-            "(best-effort): if a "
+            "(atomic per workspace via an on-disk reservation): if a "
             "job with this key already exists in this workspace (within the job "
             "TTL), its status is returned instead of starting a duplicate paid "
             "job. After a dropped connection, retry with the same key or check "
@@ -1452,12 +1455,47 @@ async def claude_review_changes_async(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         idempotency_key=idempotency_key,
     )
-    match = await _idempotent_match(cwd, idempotency_key)
-    if match is not None:
-        return _result(match)
+    reserved_job_id: str | None = None
+    if idempotency_key:
+        candidate = uuid4().hex
+        holder = await run_sync(
+            lambda: jobs.reserve_idempotency_key(cwd, idempotency_key, candidate)
+        )
+        if holder is not None:
+            data = await run_sync(lambda: jobs.status(cwd, holder))
+            if data is not None:
+                return _result(data)
+            # Holder vanished between reserve and status (crashed pre-spawn and
+            # reaped): fall through and launch fresh under a new reservation.
+            holder2 = await run_sync(
+                lambda: jobs.reserve_idempotency_key(cwd, idempotency_key, candidate)
+            )
+            if holder2 is not None:
+                data = await run_sync(lambda: jobs.status(cwd, holder2))
+                if data is not None:
+                    return _result(data)
+                return _result(
+                    _err(
+                        "internal_error",
+                        "idempotency_key reservation is held by a job that has no record.",
+                        "Retry, or omit idempotency_key to force a new launch.",
+                        meta,
+                        offending="idempotency_key",
+                        retryable=True,
+                    )
+                )
+            reserved_job_id = candidate
+        else:
+            reserved_job_id = candidate
     try:
-        job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
+        job_id, started_at = await run_sync(
+            lambda: jobs.start_job(cmd, cwd, cfg, prompt, job_id=reserved_job_id)
+        )
     except (FileNotFoundError, PermissionError):
+        if idempotency_key and reserved_job_id:
+            await run_sync(
+                lambda: jobs.release_idempotency_key(cwd, idempotency_key, reserved_job_id)
+            )
         return _result(
             _err(
                 "claude_not_found",
@@ -1467,6 +1505,10 @@ async def claude_review_changes_async(
             )
         )
     except OSError as e:
+        if idempotency_key and reserved_job_id:
+            await run_sync(
+                lambda: jobs.release_idempotency_key(cwd, idempotency_key, reserved_job_id)
+            )
         return _result(
             _err(
                 "internal_error",

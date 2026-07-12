@@ -6,6 +6,7 @@ exercised deterministically and for free.
 """
 
 import json
+import os
 import time
 
 import anyio
@@ -489,3 +490,179 @@ def test_find_by_idempotency_key_ignores_keyless_jobs(tmp_path, monkeypatch):
     job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg())
     assert jobs.find_by_idempotency_key(str(tmp_path), "key-1") is None
     jobs.cancel(str(tmp_path), job_id)
+
+
+def test_reserve_idempotency_key_single_winner_across_threads(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    import concurrent.futures
+
+    results = []
+
+    def attempt(candidate):
+        holder = jobs.reserve_idempotency_key(str(tmp_path), "race-key", candidate)
+        if holder is None:
+            job_id, _ = jobs.start_job(
+                _sleep_cmd(), str(tmp_path), _cfg(idempotency_key="race-key"), job_id=candidate
+            )
+            return ("won", job_id)
+        return ("lost", holder)
+
+    candidates = [f"cand{i:02d}{'0' * 28}" for i in range(8)]
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(attempt, candidates))
+    winners = [r for r in results if r[0] == "won"]
+    assert len(winners) == 1
+    winner_id = winners[0][1]
+    assert all(r[1] == winner_id for r in results)
+    jobs.cancel(str(tmp_path), winner_id)
+
+
+def test_reserve_release_allows_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    assert jobs.reserve_idempotency_key(str(tmp_path), "k", "a" * 32) is None
+    jobs.release_idempotency_key(str(tmp_path), "k", "a" * 32)
+    assert jobs.reserve_idempotency_key(str(tmp_path), "k", "b" * 32) is None
+    jobs.release_idempotency_key(str(tmp_path), "k", "b" * 32)
+
+
+def test_release_only_removes_own_reservation(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    assert jobs.reserve_idempotency_key(str(tmp_path), "k", "a" * 32) is None
+    jobs.release_idempotency_key(str(tmp_path), "k", "z" * 32)  # not the holder
+    assert jobs.reserve_idempotency_key(str(tmp_path), "k", "b" * 32) == "a" * 32
+    jobs.release_idempotency_key(str(tmp_path), "k", "a" * 32)
+
+
+def _xproc_attempt(args):
+    workspace, state_dir, candidate = args
+    import os
+
+    os.environ["CLAUDE_IN_CODEX_STATE_DIR"] = state_dir
+    from claude_in_codex import jobs as j
+
+    holder = j.reserve_idempotency_key(workspace, "xproc-key", candidate)
+    if holder is None:
+        job_id, _ = j.start_job(
+            ["sh", "-c", "sleep 30"],
+            workspace,
+            JobConfig(
+                kind="claude_review_changes",
+                config_mode="inherit",
+                access="toolless",
+                scope="working_tree",
+                base="main",
+                head=None,
+                detail="summary",
+                timeout_seconds=1800,
+                workspace_source="cwd",
+                context_summary=None,
+                idempotency_key="xproc-key",
+            ),
+            job_id=candidate,
+        )
+        return ("won", job_id)
+    return ("lost", holder)
+
+
+def test_reserve_idempotency_key_single_winner_across_processes(tmp_path):
+    import concurrent.futures
+
+    state_dir = str(tmp_path / "state")
+    args = [(str(tmp_path), state_dir, f"proc{i:02d}{'0' * 26}") for i in range(4)]
+    with concurrent.futures.ProcessPoolExecutor(4) as pool:
+        results = list(pool.map(_xproc_attempt, args))
+    winners = [r for r in results if r[0] == "won"]
+    assert len(winners) == 1
+    assert all(r[1] == winners[0][1] for r in results)
+    os.environ["CLAUDE_IN_CODEX_STATE_DIR"] = state_dir
+    from claude_in_codex import jobs as j
+
+    j.cancel(str(tmp_path), winners[0][1])
+    os.environ.pop("CLAUDE_IN_CODEX_STATE_DIR", None)
+
+
+def test_reserve_idempotency_key_replaces_corrupt_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    path = jobs._reservation_path(str(tmp_path), "corrupt-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json")
+    assert jobs.reserve_idempotency_key(str(tmp_path), "corrupt-key", "a" * 32) is None
+    jobs.release_idempotency_key(str(tmp_path), "corrupt-key", "a" * 32)
+
+
+def test_reserve_idempotency_key_replaces_stale_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
+    path = jobs._reservation_path(str(tmp_path), "stale-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"job_id": "z" * 32, "created_epoch": time.time() - 10}))
+    # "z"*32 has no job record and the marker is past the (zeroed) TTL: replaced.
+    assert jobs.reserve_idempotency_key(str(tmp_path), "stale-key", "a" * 32) is None
+    jobs.release_idempotency_key(str(tmp_path), "stale-key", "a" * 32)
+
+
+def test_release_idempotency_key_missing_marker_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    jobs.release_idempotency_key(str(tmp_path), "never-reserved", "a" * 32)
+
+
+def test_reap_workspace_removes_stale_marker_with_dead_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
+    path = jobs._reservation_path(str(tmp_path), "reap-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"job_id": "z" * 32, "created_epoch": time.time() - 10}))
+    jobs.list_jobs(str(tmp_path))  # triggers _reap_workspace
+    assert not path.exists()
+
+
+def test_reap_workspace_keeps_marker_for_live_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg(idempotency_key="reap-live-key"))
+    assert jobs.reserve_idempotency_key(str(tmp_path), "reap-live-key", job_id) is None
+    jobs.list_jobs(str(tmp_path))  # triggers _reap_workspace; marker's job is still alive
+    path = jobs._reservation_path(str(tmp_path), "reap-live-key")
+    assert path.exists()
+    jobs.cancel(str(tmp_path), job_id)
+
+
+def test_reap_workspace_ignores_marker_within_ttl(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    path = jobs._reservation_path(str(tmp_path), "fresh-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"job_id": "z" * 32, "created_epoch": time.time()}))
+    jobs.list_jobs(str(tmp_path))
+    assert path.exists()
+
+
+def test_reap_workspace_keeps_expired_marker_for_live_job(tmp_path, monkeypatch):
+    """Even past its TTL, a marker whose job record still exists is kept."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg(idempotency_key="reap-old-key"))
+    path = jobs._reservation_path(str(tmp_path), "reap-old-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"job_id": job_id, "created_epoch": time.time() - 10}))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
+    jobs.list_jobs(str(tmp_path))
+    assert path.exists()
+    jobs.cancel(str(tmp_path), job_id)
+
+
+def test_reap_workspace_ignores_unparseable_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
+    path = jobs._reservation_path(str(tmp_path), "garbage-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json")
+    jobs.list_jobs(str(tmp_path))
+    assert path.exists()
+
+
+def test_reap_workspace_ignores_non_dict_marker_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")
+    path = jobs._reservation_path(str(tmp_path), "list-key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(["not", "a", "dict"]))
+    jobs.list_jobs(str(tmp_path))
+    assert path.exists()
