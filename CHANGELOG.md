@@ -9,10 +9,27 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Added
 
-- Argument-validation failures now return the standard `ok:false` envelope
-  (new error code `invalid_arguments`) instead of prose-only text, and the
-  capability summary names the error carrier. Bumps the contract fingerprint
-  to `claude-in-codex/0.1/schema-26`.
+- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-26`):
+  - Argument-validation failures now return the standard `ok:false` envelope
+    (new error code `invalid_arguments`) instead of prose-only text; the
+    capability summary names the error carrier.
+  - Structured repair fields on the error envelope: `allowed_values`,
+    `repair_tool`, `repair_arguments` (additive; omitted when not mechanical).
+  - `idempotency_key` on `claude_review_changes_async`: a duplicate launch
+    within the job TTL returns the existing job instead of spending again
+    (best-effort, double-checked dedupe, per-workspace).
+  - Canonical `claude-in-codex://models` resource URI; `claude://models`
+    remains as a deprecated alias for a compatibility window.
+  - `fingerprint_covers` and `annotations_policy` fields on
+    `claude_capabilities`; resource URIs are now part of the pinned contract
+    digest.
+  - Outcome-based `readOnlyHint`: job status/result/list polls are annotated
+    read-only (they never change a job's outcome); `claude_job_consume_result`
+    is `destructiveHint: true`; `claude_job_cancel` is `idempotentHint: true`;
+    read-only tools no longer assert hints the spec leaves undefined there.
+  - Advertised output schemas slimmed (Meta stubbed, pydantic titles stripped):
+    `tools/list` wire size roughly halved (113,495 → 62,642 bytes); a new
+    `tests/test_discovery_cost.py` ratchets the budget.
 
 - `claude_models` tool and `claude://models` resource: an advisory, free,
   read-only catalog of the model slugs accepted by the `model` parameter

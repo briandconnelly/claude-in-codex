@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -468,7 +468,7 @@ def _slim(schema: dict) -> dict:
     out = json.loads(json.dumps(schema))  # deep copy; schema is JSON-safe
     if "Meta" in out.get("$defs", {}):
         out["$defs"]["Meta"] = dict(_META_STUB)
-    return _strip_titles(out)
+    return cast("dict", _strip_titles(out))
 
 
 def _object_union_schema(adapter: TypeAdapter) -> dict:
