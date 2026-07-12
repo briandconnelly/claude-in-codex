@@ -837,26 +837,27 @@ async def test_adversarial_bad_base_ref_is_structured_error(fake_claude, monkeyp
 
 
 async def test_paid_tools_declare_cost_safety_hints():
-    # F4/F6: paid tools are read-only in outcome (spend money, persist nothing);
-    # destructiveHint/idempotentHint are left undefined per spec when readOnlyHint
-    # is true.
+    # Paid tools spend money and send context to Anthropic, so they are not
+    # read-only; they are non-destructive (no writes/shell) and non-idempotent
+    # (each call spends).
     tools = await _tools_by_name()
     for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann is not None, name
-        assert ann.readOnlyHint is True, name
-        assert ann.destructiveHint is None, name
-        assert ann.idempotentHint is None, name
+        assert ann.readOnlyHint is False, name
+        assert ann.destructiveHint is False, name
+        assert ann.idempotentHint is False, name
 
 
 async def test_job_tools_declare_state_hints():
     tools = await _tools_by_name()
     assert tools["claude_review_changes_async"].annotations.readOnlyHint is False
     assert tools["claude_review_changes_async"].annotations.idempotentHint is False
-    # Job reads are read-only in outcome: polling/listing lazily materializes
-    # deadline/TTL transitions but never changes what a job returns.
-    assert tools["claude_job_status"].annotations.readOnlyHint is True
-    assert tools["claude_job_result"].annotations.readOnlyHint is True
+    # Job polling performs lazy maintenance while reading (deadline kills,
+    # TTL deletion), so it is not read-only, though it never alters a
+    # terminal job's stored result.
+    assert tools["claude_job_status"].annotations.readOnlyHint is False
+    assert tools["claude_job_result"].annotations.readOnlyHint is False
     # Consume irreversibly deletes the stored record.
     assert tools["claude_job_consume_result"].annotations.readOnlyHint is False
     assert tools["claude_job_consume_result"].annotations.destructiveHint is True
@@ -2515,9 +2516,18 @@ async def test_async_same_key_different_args_returns_existing_job(git_repo, monk
 async def test_annotation_contract():
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    # Job reads are read-only in outcome; polls must not pay mutation friction.
+    # Paid tools spend money and send context to Anthropic: not read-only,
+    # non-destructive, non-idempotent (each call spends), open-world.
+    for name in ("claude_ask", "claude_review_changes", "claude_adversarial_review"):
+        ann = tools[name].annotations
+        assert ann.readOnlyHint is False, name
+        assert ann.destructiveHint is False, name
+        assert ann.idempotentHint is False, name
+        assert ann.openWorldHint is True, name
+    # Job polling performs lazy maintenance while reading (deadline kills, TTL
+    # deletion): not read-only, but never alters a terminal job's stored result.
     for name in ("claude_job_status", "claude_job_result", "claude_job_list"):
-        assert tools[name].annotations.readOnlyHint is True, name
+        assert tools[name].annotations.readOnlyHint is False, name
     # Consume irreversibly deletes the stored result record.
     consume = tools["claude_job_consume_result"].annotations
     assert consume.readOnlyHint is False
@@ -2526,18 +2536,16 @@ async def test_annotation_contract():
     cancel = tools["claude_job_cancel"].annotations
     assert cancel.readOnlyHint is False
     assert cancel.idempotentHint is True
-    # Read-only tools no longer assert hints the spec leaves undefined there.
-    for name in ("claude_ask", "claude_review_changes", "claude_status", "claude_capabilities"):
+    # Pure reads: no spend, no job-lifecycle side effects.
+    for name in ("claude_status", "claude_capabilities", "claude_models", "claude_review_dry_run"):
         ann = tools[name].annotations
         assert ann.readOnlyHint is True, name
         assert ann.destructiveHint is None, name
         assert ann.idempotentHint is None, name
-    # Paid tools reach Anthropic; free reads do not.
-    assert tools["claude_ask"].annotations.openWorldHint is True
     assert tools["claude_status"].annotations.openWorldHint is False
 
 
 def test_capabilities_documents_annotations_policy():
     policy = _capabilities_payload()["annotations_policy"]
     assert "readOnlyHint" in policy
-    assert "outcome" in policy
+    assert "lazy maintenance" in policy

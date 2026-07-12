@@ -23,10 +23,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   - `fingerprint_covers` and `annotations_policy` fields on
     `claude_capabilities`; resource URIs are now part of the pinned contract
     digest.
-  - Outcome-based `readOnlyHint`: job status/result/list polls are annotated
-    read-only (they never change a job's outcome); `claude_job_consume_result`
-    is `destructiveHint: true`; `claude_job_cancel` is `idempotentHint: true`;
-    read-only tools no longer assert hints the spec leaves undefined there.
+  - Honest tool annotations: paid tools and job status/result/list polls are
+    advertised `readOnlyHint:false` (spend/egress and lazy job maintenance are
+    observable effects); `claude_job_consume_result` is `destructiveHint:true`;
+    `claude_job_cancel` is `idempotentHint:true`; a new `annotations_policy`
+    field on `claude_capabilities` states the policy.
   - Advertised output schemas slimmed (Meta stubbed, pydantic titles stripped):
     `tools/list` wire size roughly halved (113,495 → 62,642 bytes); a new
     `tests/test_discovery_cost.py` ratchets the budget.
