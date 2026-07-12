@@ -12,6 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
 FINGERPRINT = "claude-in-codex/0.1/schema-26"
 
+# Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
+# bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
+FINGERPRINT_COVERS = [
+    "tool names and input/output schemas",
+    "error-code catalog",
+    "config_mode/access/scope/detail/effort value sets",
+    "capability summary and capabilities payload",
+    "resource URIs",
+]
+
 Severity = Literal["critical", "high", "medium", "low", "nit"]
 Verdict = Literal["pass", "concerns", "fail", "unknown"]
 Confidence = Literal["low", "medium", "high"]
@@ -285,6 +295,7 @@ class CapabilitiesResult(BaseModel):
     name: str
     version: str
     fingerprint: str = FINGERPRINT
+    fingerprint_covers: list[str] = Field(default_factory=list)
     transport: str
     stability: str
     paid_tools: list[str]

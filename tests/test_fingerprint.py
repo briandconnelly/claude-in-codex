@@ -22,12 +22,13 @@ from fastmcp import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "97da3a0db3126f1a44a7cdf1b6ef1a24f8ff7311262a2f74c42c4fe7b238f7e1"
+EXPECTED_CONTRACT_DIGEST = "2c36351a05dc10640e2f2316b5c48962a0d734f21bfab0c30e0d9f1fa7fd2056"
 
 
 async def _contract_surface() -> dict:
     async with Client(mcp) as client:
         tools = await client.list_tools()
+        resources = await client.list_resources()
     tool_surface = {t.name: {"input": t.inputSchema, "output": t.outputSchema} for t in tools}
     capabilities = _capabilities_payload()
     # Strip the bump-tracked fields so the digest reflects contract SHAPE only;
@@ -36,6 +37,7 @@ async def _contract_surface() -> dict:
     capabilities.pop("version", None)
     return {
         "tools": tool_surface,
+        "resources": {str(r.uri): r.name for r in resources},
         "capabilities": capabilities,
         "error_codes": sorted(get_args(schemas.ErrorCode)),
         "capability_summary": CAPABILITY_SUMMARY,
@@ -63,3 +65,15 @@ async def test_capabilities_payload_reports_current_fingerprint():
 
 async def test_contract_digest_is_deterministic():
     assert _digest(await _contract_surface()) == _digest(await _contract_surface())
+
+
+async def test_capabilities_payload_discloses_fingerprint_coverage():
+    covers = _capabilities_payload()["fingerprint_covers"]
+    assert covers, "fingerprint_covers must be a non-empty list"
+    assert any("resource" in item for item in covers)
+
+
+async def test_contract_surface_includes_resources():
+    surface = await _contract_surface()
+    assert "claude-in-codex://models" in surface["resources"]
+    assert "claude-in-codex://capabilities" in surface["resources"]

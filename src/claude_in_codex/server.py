@@ -64,6 +64,7 @@ from claude_in_codex.schemas import (
     CAPABILITIES_SCHEMA,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
+    FINGERPRINT_COVERS,
     JOB_LIST_SCHEMA,
     JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
@@ -2151,6 +2152,7 @@ def _capabilities_payload() -> dict:
             "with replacement guidance; removals/renames and schema/error changes "
             "bump the fingerprint."
         ),
+        fingerprint_covers=list(FINGERPRINT_COVERS),
     )
     return result.model_dump(mode="json", exclude_none=True)
 
