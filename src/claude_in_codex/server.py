@@ -99,11 +99,11 @@ from claude_in_codex.schemas import (
 
 CAPABILITY_SUMMARY = (
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
-    "adversarial plan review, and second opinions. It never edits code, grants "
-    "Bash/write tools, or proxies Claude's own MCP tools; hooks may run unless "
-    "config_mode=safe/bare. Paid tools send context to Anthropic; call "
-    "claude_status before spending. Use claude_models (or claude-in-codex://models) to "
-    "discover valid model slugs before overriding model. "
+    "adversarial plan review, and second opinions. The server grants no Bash/write "
+    "tools and never proxies Claude's own MCP tools, but workspace hooks may run "
+    "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
+    "config_mode=bare disable hooks. Paid tools send context to Anthropic; call "
+    "claude_status before spending. Use claude_models to discover valid model slugs. "
     "claude_review_changes blocks; "
     "claude_review_changes_async runs in background with poll/result/cancel; "
     "claude_review_dry_run previews diff-size/redaction. "
@@ -132,14 +132,17 @@ mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
 # readOnlyHint tracks observable effects, disclosed via annotations_policy in
 # claude_capabilities. Paid tools spend money and send context to an external
 # service (Anthropic), so they are advertised non-read-only to keep client
-# confirmation in the loop; they are non-destructive (no writes/shell) and
-# non-idempotent (each call spends). Job-lifecycle polling tools perform lazy
-# maintenance while reading (deadline kill, TTL deletion), so they are also
-# non-read-only even though they never alter a terminal job's stored result.
+# confirmation in the loop. Static annotations represent the worst case across
+# config modes: inherit/scoped may execute arbitrary workspace hooks, including
+# destructive shell commands, so paid calls are destructive even though the
+# server itself grants no Bash/write tools. Each call spends, so it is also
+# non-idempotent. Job-lifecycle polling tools perform lazy maintenance while
+# reading (deadline kill, TTL deletion), so they are also non-read-only even
+# though they never alter a terminal job's stored result.
 _PAID_ANNOTATIONS = {
     "readOnlyHint": False,
     "openWorldHint": True,
-    "destructiveHint": False,
+    "destructiveHint": True,
     "idempotentHint": False,
 }
 _FREE_READ_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
@@ -173,7 +176,7 @@ _JOB_CONSUME_ANNOTATIONS = {
 _ASYNC_START_ANNOTATIONS = {
     "readOnlyHint": False,
     "openWorldHint": True,
-    "destructiveHint": False,
+    "destructiveHint": True,
     "idempotentHint": False,
 }
 
@@ -849,15 +852,15 @@ async def claude_ask(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Ask Claude for a free-form second opinion.
+    """Ask Claude a question or design choice, not a diff or adversarial attack.
 
-    Use for a question or design choice, not a diff review or adversarial
-    attack. Paid (context goes to Anthropic); no workspace writes; blocks up
-    to timeout_seconds; cancellable, not resumable. Free-form input is
-    size-capped before spend.
+    Paid; sends context to Anthropic; blocks to timeout_seconds; cancellable;
+    input is size-capped before spend. The server grants no Bash/write tools;
+    workspace hooks may run shell in config_mode=inherit or config_mode=scoped.
+    config_mode=safe and config_mode=bare disable hooks.
 
-    Egress to Anthropic via `claude`: no diff gathered; prompt/context and any
-    access=readonly reads sent verbatim; reply is best-effort secret-redacted.
+    Egress: prompt/context and access=readonly reads are verbatim; reply
+    redaction is best effort.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -939,15 +942,15 @@ async def claude_review_changes(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Review a git diff with Claude (blocking).
+    """Review a working_tree, staged, or branch git diff with Claude (blocking).
 
-    Correctness/security/tests review of working_tree, staged, or branch diff.
-    Paid (context goes to Anthropic); no workspace writes; blocks up to
-    timeout_seconds; cancellable. For long reviews use claude_review_changes_async.
-    Empty diffs skip the call.
+    Paid; sends context to Anthropic; blocks to timeout_seconds; cancellable;
+    empty diffs skip spend. The server grants no Bash/write tools; workspace
+    hooks may run shell in config_mode=inherit or config_mode=scoped.
+    config_mode=safe and config_mode=bare disable hooks.
 
-    Egress to Anthropic via `claude`: best-effort redaction covers the gathered
-    diff and returned output, not free-form inputs or direct access=readonly reads.
+    Egress: redaction is best effort for gathered diff/output, not free-form
+    inputs or access=readonly reads.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1111,15 +1114,15 @@ async def claude_adversarial_review(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Have Claude attack a plan or decision.
+    """Have Claude attack a plan or decision; optionally attach a diff.
 
-    Surface counterarguments and failure modes; include evidence and optionally
-    attach a diff (scope/base). Paid (context goes to Anthropic); no workspace
-    writes; blocks up to timeout_seconds; cancellable. Empty attached diff
-    returns without spending.
+    Paid; sends context to Anthropic; blocks to timeout_seconds; cancellable;
+    empty diffs skip spend. The server grants no Bash/write tools; workspace
+    hooks may run shell in config_mode=inherit or config_mode=scoped.
+    config_mode=safe and config_mode=bare disable hooks.
 
-    Egress to Anthropic via `claude`: best-effort redaction covers the gathered
-    diff and returned output, not free-form inputs or direct access=readonly reads.
+    Egress: redaction is best effort for gathered diff/output, not free-form
+    inputs or access=readonly reads.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -1359,12 +1362,13 @@ async def claude_review_changes_async(
 ) -> ToolResult:
     """Launch a git diff review in the background and return a job_id.
 
-    Paid; not resumable if cancelled. Poll/read/delete/stop via claude_job_*
-    tools. Empty diffs skip the job. With idempotency_key, a duplicate launch
-    returns the existing job instead of spending again.
+    Paid; sends context to Anthropic; empty diffs skip spend; idempotency_key
+    avoids duplicate-launch spend. The server grants
+    no Bash/write tools; workspace hooks may run shell in config_mode=inherit or
+    config_mode=scoped. config_mode=safe and config_mode=bare disable hooks.
 
-    Egress to Anthropic via `claude`: best-effort redaction covers the gathered
-    diff and returned output, not free-form inputs or direct access=readonly reads.
+    Egress: redaction is best effort for gathered diff/output, not free-form
+    inputs or access=readonly reads.
     """
     cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -2264,10 +2268,14 @@ def _capabilities_payload() -> dict:
             "bump the fingerprint."
         ),
         annotations_policy=(
+            "Static annotations represent the worst case across config modes. "
             "readOnlyHint tracks observable effects: paid tools (claude_ask, "
             "claude_review_changes, claude_adversarial_review, "
             "claude_review_changes_async) spend money and send context to "
-            "Anthropic, so they are not read-only; claude_job_status/"
+            "Anthropic, so they are not read-only; their destructiveHint is true "
+            "because config_mode=inherit or config_mode=scoped may execute "
+            "workspace hooks with arbitrary shell commands, while config_mode=safe "
+            "and config_mode=bare disable hooks; claude_job_status/"
             "claude_job_result/claude_job_list perform lazy maintenance while "
             "reading (deadline kills, TTL deletion) and are not read-only, though "
             "they never alter a terminal job's stored result; "

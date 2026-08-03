@@ -9,7 +9,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Added
 
-- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-27`):
+- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-28`):
   - Argument-validation failures now return the standard `ok:false` envelope
     (new error code `invalid_arguments`) instead of prose-only text; the
     capability summary names the error carrier.
@@ -27,9 +27,12 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
     and prompts, and `fingerprint_covers` states that coverage.
   - Honest tool annotations: paid tools and job status/result/list polls are
     advertised `readOnlyHint:false` (spend/egress and lazy job maintenance are
-    observable effects); `claude_job_consume_result` is `destructiveHint:true`;
-    `claude_job_cancel` is `idempotentHint:true`; a new `annotations_policy`
-    field on `claude_capabilities` states the policy.
+    observable effects). Paid tools are also `destructiveHint:true` because
+    static annotations represent the worst-case config mode: workspace hooks
+    may run arbitrary shell in `inherit`/`scoped`; paid-tool descriptions and
+    `annotations_policy` name `safe`/`bare` as hook-disabled modes (#91).
+    `claude_job_consume_result` is `destructiveHint:true`, and
+    `claude_job_cancel` is `idempotentHint:true`.
   - Advertised output schemas slimmed (Meta stubbed, pydantic titles stripped):
     `tools/list` wire size roughly halved (113,495 → 62,642 bytes); a new
     `tests/test_discovery_cost.py` ratchets the budget.

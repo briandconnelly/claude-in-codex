@@ -24,7 +24,7 @@ from fastmcp import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "0a903f1d8f9916c69b161cc107684b9a5987d3365d5c43b79f93f0fc5fad456f"
+EXPECTED_CONTRACT_DIGEST = "f55636f11c21e1eccf7612dd9245f035b9d36b4316beff313e61d31bc7e674cc"
 
 
 async def _contract_surface() -> dict:
@@ -94,9 +94,17 @@ async def test_contract_surface_includes_resources():
 
 async def test_contract_surface_pins_annotations_and_descriptions():
     surface = await _contract_surface()
-    ask = surface["tools"]["claude_ask"]
-    assert ask["annotations"]["readOnlyHint"] is False
-    assert "description" in ask
+    for name in (
+        "claude_ask",
+        "claude_review_changes",
+        "claude_adversarial_review",
+        "claude_review_changes_async",
+    ):
+        paid_tool = surface["tools"][name]
+        assert paid_tool["annotations"]["readOnlyHint"] is False
+        assert paid_tool["annotations"]["destructiveHint"] is True
+        description = " ".join(paid_tool["description"].lower().split())
+        assert "workspace hooks may run shell" in description
     models = surface["resources"]["claude-in-codex://models"]
     assert "description" in models
     assert "resource_templates" in surface
