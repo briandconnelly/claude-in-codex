@@ -233,7 +233,7 @@ def test_normalize_is_error_uses_result_text_not_subtype():
 @pytest.mark.parametrize(
     ("result", "expected_code", "retryable"),
     [
-        ("Budget stop threshold reached.", "budget_exceeded", True),
+        ("Budget stop threshold reached.", "budget_exceeded", False),
         ("Authentication required; run claude /login.", "claude_auth_required", False),
         ("Permission denied for tool Read.", "claude_permission_error", False),
         ("Rate limited; try later.", "nonzero_exit", True),

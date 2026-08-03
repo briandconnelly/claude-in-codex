@@ -25,9 +25,10 @@ from claude_in_codex.context import redact_text
 from claude_in_codex.schemas import ErrorInfo
 
 _BUDGET_REPAIR = (
-    "Raise max_budget_usd or reduce context. For small prompts, try at least "
-    "$0.10-$0.20; lower best-effort budgets can spend and still stop before a "
-    "useful answer."
+    "Before making another call, raise max_budget_usd (up to $5.00) or narrow the "
+    "prompt/context (for review tools, use a smaller scope or fewer paths). For "
+    "small prompts, try at least $0.10-$0.20; lower best-effort budgets can spend "
+    "and still stop before a useful answer."
 )
 _LOGIN_MODES = frozenset({"inherit", "scoped", "safe"})
 _LOGIN_CREDENTIAL_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
@@ -316,7 +317,6 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
                 message="claude reached the max-budget stop threshold "
                 "(a best-effort limit, not a hard cap).",
                 repair=_BUDGET_REPAIR,
-                retryable=True,
             )
         if "permission" in structured_blob or "denied" in structured_blob:
             return ErrorInfo(
@@ -362,7 +362,6 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
             message="claude reached the max-budget stop threshold "
             "(a best-effort limit, not a hard cap).",
             repair=_BUDGET_REPAIR,
-            retryable=True,
         )
     # An unknown flag / invalid value means the CLI contract drifted from what this
     # plugin sends. Check last so an auth/budget message is never misread as drift.
