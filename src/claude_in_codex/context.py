@@ -308,6 +308,26 @@ def _redact_key_content(content: str, in_block: bool) -> tuple[str, bool, bool]:
     return emit, True, True
 
 
+@dataclass
+class SecretRedactor:
+    """Stateful best-effort redactor for a stream of complete text lines.
+
+    Keeping key-block state on the instance lets callers sanitize stderr while it
+    is produced without first retaining the full, potentially sensitive stream.
+    ``line`` must not include its line separator; callers remain responsible for
+    preserving separators in their own transport.
+    """
+
+    in_key_block: bool = False
+
+    def redact_line(self, line: str) -> tuple[str, bool]:
+        if self.in_key_block or _PRIVATE_KEY_BEGIN_RE.search(line):
+            emit, key_changed, self.in_key_block = _redact_key_content(line, self.in_key_block)
+            emit, value_changed = _redact_secret_values(emit)
+            return emit, key_changed or value_changed
+        return _redact_secret_values(line)
+
+
 def redact_text(text: str) -> tuple[str, bool]:
     """Best-effort secret redaction for free-form model output (prose).
 
@@ -323,17 +343,10 @@ def redact_text(text: str) -> tuple[str, bool]:
         return text, False
     out_lines: list[str] = []
     changed = False
-    in_key_block = False
+    redactor = SecretRedactor()
     # split("\n") (not splitlines) so \n-delimited prose round-trips exactly.
     for line in text.split("\n"):
-        if in_key_block or _PRIVATE_KEY_BEGIN_RE.search(line):
-            emit, key_changed, in_key_block = _redact_key_content(line, in_key_block)
-            # The key branch preserves any prefix before BEGIN / suffix after END, so
-            # still scan the emitted line for an unrelated token sharing that line.
-            emit, value_changed = _redact_secret_values(emit)
-            line_changed = key_changed or value_changed
-        else:
-            emit, line_changed = _redact_secret_values(line)
+        emit, line_changed = redactor.redact_line(line)
         changed = changed or line_changed
         out_lines.append(emit)
     return "\n".join(out_lines), changed

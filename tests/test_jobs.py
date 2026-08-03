@@ -6,15 +6,17 @@ exercised deterministically and for free.
 """
 
 import errno
+import io
 import json
 import os
 import pathlib
+import signal
 import time
 
 import anyio
 import pytest
 
-from claude_in_codex import jobs
+from claude_in_codex import _job_worker, jobs
 from claude_in_codex.jobs import JobConfig
 
 _INNER = {
@@ -236,6 +238,32 @@ def test_job_cancel(tmp_path):
     assert payload["error"]["code"] == "job_cancelled"
 
 
+def test_cancel_result_race_prefers_completed_envelope(tmp_path, monkeypatch):
+    cwd = str(tmp_path)
+    job_id = "e" * 32
+    jd = jobs._job_dir(cwd, job_id)
+    jd.mkdir(parents=True)
+    meta = {
+        "job_id": job_id,
+        "kind": "claude_review_changes",
+        "started_epoch": time.time(),
+        "started_at": "now",
+        "deadline_epoch": time.time() + 10,
+        "completed_epoch": None,
+        "terminal_status": None,
+        "config": {},
+    }
+    jobs._write_meta(jd, meta)
+    monkeypatch.setattr(jobs, "_read_live_job", lambda *_args: (jd, meta, "running"))
+
+    def finish(_jd, _meta):
+        (jd / "result.json").write_text("{}")
+
+    monkeypatch.setattr(jobs, "_terminate_verified", finish)
+    assert jobs.cancel(cwd, job_id)["status"] == "done"
+    assert meta["terminal_status"] is None
+
+
 def test_job_timeout_on_deadline(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_MAX_SECONDS", "0")  # deadline = start time
     cwd = str(tmp_path)
@@ -246,12 +274,40 @@ def test_job_timeout_on_deadline(tmp_path, monkeypatch):
     assert payload["error"]["code"] == "job_timeout"
 
 
+def test_deadline_result_race_prefers_completed_envelope(tmp_path, monkeypatch):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    meta = {
+        "pid": 1234,
+        "started_epoch": time.time() - 10,
+        "deadline_epoch": time.time() - 1,
+        "completed_epoch": None,
+        "terminal_status": None,
+    }
+    monkeypatch.setattr(jobs, "_job_running", lambda *_args: True)
+
+    def finish(_jd, _meta):
+        (jd / "result.json").write_text("{}")
+
+    monkeypatch.setattr(jobs, "_terminate_verified", finish)
+    assert jobs._status_of(jd, meta) == "done"
+    assert meta["terminal_status"] is None
+    assert meta["completed_epoch"] is not None
+
+
 def test_job_not_found(tmp_path):
     cwd = str(tmp_path)
-    assert jobs.status(cwd, "nope") is None
-    assert jobs.cancel(cwd, "nope") is None
-    payload, found = jobs.result(cwd, "nope")
+    missing = "d" * 32
+    assert jobs.status(cwd, missing) is None
+    assert jobs.cancel(cwd, missing) is None
+    payload, found = jobs.result(cwd, missing)
     assert found is False
+
+
+@pytest.mark.parametrize("job_id", ["../outside", "/tmp/outside", "A" * 32, "a" * 31])
+def test_internal_job_lookup_rejects_noncanonical_ids(tmp_path, job_id):
+    with pytest.raises(ValueError, match="32 lowercase hexadecimal"):
+        jobs.status(str(tmp_path), job_id)
 
 
 def test_terminal_job_reaped_after_ttl(tmp_path, monkeypatch):
@@ -357,6 +413,127 @@ def test_failed_job_without_drift_stays_job_failed(tmp_path):
     assert payload["error"]["code"] == "job_failed"
 
 
+def test_failed_job_persists_only_sanitized_stderr(tmp_path):
+    cwd = str(tmp_path)
+    secret = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    cmd = ["sh", "-c", "printf '%s' \"$0\" 1>&2; exit 1", f"failure token={secret}"]
+    job_id, _ = jobs.start_job(cmd, cwd, _cfg())
+    status = _await_done(cwd, job_id)
+    payload, found = jobs.result(cwd, job_id)
+    stored = (jobs._job_dir(cwd, job_id) / "stderr.log").read_text()
+    meta = jobs._read_meta(jobs._job_dir(cwd, job_id))
+
+    assert found is True
+    assert meta["stderr_sanitized"] is True
+    assert secret not in stored
+    assert secret not in json.dumps(status)
+    assert secret not in json.dumps(payload)
+    assert "[redacted: secret value]" in stored
+
+
+def test_worker_redacts_multiline_keys_across_streamed_lines(tmp_path):
+    body = b"MIIEvQIBADANBgkqSECRETKEYBODYdeadbeef0123456789"
+    begin = b"-" * 5 + b"BEGIN RSA " + b"PRIVATE KEY" + b"-" * 5
+    end = b"-" * 5 + b"END RSA " + b"PRIVATE KEY" + b"-" * 5
+    stream = io.BytesIO(begin + b"\n" + body + b"\n" + end + b"\n")
+    path = tmp_path / "stderr.log"
+    _job_worker._write_redacted_stderr(stream, path)
+    stored = path.read_text()
+    assert body.decode() not in stored
+    assert "[redacted: secret value]" in stored
+    assert "BEGIN RSA " + "PRIVATE KEY" in stored
+    assert "END RSA " + "PRIVATE KEY" in stored
+
+
+def test_worker_discards_overlong_stderr_line(tmp_path):
+    secret = b"ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+    stream = io.BytesIO(secret + b"x" * _job_worker.MAX_STDERR_LINE_BYTES + b"\nnext\n")
+    path = tmp_path / "stderr.log"
+    _job_worker._write_redacted_stderr(stream, path)
+    stored = path.read_text()
+    assert secret.decode() not in stored
+    assert stored == "[stderr line truncated]\n[redacted: secret value]\n"
+
+
+def test_worker_discards_overlong_unterminated_stderr_line(tmp_path):
+    stream = io.BytesIO(b"x" * (_job_worker.MAX_STDERR_LINE_BYTES + 1))
+    path = tmp_path / "stderr.log"
+    _job_worker._write_redacted_stderr(stream, path)
+    assert path.read_text() == "[stderr line truncated]"
+
+
+def test_worker_main_sanitizes_stderr_and_returns_child_status(tmp_path, monkeypatch):
+    secret = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    observed = {}
+
+    class Proc:
+        stderr = io.BytesIO(f"failed with {secret}".encode())
+
+        def wait(self):
+            return 7
+
+    def fake_popen(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return Proc()
+
+    monkeypatch.setattr(_job_worker.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(_job_worker.signal, "signal", lambda *_args: None)
+    lock_path = tmp_path / "worker.lock"
+    stderr_path = tmp_path / "stderr.log"
+    status = _job_worker.main(
+        [
+            "--lock-path",
+            str(lock_path),
+            "--stderr-path",
+            str(stderr_path),
+            "--",
+            "fake-claude",
+        ]
+    )
+
+    assert status == 7
+    assert observed["command"] == ["fake-claude"]
+    assert observed["kwargs"]["stderr"] is _job_worker.subprocess.PIPE
+    assert secret not in stderr_path.read_text()
+    assert lock_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_worker_main_rejects_empty_command(tmp_path):
+    assert (
+        _job_worker.main(
+            [
+                "--lock-path",
+                str(tmp_path / "worker.lock"),
+                "--stderr-path",
+                str(tmp_path / "stderr.log"),
+            ]
+        )
+        == 127
+    )
+
+
+def test_worker_main_records_generic_spawn_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        _job_worker.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sensitive detail")),
+    )
+    monkeypatch.setattr(_job_worker.signal, "signal", lambda *_args: None)
+    stderr_path = tmp_path / "stderr.log"
+    status = _job_worker.main(
+        [
+            "--lock-path",
+            str(tmp_path / "worker.lock"),
+            "--stderr-path",
+            str(stderr_path),
+            "fake-claude",
+        ]
+    )
+    assert status == 127
+    assert stderr_path.read_text() == "job command could not be started"
+
+
 def test_state_root_defaults_under_home(monkeypatch):
     monkeypatch.delenv(jobs.STATE_ENV, raising=False)
     assert jobs._state_root().parts[-3:] == (".cache", "claude-in-codex", "jobs")
@@ -365,7 +542,15 @@ def test_state_root_defaults_under_home(monkeypatch):
 def test_pid_helpers_handle_missing_pid():
     assert jobs._pid_alive(None) is False
     assert jobs._is_running(None) is False
-    assert jobs._kill_pid_tree(None) is None
+
+
+def test_owned_pid_that_is_no_longer_waitable_is_not_reused(monkeypatch):
+    pid = 4321
+    jobs._OWNED_PIDS.add(pid)
+    monkeypatch.setattr(jobs.os, "waitpid", lambda *_args: (_ for _ in ()).throw(ChildProcessError))
+    monkeypatch.setattr(jobs.os, "kill", lambda *_args: pytest.fail("must not probe reused PID"))
+    assert jobs._is_running(pid) is False
+    assert pid not in jobs._OWNED_PIDS
 
 
 def test_pid_alive_permission_error_means_alive(monkeypatch):
@@ -389,11 +574,31 @@ def test_is_running_oserror_returns_false(monkeypatch):
     assert jobs._is_running(4321) is False
 
 
-def test_kill_pid_tree_swallows_errors(monkeypatch):
+def test_signal_job_swallows_errors(monkeypatch):
     monkeypatch.setattr(jobs.os, "getpgid", lambda p: p)
     monkeypatch.setattr(jobs.os, "killpg", lambda *a: (_ for _ in ()).throw(ProcessLookupError))
-    monkeypatch.setattr(jobs.os, "waitpid", lambda *a: (_ for _ in ()).throw(ChildProcessError))
-    jobs._kill_pid_tree(4321)  # must not raise
+    jobs._signal_job(4321, signal.SIGKILL)  # must not raise
+
+
+def test_signal_job_falls_back_to_single_pid(monkeypatch):
+    calls = []
+    monkeypatch.setattr(jobs.os, "getpgid", lambda _pid: 9999)
+    monkeypatch.setattr(jobs.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+    jobs._signal_job(4321, signal.SIGTERM)
+    assert calls == [(4321, signal.SIGTERM)]
+
+
+def test_terminate_verified_escalates_only_after_recheck(tmp_path, monkeypatch):
+    pid = 4321
+    signals = []
+    jobs._OWNED_PIDS.add(pid)
+    monkeypatch.setattr(jobs, "_job_running", lambda *_args: True)
+    monkeypatch.setattr(jobs, "_TERMINATE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(jobs, "_signal_job", lambda _pid, sig: signals.append(sig))
+    monkeypatch.setattr(jobs.os, "waitpid", lambda *_args: (pid, 0))
+    jobs._terminate_verified(tmp_path, {"pid": pid})
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert pid not in jobs._OWNED_PIDS
 
 
 def test_read_envelope_missing_empty_malformed_and_nondict(tmp_path):
@@ -408,10 +613,36 @@ def test_read_envelope_missing_empty_malformed_and_nondict(tmp_path):
     assert jobs._read_envelope(jd) is None  # not a dict
 
 
+def test_read_meta_rejects_job_id_mismatch_and_non_dict(tmp_path):
+    jd = tmp_path / ("a" * 32)
+    jd.mkdir()
+    (jd / "meta.json").write_text(json.dumps({"job_id": "b" * 32}))
+    assert jobs._read_meta(jd) is None
+    (jd / "meta.json").write_text("[]")
+    assert jobs._read_meta(jd) is None
+
+
+def test_unlocked_worker_lock_is_not_an_ownership_proof(tmp_path):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    (jd / "worker.lock").touch()
+    assert jobs._worker_lock_held(jd) is False
+
+
 def test_stderr_tail_missing_returns_none(tmp_path):
     jd = tmp_path / "job"
     jd.mkdir()
-    assert jobs._stderr_tail(jd) is None
+    assert jobs._stderr_tail(jd, {"stderr_sanitized": True}) is None
+
+
+def test_stderr_tail_withholds_legacy_unsanitized_log(tmp_path):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    secret = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    (jd / "stderr.log").write_text(secret)
+    tail = jobs._stderr_tail(jd, {})
+    assert tail == jobs._LEGACY_STDERR_WITHHELD
+    assert secret not in tail
 
 
 def test_deadline_seconds_falls_back_to_env():
@@ -433,6 +664,73 @@ def test_reap_and_list_skip_nondir_and_bad_meta(tmp_path):
     assert jobs.list_jobs(cwd)["jobs"] == []
 
 
+def test_job_lookup_and_listing_do_not_follow_symlinked_job_dir(tmp_path):
+    cwd = str(tmp_path)
+    job_id = "a" * 32
+    ws = jobs._ws_dir(cwd)
+    ws.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "meta.json").write_text(json.dumps({"job_id": job_id}))
+    try:
+        (ws / job_id).symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    assert jobs.status(cwd, job_id) is None
+    assert jobs.list_jobs(cwd)["jobs"] == []
+
+
+def test_unowned_pid_without_worker_lock_is_never_signalled(tmp_path, monkeypatch):
+    cwd = str(tmp_path)
+    job_id = "b" * 32
+    jd = jobs._job_dir(cwd, job_id)
+    jd.mkdir(parents=True)
+    now = time.time()
+    jobs._write_meta(
+        jd,
+        {
+            "job_id": job_id,
+            "kind": "claude_review_changes",
+            "pid": os.getpid(),
+            "owner": "owner-from-an-earlier-server",
+            "stderr_sanitized": True,
+            "started_epoch": now,
+            "started_at": "now",
+            "deadline_epoch": now - 1,
+            "completed_epoch": None,
+            "terminal_status": None,
+            "config": {},
+        },
+    )
+    monkeypatch.setattr(
+        jobs,
+        "_signal_job",
+        lambda *_args: pytest.fail("an unverified PID must never be signalled"),
+    )
+
+    status = jobs.cancel(cwd, job_id)
+    assert status["status"] == "failed"
+    assert jobs._pid_alive(os.getpid()) is True
+
+
+def test_held_worker_lock_verifies_job_after_owner_restart(tmp_path):
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
+    jd = jobs._job_dir(cwd, job_id)
+    deadline = time.time() + 2
+    while time.time() < deadline and jobs._worker_lock_held(jd) is not True:
+        time.sleep(0.01)
+    assert jobs._worker_lock_held(jd) is True
+
+    meta = jobs._read_meta(jd)
+    meta["owner"] = "owner-from-an-earlier-server"
+    jobs._write_meta(jd, meta)
+    jobs._OWNED_PIDS.discard(meta["pid"])
+    assert jobs.status(cwd, job_id)["status"] == "running"
+    assert jobs.cancel(cwd, job_id)["status"] == "cancelled"
+
+
 def test_count_cap_evicts_oldest_terminal(tmp_path, monkeypatch):
     monkeypatch.setenv(jobs.MAX_COUNT_ENV, "1")
     cwd = str(tmp_path)
@@ -451,6 +749,35 @@ def test_start_job_survives_chmod_failure(tmp_path, monkeypatch):
     job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
     assert job_id
     _await_done(cwd, job_id)
+
+
+def test_start_job_wrapper_spawn_failure_cleans_partial_record(tmp_path, monkeypatch):
+    job_id = "c" * 32
+    monkeypatch.setattr(
+        jobs.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wrapper failed")),
+    )
+    with pytest.raises(OSError, match="wrapper failed"):
+        jobs.start_job(["sh", "-c", "true"], str(tmp_path), _cfg(), job_id=job_id)
+    assert not (jobs._ws_dir(str(tmp_path)) / job_id).exists()
+
+
+def test_check_executable_rejects_empty_missing_and_nonexecutable(tmp_path):
+    with pytest.raises(FileNotFoundError, match="empty"):
+        jobs._check_executable([], str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        jobs._check_executable(["./missing"], str(tmp_path))
+    path = tmp_path / "not-executable"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o600)
+    with pytest.raises(PermissionError):
+        jobs._check_executable(["./not-executable"], str(tmp_path))
+
+
+def test_reservation_rejects_noncanonical_candidate(tmp_path):
+    with pytest.raises(ValueError, match="32 lowercase hexadecimal"):
+        jobs.reserve_idempotency_key(str(tmp_path), "key", "../outside")
 
 
 def test_terminal_nondone_result_surfaces_cost(tmp_path):
@@ -509,7 +836,7 @@ def test_reserve_idempotency_key_single_winner_across_threads(tmp_path, monkeypa
             return ("won", job_id)
         return ("lost", holder)
 
-    candidates = [f"cand{i:02d}{'0' * 28}" for i in range(8)]
+    candidates = [f"{i:032x}" for i in range(8)]
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         results = list(pool.map(attempt, candidates))
     winners = [r for r in results if r[0] == "won"]
@@ -570,7 +897,7 @@ def test_reserve_idempotency_key_single_winner_across_processes(tmp_path):
     import concurrent.futures
 
     state_dir = str(tmp_path / "state")
-    args = [(str(tmp_path), state_dir, f"proc{i:02d}{'0' * 26}") for i in range(4)]
+    args = [(str(tmp_path), state_dir, f"{i + 16:032x}") for i in range(4)]
     with concurrent.futures.ProcessPoolExecutor(4) as pool:
         results = list(pool.map(_xproc_attempt, args))
     winners = [r for r in results if r[0] == "won"]
@@ -672,13 +999,13 @@ def test_reap_workspace_keeps_marker_for_live_job(tmp_path, monkeypatch):
     jobs.cancel(str(tmp_path), job_id)
 
 
-def test_reap_workspace_ignores_marker_within_ttl(tmp_path, monkeypatch):
+def test_reap_workspace_removes_invalid_marker_within_ttl(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     path = jobs._reservation_path(str(tmp_path), "fresh-key")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"job_id": "z" * 32, "created_epoch": time.time()}))
     jobs.list_jobs(str(tmp_path))
-    assert path.exists()
+    assert not path.exists()
 
 
 def test_reap_workspace_keeps_expired_marker_for_live_job(tmp_path, monkeypatch):

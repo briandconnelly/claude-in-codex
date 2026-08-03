@@ -17,24 +17,29 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
+from claude_in_codex.context import redact_text
 from claude_in_codex.normalize import apply_cost_usage, normalize_envelope
 from claude_in_codex.schemas import (
     FINGERPRINT,
+    JOB_ID_PATTERN,
     ContextSummary,
     ErrorCode,
     ErrorInfo,
@@ -43,6 +48,11 @@ from claude_in_codex.schemas import (
     branch_range,
     workspace_warning_for,
 )
+
+try:
+    fcntl: Any = importlib.import_module("fcntl")
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 STATE_ENV = "CLAUDE_IN_CODEX_STATE_DIR"
 TTL_ENV = "CLAUDE_IN_CODEX_JOB_TTL"
@@ -55,6 +65,11 @@ DEFAULT_MAX_COUNT = 50  # retained jobs per workspace; evict oldest terminal
 
 _TERMINAL = {"done", "failed", "cancelled", "timeout"}
 _JOBS_LOCK = threading.RLock()
+_PROCESS_OWNER = uuid4().hex
+_OWNED_PIDS: set[int] = set()
+_JOB_ID_RE = re.compile(JOB_ID_PATTERN)
+_TERMINATE_GRACE_SECONDS = 5.0
+_LEGACY_STDERR_WITHHELD = "legacy job diagnostics withheld because they predate sanitization"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -93,8 +108,33 @@ def _ws_dir(cwd: str) -> Path:
     return _state_root() / f"{safe}-{digest}"
 
 
+def _valid_job_id(job_id: object) -> bool:
+    return isinstance(job_id, str) and _JOB_ID_RE.fullmatch(job_id) is not None
+
+
 def _job_dir(cwd: str, job_id: str) -> Path:
-    return _ws_dir(cwd) / job_id
+    """Return a confined direct child of the workspace job-state directory."""
+    if not _valid_job_id(job_id):
+        raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
+    ws = _ws_dir(cwd)
+    target = ws / job_id
+    if target.is_symlink() or target.resolve(strict=False).parent != ws.resolve(strict=False):
+        raise ValueError("job_id does not resolve to a confined job directory")
+    return target
+
+
+def _job_dirs(ws: Path) -> list[Path]:
+    """Enumerate only canonical, non-symlink job directories."""
+    if not ws.is_dir():
+        return []
+    resolved_ws = ws.resolve(strict=False)
+    result: list[Path] = []
+    for entry in ws.iterdir():
+        if not _valid_job_id(entry.name) or entry.is_symlink() or not entry.is_dir():
+            continue
+        if entry.resolve(strict=False).parent == resolved_ws:
+            result.append(entry)
+    return result
 
 
 def _reservation_path(cwd: str, key: str) -> Path:
@@ -120,6 +160,8 @@ def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
     window between two concurrent replacers; a stale marker only exists after
     a crash or TTL expiry, so this is accepted rather than closed with
     quarantine-rename."""
+    if not _valid_job_id(job_id):
+        raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
     path = _reservation_path(cwd, key)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"job_id": job_id, "created_epoch": time.time()})
@@ -154,9 +196,12 @@ def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
             continue
         except (OSError, json.JSONDecodeError):
             holder = None
-        if isinstance(holder, dict) and holder.get("job_id"):
+        if isinstance(holder, dict) and _valid_job_id(holder.get("job_id")):
             held_id = str(holder["job_id"])
-            record_alive = _read_meta(_job_dir(cwd, held_id)) is not None
+            try:
+                record_alive = _read_meta(_job_dir(cwd, held_id)) is not None
+            except ValueError:
+                record_alive = False
             created = holder.get("created_epoch") or 0
             if record_alive or (time.time() - created) <= ttl_seconds():
                 return held_id
@@ -168,6 +213,8 @@ def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
 
 def release_idempotency_key(cwd: str, key: str, job_id: str) -> None:
     """Drop our reservation (spawn failed). Only removes our own marker."""
+    if not _valid_job_id(job_id):
+        return
     path = _reservation_path(cwd, key)
     try:
         holder = json.loads(path.read_text())
@@ -179,7 +226,7 @@ def release_idempotency_key(cwd: str, key: str, job_id: str) -> None:
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if not pid:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -191,50 +238,119 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def _is_running(pid: int | None) -> bool:
-    """Whether the job process is still running.
+    """Whether a process launched by this server is still running.
 
     The job is launched detached but is still our child until it exits, so we
     must reap it with waitpid — otherwise it lingers as a zombie that kill(0)
     reports as 'alive' forever. waitpid(WNOHANG) returns (pid, _) once it exits
-    (reaping it), (0, 0) while it runs, and raises ChildProcessError if it is not
-    our child (e.g. after a server restart), where we fall back to a kill(0)
-    liveness probe."""
-    if not pid:
+    (reaping it) and (0, 0) while it runs. A PID tracked as ours that is no
+    longer waitable is discarded rather than trusted after possible reuse.
+    Untracked callers retain the historical kill(0) liveness probe; job
+    lifecycle code never uses that alone as an ownership proof."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
         reaped, _ = os.waitpid(pid, os.WNOHANG)
         if reaped == pid:
+            _OWNED_PIDS.discard(pid)
             return False
         if reaped == 0:
             return True
     except ChildProcessError:
-        pass  # not our child — use the liveness probe below
+        if pid in _OWNED_PIDS:
+            # A PID launched by this process that is no longer waitable has
+            # already been reaped. Never let a reused PID regain ownership.
+            _OWNED_PIDS.discard(pid)
+            return False
     except OSError:
+        _OWNED_PIDS.discard(pid)
         return False
     return _pid_alive(pid)
 
 
-def _kill_pid_tree(pid: int | None) -> None:
-    """Kill the detached job's process group (it is its own session leader), then
-    reap it if it was our child so it does not linger as a zombie."""
-    if not pid:
-        return
+def _worker_lock_held(jd: Path) -> bool | None:
+    """Whether another process positively holds this job's worker lock.
+
+    ``None`` means ownership cannot be verified (missing/corrupt lock or a
+    platform without advisory flock support), which callers treat as not owned.
+    """
+    path = jd / "worker.lock"
+    if path.is_symlink() or not path.is_file():
+        return None
+    if fcntl is None:  # pragma: no cover - non-POSIX fallback
+        return None
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        else:  # pragma: no cover - non-POSIX fallback
-            os.kill(pid, signal.SIGKILL)
+        lock_file = path.open("r+b")
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        else:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return False
+    finally:
+        lock_file.close()
+
+
+def _job_running(jd: Path, meta: dict) -> bool:
+    pid = meta.get("pid")
+    lock_held = _worker_lock_held(jd)
+    if lock_held is True:
+        return _pid_alive(pid)
+    # The parent may publish metadata before the new worker has acquired its
+    # lock. Trust only PIDs that this exact server process has not yet reaped.
+    if meta.get("owner") == _PROCESS_OWNER and pid in _OWNED_PIDS:
+        return _is_running(pid)
+    return False
+
+
+def _signal_job(pid: int, sig: signal.Signals) -> None:
+    """Signal only the verified worker session or, conservatively, its PID."""
+    try:
+        if hasattr(os, "killpg") and os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
     except (ProcessLookupError, PermissionError, OSError):
         pass
-    with contextlib.suppress(ChildProcessError, OSError):
-        os.waitpid(pid, 0)
+
+
+def _terminate_verified(jd: Path, meta: dict) -> None:
+    """Terminate a job only while its worker ownership remains provable."""
+    pid = meta.get("pid")
+    if not pid:
+        return
+    if not _job_running(jd, meta):
+        return
+    _signal_job(pid, signal.SIGTERM)
+    deadline = time.monotonic() + _TERMINATE_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if not _job_running(jd, meta):
+            return
+        time.sleep(0.02)
+    if _job_running(jd, meta):
+        _signal_job(pid, signal.SIGKILL)
+        with contextlib.suppress(ChildProcessError, OSError):
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+            if reaped == pid:
+                _OWNED_PIDS.discard(pid)
 
 
 def _read_meta(jd: Path) -> dict | None:
     try:
-        return json.loads((jd / "meta.json").read_text())
+        meta = json.loads((jd / "meta.json").read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(meta, dict):
+        return None
+    if _valid_job_id(jd.name) and meta.get("job_id") != jd.name:
+        return None
+    return meta
 
 
 def _write_meta(jd: Path, meta: dict) -> None:
@@ -287,6 +403,23 @@ def _write_stdin(proc: subprocess.Popen, stdin_text: str) -> None:
             proc.stdin.close()
 
 
+def _check_executable(cmd: list[str], cwd: str) -> None:
+    """Preserve Popen's immediate missing/non-executable command failure."""
+    if not cmd:
+        raise FileNotFoundError("job command is empty")
+    executable = cmd[0]
+    if Path(executable).name != executable:
+        path = Path(executable)
+        if not path.is_absolute():
+            path = Path(cwd) / path
+        if not path.is_file():
+            raise FileNotFoundError(executable)
+        if not os.access(path, os.X_OK):
+            raise PermissionError(executable)
+    elif shutil.which(executable) is None:
+        raise FileNotFoundError(executable)
+
+
 def start_job(
     cmd: list[str],
     cwd: str,
@@ -302,26 +435,40 @@ def start_job(
 
     Returns (job_id, started_at_iso)."""
     job_id = job_id or uuid4().hex
+    _check_executable(cmd, cwd)
     jd = _job_dir(cwd, job_id)
-    jd.mkdir(parents=True, exist_ok=True)
+    jd.mkdir(parents=True, exist_ok=False)
     # Best-effort: results contain the diff; keep the workspace tree user-only.
     with contextlib.suppress(OSError):
         _ws_dir(cwd).chmod(0o700)
     started = time.time()
     result_path = jd / "result.json"
     stderr_path = jd / "stderr.log"
+    lock_path = jd / "worker.lock"
+    worker_cmd = [
+        sys.executable,
+        "-m",
+        "claude_in_codex._job_worker",
+        "--lock-path",
+        str(lock_path),
+        "--stderr-path",
+        str(stderr_path),
+        "--",
+        *cmd,
+    ]
     try:
-        with result_path.open("w") as rf, stderr_path.open("w") as ef:
+        with result_path.open("w") as rf:
             proc = subprocess.Popen(
-                cmd,
+                worker_cmd,
                 cwd=cwd,
                 stdin=subprocess.PIPE if stdin_text is not None else None,
                 stdout=rf,
-                stderr=ef,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 start_new_session=True,
             )
+            _OWNED_PIDS.add(proc.pid)
             if stdin_text is not None:
                 threading.Thread(target=_write_stdin, args=(proc, stdin_text), daemon=True).start()
     except OSError:
@@ -333,6 +480,8 @@ def start_job(
         "kind": cfg.kind,
         "idempotency_key": cfg.idempotency_key,
         "pid": proc.pid,
+        "owner": _PROCESS_OWNER,
+        "stderr_sanitized": True,
         "started_epoch": started,
         "started_at": datetime.now(UTC).isoformat(),
         "deadline_epoch": started + max_seconds(),
@@ -370,9 +519,7 @@ def find_by_idempotency_key(cwd: str, key: str) -> str | None:
         if not ws.is_dir():
             return None
         matches: list[tuple[float, str]] = []
-        for jd in ws.iterdir():
-            if not jd.is_dir():
-                continue
+        for jd in _job_dirs(ws):
             meta = _read_meta(jd)
             if meta is None or meta.get("idempotency_key") != key:
                 continue
@@ -390,9 +537,20 @@ def _status_of(jd: Path, meta: dict) -> str:
     terminal = meta.get("terminal_status")
     if terminal:
         return terminal
-    if _is_running(meta.get("pid")):
+    # A complete envelope wins races with worker exit, cancellation, and deadline
+    # enforcement. It is safe to normalize as soon as the one-shot JSON is whole.
+    if _read_envelope(jd) is not None:
+        if meta.get("completed_epoch") is None:
+            meta["completed_epoch"] = time.time()
+            _write_meta(jd, meta)
+        return "done"
+    if _job_running(jd, meta):
         if time.time() > meta.get("deadline_epoch", float("inf")):
-            _kill_pid_tree(meta.get("pid"))
+            _terminate_verified(jd, meta)
+            if _read_envelope(jd) is not None:
+                meta["completed_epoch"] = meta.get("completed_epoch") or time.time()
+                _write_meta(jd, meta)
+                return "done"
             meta["terminal_status"] = "timeout"
             meta["completed_epoch"] = time.time()
             _write_meta(jd, meta)
@@ -439,6 +597,8 @@ def _reap_workspace(cwd: str) -> None:
             if jd.name.startswith("idem-") and jd.name.endswith(".json"):
                 _reap_stale_marker(cwd, jd, now, ttl)
             continue
+        if jd.is_symlink() or not _valid_job_id(jd.name):
+            continue
         meta = _read_meta(jd)
         if meta is None:
             continue
@@ -460,11 +620,18 @@ def _reap_stale_marker(cwd: str, marker: Path, now: float, ttl: int) -> None:
     if not isinstance(holder, dict):
         return
     held_id = holder.get("job_id")
+    if not _valid_job_id(held_id):
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        return
     created = holder.get("created_epoch") or 0
     if now - created <= ttl:
         return
-    if held_id and _read_meta(_job_dir(cwd, str(held_id))) is not None:
-        return
+    try:
+        if _read_meta(_job_dir(cwd, str(held_id))) is not None:
+            return
+    except ValueError:
+        pass
     with contextlib.suppress(OSError):
         marker.unlink()
 
@@ -483,7 +650,14 @@ def _read_live_job(cwd: str, job_id: str) -> tuple[Path, dict, str] | None:
     only the requested record avoids unrelated jobs causing latency or waitpid
     races while still preserving the TTL contract for that record.
     """
-    jd = _job_dir(cwd, job_id)
+    if not _valid_job_id(job_id):
+        raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
+    try:
+        jd = _job_dir(cwd, job_id)
+    except ValueError:
+        # A valid-looking name that resolves through a symlink is corrupt state,
+        # not a job record the lifecycle API may follow.
+        return None
     meta = _read_meta(jd)
     if meta is None:
         return None
@@ -497,7 +671,7 @@ def _read_live_job(cwd: str, job_id: str) -> tuple[Path, dict, str] | None:
 def _enforce_count_cap(cwd: str) -> None:
     ws = _ws_dir(cwd)
     cap = _int_env(MAX_COUNT_ENV, DEFAULT_MAX_COUNT)
-    dirs = [d for d in ws.iterdir() if d.is_dir()] if ws.is_dir() else []
+    dirs = _job_dirs(ws)
     if len(dirs) <= cap:
         return
     # Evict oldest terminal jobs first; never kill a still-running one to fit.
@@ -577,7 +751,7 @@ def _status_dict(jd: Path, meta: dict, state: str) -> dict:
     cost = _terminal_cost(jd, state)
     detail = None
     if state == "failed":
-        detail = _stderr_tail(jd)
+        detail = _stderr_tail(jd, meta)
     return {
         "ok": True,
         "job_id": meta.get("job_id", jd.name),
@@ -606,9 +780,7 @@ def list_jobs(cwd: str) -> dict:
         ws = _ws_dir(cwd)
         summaries = []
         if ws.is_dir():
-            for jd in ws.iterdir():
-                if not jd.is_dir():
-                    continue
+            for jd in _job_dirs(ws):
                 meta = _read_meta(jd)
                 if meta is None:
                     continue
@@ -632,12 +804,15 @@ def list_jobs(cwd: str) -> dict:
         return {"ok": True, "jobs": summaries, "fingerprint": FINGERPRINT}
 
 
-def _stderr_tail(jd: Path, limit: int = 200) -> str | None:
+def _stderr_tail(jd: Path, meta: dict, limit: int = 200) -> str | None:
+    if meta.get("stderr_sanitized") is not True:
+        return _LEGACY_STDERR_WITHHELD
     try:
         text = (jd / "stderr.log").read_text().strip()
     except OSError:
         return None
-    return text[-limit:] or None
+    # Defense in depth for records written by an interrupted or older worker.
+    return redact_text(text)[0][-limit:] or None
 
 
 def result(cwd: str, job_id: str, consume: bool = False):
@@ -688,7 +863,7 @@ _STATE_TO_ERROR = {
 
 def _job_error(meta: dict, state: str, jd: Path) -> dict:
     if state == "failed":
-        tail = _stderr_tail(jd)
+        tail = _stderr_tail(jd, meta)
         # A failed job whose stderr carries a drift signature is the async twin of
         # the sync cli_contract_changed path — classify it the same way so async
         # callers get the same actionable error instead of a generic job_failed.
@@ -743,9 +918,14 @@ def cancel(cwd: str, job_id: str) -> dict | None:
             return None
         jd, meta, state = live
         if state not in _TERMINAL:
-            _kill_pid_tree(meta.get("pid"))
-            meta["terminal_status"] = "cancelled"
-            meta["completed_epoch"] = time.time()
-            _write_meta(jd, meta)
-            state = "cancelled"
+            _terminate_verified(jd, meta)
+            if _read_envelope(jd) is not None:
+                meta["completed_epoch"] = meta.get("completed_epoch") or time.time()
+                _write_meta(jd, meta)
+                state = "done"
+            else:
+                meta["terminal_status"] = "cancelled"
+                meta["completed_epoch"] = time.time()
+                _write_meta(jd, meta)
+                state = "cancelled"
         return _status_dict(jd, meta, state)

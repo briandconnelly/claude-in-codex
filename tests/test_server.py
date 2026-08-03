@@ -481,7 +481,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-26"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-27"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1059,7 +1059,7 @@ async def test_job_result_not_found_is_structured_error(tmp_path, monkeypatch, g
     async with Client(mcp) as client:
         result = await client.call_tool(
             "claude_job_result",
-            {"job_id": "deadbeef", "workspace_root": str(git_repo)},
+            {"job_id": "d" * 32, "workspace_root": str(git_repo)},
             raise_on_error=False,
         )
     data = structured(result)
@@ -1131,7 +1131,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-26"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-27"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1732,10 +1732,10 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
         ("claude_ask", {"prompt": "x"}),
         ("claude_adversarial_review", {"target": "x"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
-        ("claude_job_status", {"job_id": "j"}),
-        ("claude_job_result", {"job_id": "j"}),
-        ("claude_job_consume_result", {"job_id": "j"}),
-        ("claude_job_cancel", {"job_id": "j"}),
+        ("claude_job_status", {"job_id": "d" * 32}),
+        ("claude_job_result", {"job_id": "d" * 32}),
+        ("claude_job_consume_result", {"job_id": "d" * 32}),
+        ("claude_job_cancel", {"job_id": "d" * 32}),
         ("claude_review_dry_run", {"scope": "working_tree"}),
         ("claude_job_list", {}),
     ],
@@ -1756,14 +1756,14 @@ async def test_job_consume_and_cancel_not_found(tmp_path, monkeypatch, git_repo)
         consume = structured(
             await client.call_tool(
                 "claude_job_consume_result",
-                {"job_id": "nope", "workspace_root": str(git_repo)},
+                {"job_id": "d" * 32, "workspace_root": str(git_repo)},
                 raise_on_error=False,
             )
         )
         cancel = structured(
             await client.call_tool(
                 "claude_job_cancel",
-                {"job_id": "nope", "workspace_root": str(git_repo)},
+                {"job_id": "d" * 32, "workspace_root": str(git_repo)},
                 raise_on_error=False,
             )
         )
@@ -2412,6 +2412,16 @@ async def test_invalid_enum_argument_returns_envelope():
     assert "working_tree" in err["repair"]
 
 
+@pytest.mark.parametrize("job_id", ["../outside", "/tmp/outside", "A" * 32, "a" * 31])
+async def test_invalid_job_id_returns_validation_envelope(job_id):
+    async with Client(mcp) as client:
+        res = await client.call_tool("claude_job_status", {"job_id": job_id}, raise_on_error=False)
+    assert res.is_error is True
+    err = structured(res)["error"]
+    assert err["code"] == "invalid_arguments"
+    assert err["offending_param"] == "job_id"
+
+
 async def test_missing_required_argument_returns_envelope():
     async with Client(mcp) as client:
         res = await client.call_tool("claude_review_dry_run", {}, raise_on_error=False)
@@ -2463,7 +2473,7 @@ async def test_job_not_found_carries_repair_tool(tmp_path):
     async with Client(mcp) as client:
         res = await client.call_tool(
             "claude_job_status",
-            {"job_id": "nope", "workspace_root": str(tmp_path)},
+            {"job_id": "d" * 32, "workspace_root": str(tmp_path)},
             raise_on_error=False,
         )
     err = structured(res)["error"]
@@ -2557,7 +2567,7 @@ async def test_async_reservation_holder_with_no_record_is_internal_error(git_rep
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
     monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
-    ghost = "g" * 32
+    ghost = "f" * 32
     assert jobs.reserve_idempotency_key(str(git_repo), "ghost-key", ghost) is None
     async with Client(mcp) as client:
         result = structured(

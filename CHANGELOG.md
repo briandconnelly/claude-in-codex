@@ -5,11 +5,11 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
-## Unreleased
+## 0.7.0 - 2026-08-03
 
 ### Added
 
-- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-26`):
+- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-27`):
   - Argument-validation failures now return the standard `ok:false` envelope
     (new error code `invalid_arguments`) instead of prose-only text; the
     capability summary names the error carrier.
@@ -52,6 +52,13 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Security
 
+- Hardened background-job persistence and lifecycle handling: stderr is now
+  redacted before storage or error-envelope inclusion, job identifiers are
+  canonical lowercase hexadecimal values confined to the workspace state
+  directory, and persisted processes must prove ownership with a worker-held
+  advisory lock before lifecycle operations can signal them. Legacy raw stderr
+  logs are withheld. Bumps the contract fingerprint to
+  `claude-in-codex/0.1/schema-27` because the job-id input schemas are narrowed.
 - Extended best-effort secret redaction to **Claude's returned output**, closing
   the egress gap the disclosure previously only admitted (#66). A shared
   `redact_text` helper in `context.py` (reusing the diff path's pattern set and

@@ -264,6 +264,10 @@ def _has_invalid_api_key_signal(blob: str) -> bool:
 
 def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> ErrorInfo:
     env = None
+    # stderr is untrusted CLI output and can echo credentials supplied by hooks,
+    # wrappers, or upstream failures. Sanitize it before any classification path
+    # can place it in a user-visible envelope.
+    safe_stderr = redact_text(run.stderr)[0]
     with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
     if run.stderr == "claude_not_found":
@@ -287,7 +291,7 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
         # scrub secrets first so the error path matches the success-path egress (#66).
         result = redact_text(str(env.get("result") or ""))[0]
         structured_blob = f"{subtype}\n{result}".lower()
-        combined_blob = f"{structured_blob}\n{run.stderr}".lower()
+        combined_blob = f"{structured_blob}\n{safe_stderr}".lower()
         if _has_logged_out_signal(combined_blob):
             return ErrorInfo(
                 code="claude_auth_required",
@@ -339,7 +343,7 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     extra = ""
     if isinstance(env, dict):
         extra = f"{env.get('subtype', '')} {env.get('result', '')}"
-    blob = f"{extra}\n{run.stdout}\n{run.stderr}".lower()
+    blob = f"{extra}\n{run.stdout}\n{safe_stderr}".lower()
     if _has_logged_out_signal(blob):
         return ErrorInfo(
             code="claude_auth_required",
@@ -362,11 +366,11 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
         )
     # An unknown flag / invalid value means the CLI contract drifted from what this
     # plugin sends. Check last so an auth/budget message is never misread as drift.
-    if cli_contract.is_contract_drift(run.stderr, run.stdout):
+    if cli_contract.is_contract_drift(safe_stderr, run.stdout):
         return contract_changed_error()
     return ErrorInfo(
         code="nonzero_exit",
-        message=f"claude exited {run.exit_code}: {run.stderr.strip()[:200]}",
+        message=f"claude exited {run.exit_code}: {safe_stderr.strip()[:200]}",
         repair="Inspect the error; retry with a smaller request.",
     )
 

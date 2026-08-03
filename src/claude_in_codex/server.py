@@ -82,6 +82,7 @@ from claude_in_codex.schemas import (
     ErrorCode,
     ErrorInfo,
     ErrorResult,
+    JobId,
     JobStarted,
     Meta,
     RawDefaults,
@@ -1582,7 +1583,10 @@ async def claude_review_changes_async(
     output_schema=JOB_STATUS_SCHEMA,
 )
 async def claude_job_status(
-    job_id: Annotated[str, Field(description="A job_id from an *_async tool.")],
+    job_id: Annotated[
+        JobId,
+        Field(description="A 32-character lowercase hexadecimal job_id from an *_async tool."),
+    ],
     workspace_root: Annotated[
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
@@ -1614,7 +1618,10 @@ async def claude_job_status(
     output_schema=RESULT_SCHEMA,
 )
 async def claude_job_result(
-    job_id: Annotated[str, Field(description="A job_id from an *_async tool.")],
+    job_id: Annotated[
+        JobId,
+        Field(description="A 32-character lowercase hexadecimal job_id from an *_async tool."),
+    ],
     workspace_root: Annotated[
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
@@ -1646,7 +1653,10 @@ async def claude_job_result(
     output_schema=RESULT_SCHEMA,
 )
 async def claude_job_consume_result(
-    job_id: Annotated[str, Field(description="A job_id from an *_async tool.")],
+    job_id: Annotated[
+        JobId,
+        Field(description="A 32-character lowercase hexadecimal job_id from an *_async tool."),
+    ],
     workspace_root: Annotated[
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
@@ -1676,7 +1686,10 @@ async def claude_job_consume_result(
     output_schema=JOB_STATUS_SCHEMA,
 )
 async def claude_job_cancel(
-    job_id: Annotated[str, Field(description="A job_id from an *_async tool.")],
+    job_id: Annotated[
+        JobId,
+        Field(description="A 32-character lowercase hexadecimal job_id from an *_async tool."),
+    ],
     workspace_root: Annotated[
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),

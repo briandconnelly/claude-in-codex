@@ -650,6 +650,26 @@ def test_redact_text_redacts_token_sharing_a_line_with_key_boundary():
     assert changed is True
 
 
+def test_secret_redactor_preserves_key_block_state_across_calls():
+    from claude_in_codex.context import SecretRedactor
+
+    body = "MIIEvQIBADANBgkqSECRETKEYBODYdeadbeef0123456789"
+    redactor = SecretRedactor()
+    begin, begin_changed = redactor.redact_line("-----BEGIN RSA PRIVATE KEY-----")
+    middle, middle_changed = redactor.redact_line(body)
+    end, end_changed = redactor.redact_line("-----END RSA PRIVATE KEY-----")
+    clean, clean_changed = redactor.redact_line("ordinary diagnostic")
+
+    assert "BEGIN RSA PRIVATE KEY" in begin
+    assert begin_changed is True
+    assert body not in middle
+    assert middle_changed is True
+    assert "END RSA PRIVATE KEY" in end
+    assert end_changed is True
+    assert clean == "ordinary diagnostic"
+    assert clean_changed is False
+
+
 def test_redact_tree_redacts_string_leaves_in_nested_structures():
     from claude_in_codex.context import redact_tree
 

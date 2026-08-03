@@ -437,6 +437,21 @@ def test_classify_generic_nonzero():
     assert classify_failure(run).code == "nonzero_exit"
 
 
+def test_classify_failure_redacts_stderr_before_returning_message():
+    secret = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    run = ClaudeRun(
+        stdout="",
+        stderr=f"wrapper failed with token={secret}",
+        exit_code=2,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    info = classify_failure(run)
+    assert info.code == "nonzero_exit"
+    assert secret not in info.message
+    assert "[redacted: secret value]" in info.message
+
+
 def test_classify_budget_from_envelope_subtype():
     import json
 

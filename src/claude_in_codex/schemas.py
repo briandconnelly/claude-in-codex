@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-26"
+FINGERPRINT = "claude-in-codex/0.1/schema-27"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -34,6 +34,8 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 # Lifecycle states for a background job. Terminal: done|failed|cancelled|timeout.
 # (TTL-expired records are deleted and reported as job_not_found, not a state.)
 JobState = Literal["running", "done", "failed", "cancelled", "timeout"]
+JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
+JobId = Annotated[str, Field(pattern=JOB_ID_PATTERN)]
 ModelKind = Literal["alias", "full"]
 ModelCatalogSource = Literal["static", "none"]
 
