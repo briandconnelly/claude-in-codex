@@ -174,7 +174,7 @@ def test_job_meta_non_branch_leaves_head_and_range_unset(tmp_path):
     assert payload["meta"].get("diff_range") is None
 
 
-def test_job_meta_carries_requested_and_effective_budget_and_warning(tmp_path):
+def test_job_meta_carries_configured_and_effective_budget_and_warning(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(
         _emit_cmd(),
