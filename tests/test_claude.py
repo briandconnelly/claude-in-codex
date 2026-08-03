@@ -422,7 +422,11 @@ def test_classify_budget():
     run = ClaudeRun(
         stdout="", stderr="Exceeded max budget of $1.00", exit_code=1, elapsed_ms=5, timed_out=False
     )
-    assert classify_failure(run).code == "budget_exceeded"
+    info = classify_failure(run)
+    assert info.code == "budget_exceeded"
+    assert info.retryable is False
+    assert "raise max_budget_usd" in info.repair
+    assert "narrow the prompt/context" in info.repair
 
 
 def test_classify_not_found():
@@ -459,7 +463,11 @@ def test_classify_budget_from_envelope_subtype():
         {"type": "result", "is_error": True, "subtype": "error_max_budget_usd", "result": ""}
     )
     run = ClaudeRun(stdout=stdout, stderr="", exit_code=1, elapsed_ms=5, timed_out=False)
-    assert classify_failure(run).code == "budget_exceeded"
+    info = classify_failure(run)
+    assert info.code == "budget_exceeded"
+    assert info.retryable is False
+    assert "raise max_budget_usd" in info.repair
+    assert "narrow the prompt/context" in info.repair
 
 
 def test_classify_auth_from_structured_envelope():

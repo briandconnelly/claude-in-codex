@@ -510,7 +510,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-29"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-30"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1163,7 +1163,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-29"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-30"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1768,6 +1768,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "budget_exceeded"
+    assert data["error"]["retryable"] is False
     assert "$0.10-$0.20" in data["error"]["repair"]
     assert data["meta"]["cost_usd"] == 0.05
     assert data["meta"]["usage"]["input_tokens"] == 10

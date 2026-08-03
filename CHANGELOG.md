@@ -9,6 +9,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Fixed
 
+- `budget_exceeded` errors now set `retryable: false` because replaying the same paid
+  call with the same cap cannot resolve the stop condition. Repair guidance names the
+  caller-controlled changes that can help: raise `max_budget_usd` or narrow the supplied
+  prompt/context. Bumps the contract fingerprint to `claude-in-codex/0.1/schema-30` (#82).
+
 - Explicit per-call `max_budget_usd` values outside `$0.01-$5.00` are now rejected before
   Claude can launch instead of being silently clamped. Paid-tool input schemas publish both
   bounds, while result metadata distinguishes the raw requested/configured value from the
