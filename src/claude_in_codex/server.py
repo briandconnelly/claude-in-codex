@@ -852,7 +852,7 @@ async def claude_ask(
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Ask Claude a question or design choice, not a diff or adversarial attack.
+    """Get Claude's view on a question or design choice; not for diffs or attacks.
 
     Paid; sends context to Anthropic; blocks to timeout_seconds; cancellable;
     input is size-capped before spend. The server grants no Bash/write tools;
