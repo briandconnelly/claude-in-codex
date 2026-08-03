@@ -16,7 +16,12 @@ from claude_in_codex.server import (
     mcp,
 )
 
-PAID_TOOLS = ("claude_ask", "claude_review_changes", "claude_adversarial_review")
+PAID_TOOLS = (
+    "claude_ask",
+    "claude_review_changes",
+    "claude_adversarial_review",
+    "claude_review_changes_async",
+)
 
 
 def _patch_full_flag_support(monkeypatch):
@@ -187,6 +192,9 @@ async def test_capability_summary_declares_tier_and_blocking():
     summary = CAPABILITY_SUMMARY.lower()
     assert "experimental" in summary
     assert "cancel" in summary
+    assert "workspace hooks may run shell" in summary
+    for mode in ("inherit", "scoped", "safe", "bare"):
+        assert f"config_mode={mode}" in summary
     # Ceiling exists to keep first-read instructions compact; raised to 1100 to
     # accommodate the error-carrier disclosure (isError/ok:false envelope).
     assert len(CAPABILITY_SUMMARY) < 1100
@@ -201,6 +209,16 @@ async def test_tool_descriptions_are_concise_and_disambiguating():
     assert "background" in tools["claude_review_changes_async"].description
     assert "without deleting" in tools["claude_job_result"].description
     assert "delete the stored job record" in tools["claude_job_consume_result"].description
+
+
+async def test_paid_tool_descriptions_disclose_hook_boundary():
+    tools = await _tools_by_name()
+    for name in PAID_TOOLS:
+        description = " ".join((tools[name].description or "").lower().split())
+        assert "grants no bash/write tools" in description, name
+        assert "workspace hooks may run shell" in description, name
+        for mode in ("inherit", "scoped", "safe", "bare"):
+            assert f"config_mode={mode}" in description, name
 
 
 async def test_common_optional_params_are_described():
@@ -481,7 +499,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-27"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-28"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -838,14 +856,15 @@ async def test_adversarial_bad_base_ref_is_structured_error(fake_claude, monkeyp
 
 async def test_paid_tools_declare_cost_safety_hints():
     # Paid tools spend money and send context to Anthropic, so they are not
-    # read-only; they are non-destructive (no writes/shell) and non-idempotent
-    # (each call spends).
+    # read-only. Their static annotations describe the worst config-mode case:
+    # inherit/scoped hooks may run destructive shell commands. Each call spends,
+    # so it is non-idempotent.
     tools = await _tools_by_name()
     for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann is not None, name
         assert ann.readOnlyHint is False, name
-        assert ann.destructiveHint is False, name
+        assert ann.destructiveHint is True, name
         assert ann.idempotentHint is False, name
 
 
@@ -1131,7 +1150,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-27"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-28"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -2650,11 +2669,12 @@ async def test_annotation_contract():
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
     # Paid tools spend money and send context to Anthropic: not read-only,
-    # non-destructive, non-idempotent (each call spends), open-world.
-    for name in ("claude_ask", "claude_review_changes", "claude_adversarial_review"):
+    # destructive in the worst config-mode case because workspace hooks may run
+    # arbitrary shell, non-idempotent (each call spends), open-world.
+    for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann.readOnlyHint is False, name
-        assert ann.destructiveHint is False, name
+        assert ann.destructiveHint is True, name
         assert ann.idempotentHint is False, name
         assert ann.openWorldHint is True, name
     # Job polling performs lazy maintenance while reading (deadline kills, TTL
@@ -2681,4 +2701,9 @@ async def test_annotation_contract():
 def test_capabilities_documents_annotations_policy():
     policy = _capabilities_payload()["annotations_policy"]
     assert "readOnlyHint" in policy
+    assert "destructiveHint is true" in policy
+    assert "worst case across config modes" in policy
+    assert "workspace hooks" in policy
+    for mode in ("inherit", "scoped", "safe", "bare"):
+        assert f"config_mode={mode}" in policy
     assert "lazy maintenance" in policy
