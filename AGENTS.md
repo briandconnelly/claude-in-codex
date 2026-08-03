@@ -9,11 +9,19 @@ human explicitly asks for that change.
 
 - Work on a branch and open a pull request to `main`.
 - Do not push directly to protected refs.
+- GitHub writes from coding-agent sessions must use
+  `briandconnelly-agent[bot]`. Before the first commit, push, issue update, or
+  pull-request update, verify both the git identity and authenticated GitHub
+  actor. If bot routing is missing or token minting fails, stop; never fall back
+  to a human identity. See `AGENT_BOT_IDENTITY.md`.
 - Link the relevant issue or context in the PR description when available.
 - Preserve commit attribution. Sign commits when your local setup supports it.
   Add human co-authors when pairing.
 - Keep history linear; use squash or rebase merge methods.
 - After any post-review push, request fresh human review.
+- An agent must not merge a pull request it authored unless a human explicitly
+  authorizes that specific merge. The default handoff is an open, green pull
+  request for a human to review and merge.
 
 ## Review And Ownership
 
@@ -23,6 +31,8 @@ human explicitly asks for that change.
 - Do not self-approve, dismiss reviews to clear your own change, alter review
   requests to satisfy approval requirements, or enable auto-merge in a way that
   avoids human review.
+- Do not switch to human GitHub credentials from an agent session to approve,
+  merge, or otherwise update an agent-authored pull request.
 
 ## CI And Validation
 
