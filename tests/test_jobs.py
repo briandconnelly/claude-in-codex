@@ -174,15 +174,22 @@ def test_job_meta_non_branch_leaves_head_and_range_unset(tmp_path):
     assert payload["meta"].get("diff_range") is None
 
 
-def test_job_meta_carries_requested_budget_and_warning(tmp_path):
+def test_job_meta_carries_requested_and_effective_budget_and_warning(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(
-        _emit_cmd(), cwd, _cfg(workspace_source="cwd", requested_max_budget_usd=0.30)
+        _emit_cmd(),
+        cwd,
+        _cfg(
+            workspace_source="cwd",
+            configured_max_budget_usd=99.0,
+            effective_max_budget_usd=5.0,
+        ),
     )
     _await_done(cwd, job_id)
     payload, found = jobs.result(cwd, job_id)
     assert found is True
-    assert payload["meta"]["requested_max_budget_usd"] == 0.30
+    assert payload["meta"]["configured_max_budget_usd"] == 99.0
+    assert payload["meta"]["effective_max_budget_usd"] == 5.0
     # workspace_source=cwd must surface the footgun warning on the rebuilt job meta.
     assert "workspace_root" in payload["meta"]["workspace_warning"]
 

@@ -118,7 +118,9 @@ Poll with `claude_job_status`, then fetch the result with `claude_job_result`.
   more files. `access=readonly` lets Claude use `Read`, `Grep`, and `Glob` for extra context.
 - Secret redaction is best-effort defense in depth. Use `access=toolless` when a workspace may
   contain secrets.
-- `max_budget_usd` is a best-effort Claude CLI stop threshold, not a hard cap. Results report
+- Explicit `max_budget_usd` values must be between `$0.01` and `$5.00` inclusive and are
+  rejected outside that range. It is a best-effort Claude CLI stop threshold, not a hard cap.
+  Results distinguish the requested/configured threshold from the effective value and report
   actual spend in `meta.cost_usd` when available.
 - Reviews default to `effort=xhigh` for depth. Lower `effort` to `high` or `medium` for routine
   reviews when cost matters.

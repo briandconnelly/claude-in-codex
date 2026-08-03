@@ -20,6 +20,8 @@ def _meta():
         access="toolless",
         timeout_seconds=180,
         elapsed_ms=10,
+        configured_max_budget_usd=99.0,
+        effective_max_budget_usd=5.0,
         fingerprint=FINGERPRINT,
     )
 
@@ -34,3 +36,5 @@ def test_golden_envelope_parses_to_success_with_cost():
     assert out["meta"]["cost_usd"] == 0.0123
     assert out["meta"]["usage"]["input_tokens"] == 100
     assert out["meta"]["usage"]["cache_read_input_tokens"] == 10
+    assert out["meta"]["configured_max_budget_usd"] == 99.0
+    assert out["meta"]["effective_max_budget_usd"] == 5.0
