@@ -127,6 +127,10 @@ PRACTICAL_MIN_BUDGET_HINT = (
     "budget_exceeded."
 )
 
+_BUDGET_DESCRIPTION = (
+    "Best-effort Claude spend threshold ($0.01-$5.00); omit for configured default."
+)
+
 mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
 
 # readOnlyHint tracks observable effects, disclosed via annotations_policy in
@@ -205,6 +209,8 @@ def _meta(
     hint: str | None = None,
     workspace_source: str | None = None,
     requested_budget: float | None = None,
+    configured_budget: float | None = None,
+    effective_budget: float | None = None,
     redacted_paths: list[str] | None = None,
     compat_warnings: list[str] | None = None,
     security_warnings: list[str] | None = None,
@@ -232,6 +238,8 @@ def _meta(
         workspace_source=workspace_source,
         workspace_warning=workspace_warning_for(workspace_source, cwd),
         requested_max_budget_usd=requested_budget,
+        configured_max_budget_usd=configured_budget,
+        effective_max_budget_usd=effective_budget,
         redacted_paths=redacted_paths or [],
         compat_warnings=compat_warnings or [],
         security_warnings=security_warnings or [],
@@ -580,6 +588,8 @@ class Resolved:
     config_mode: str
     access: str
     model: str | None
+    requested_budget: float | None
+    configured_budget: float | None
     budget: float
     timeout: int
     detail: str
@@ -601,7 +611,7 @@ def _resolve(
     effort=None,
     head: str | None = None,
 ):
-    """Resolve env defaults + clamps and validate.
+    """Resolve env defaults, clamp environment values, and validate explicit values.
 
     Returns (Resolved, None) or (None, error_dict).
     """
@@ -609,10 +619,39 @@ def _resolve(
     cm = config_mode or d.config_mode
     ac = access or d.access
     mdl = model or d.model
-    budget = clamp_budget(max_budget_usd if max_budget_usd is not None else d.max_budget_usd)
+    requested_budget = max_budget_usd
+    configured_budget = d.max_budget_usd if max_budget_usd is None else None
+    budget = max_budget_usd if max_budget_usd is not None else clamp_budget(d.max_budget_usd)
     timeout = clamp_timeout(timeout_seconds if timeout_seconds is not None else d.timeout_seconds)
     det = detail if detail in ("summary", "full") else "summary"
     eff = effort if effort in VALID_EFFORTS else d.effort
+
+    # FastMCP enforces these bounds from each paid tool's inputSchema. Keep a
+    # defensive check here too so direct/internal callers can never silently
+    # raise or lower an explicit caller cap by bypassing argument validation.
+    if max_budget_usd is not None and not (MIN_BUDGET_USD <= max_budget_usd <= MAX_BUDGET_USD):
+        safe_meta = _meta(
+            cwd,
+            cm if cm in ("inherit", "scoped", "safe", "bare") else "inherit",
+            ac if ac in ("toolless", "readonly") else "toolless",
+            timeout,
+            0,
+            None,
+            scope,
+            base,
+            paths,
+            workspace_source=workspace_source,
+            requested_budget=requested_budget,
+            configured_budget=configured_budget,
+            head=head,
+        )
+        return None, _err(
+            "invalid_arguments",
+            f"max_budget_usd must be between {MIN_BUDGET_USD} and {MAX_BUDGET_USD} inclusive.",
+            "Set max_budget_usd within the published inputSchema bounds, then retry.",
+            safe_meta,
+            offending="max_budget_usd",
+        )
 
     # Validate before building Meta (Meta uses Literal types — invalid values
     # would raise Pydantic errors before we can return a structured response).
@@ -628,7 +667,9 @@ def _resolve(
             base,
             paths,
             workspace_source=workspace_source,
-            requested_budget=budget,
+            requested_budget=requested_budget,
+            configured_budget=configured_budget,
+            effective_budget=budget,
             head=head,
         )
         return None, _err(
@@ -651,7 +692,9 @@ def _resolve(
             base,
             paths,
             workspace_source=workspace_source,
-            requested_budget=budget,
+            requested_budget=requested_budget,
+            configured_budget=configured_budget,
+            effective_budget=budget,
             head=head,
         )
         return None, _err(
@@ -677,7 +720,9 @@ def _resolve(
                 base,
                 paths,
                 workspace_source=workspace_source,
-                requested_budget=budget,
+                requested_budget=requested_budget,
+                configured_budget=configured_budget,
+                effective_budget=budget,
                 head=head,
             )
             return None, _err(
@@ -700,7 +745,9 @@ def _resolve(
         base,
         paths,
         workspace_source=workspace_source,
-        requested_budget=budget,
+        requested_budget=requested_budget,
+        configured_budget=configured_budget,
+        effective_budget=budget,
         security_warnings=hook_security_warnings(cwd, cm),
         head=head,
     )
@@ -712,7 +759,17 @@ def _resolve(
             meta,
             offending="config_mode",
         )
-    return Resolved(cm, ac, mdl, budget, timeout, det, eff), None
+    return Resolved(
+        cm,
+        ac,
+        mdl,
+        requested_budget,
+        configured_budget,
+        budget,
+        timeout,
+        det,
+        eff,
+    ), None
 
 
 def _resolve_config_mode_only(
@@ -796,7 +853,9 @@ async def _execute(
         base,
         paths,
         workspace_source=workspace_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
         redacted_paths=redacted_paths,
         compat_warnings=dropped,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
@@ -844,7 +903,8 @@ async def claude_ask(
         ),
     ] = None,
     max_budget_usd: Annotated[
-        float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
+        float | None,
+        Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
     ] = None,
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
@@ -887,7 +947,9 @@ async def claude_ask(
         0,
         None,
         workspace_source=ws_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
     )
     too_large = _validate_input_size(payload, meta)
     if too_large:
@@ -934,7 +996,8 @@ async def claude_review_changes(
         ),
     ] = None,
     max_budget_usd: Annotated[
-        float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
+        float | None,
+        Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
     ] = None,
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
@@ -984,7 +1047,9 @@ async def claude_review_changes(
         base,
         paths,
         workspace_source=ws_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
         head=head,
     )
     if head is not None and scope != "branch":
@@ -1014,7 +1079,9 @@ async def claude_review_changes(
             truncated=True,
             hint=ctx_data.truncation_hint,
             workspace_source=ws_source,
-            requested_budget=r.budget,
+            requested_budget=r.requested_budget,
+            configured_budget=r.configured_budget,
+            effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             head=head,
         )
@@ -1037,7 +1104,9 @@ async def claude_review_changes(
         base,
         effective_paths,
         workspace_source=ws_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         head=head,
@@ -1106,7 +1175,8 @@ async def claude_adversarial_review(
         ),
     ] = None,
     max_budget_usd: Annotated[
-        float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
+        float | None,
+        Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
     ] = None,
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
@@ -1157,7 +1227,9 @@ async def claude_adversarial_review(
         base,
         paths,
         workspace_source=ws_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
         head=head,
     )
     if paths and not scope:
@@ -1195,7 +1267,9 @@ async def claude_adversarial_review(
             base,
             effective_paths,
             workspace_source=ws_source,
-            requested_budget=r.budget,
+            requested_budget=r.requested_budget,
+            configured_budget=r.configured_budget,
+            effective_budget=r.budget,
             head=head,
         )
         try:
@@ -1229,7 +1303,9 @@ async def claude_adversarial_review(
                 truncated=True,
                 hint=ctx_data.truncation_hint,
                 workspace_source=ws_source,
-                requested_budget=r.budget,
+                requested_budget=r.requested_budget,
+                configured_budget=r.configured_budget,
+                effective_budget=r.budget,
                 redacted_paths=ctx_data.redacted_paths,
                 head=head,
             )
@@ -1252,7 +1328,9 @@ async def claude_adversarial_review(
             base,
             effective_paths,
             workspace_source=ws_source,
-            requested_budget=r.budget,
+            requested_budget=r.requested_budget,
+            configured_budget=r.configured_budget,
+            effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             head=head,
         )
@@ -1342,7 +1420,8 @@ async def claude_review_changes_async(
         Effort | None, Field(description="Reasoning effort: low|medium|high|xhigh|max.")
     ] = None,
     max_budget_usd: Annotated[
-        float | None, Field(description="Per-call Claude spend cap; clamped by server limits.")
+        float | None,
+        Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
     ] = None,
     detail: Annotated[Detail, Field(description="summary|full")] = "summary",
     idempotency_key: Annotated[
@@ -1407,7 +1486,9 @@ async def claude_review_changes_async(
         base,
         paths,
         workspace_source=ws_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
         head=head,
     )
     if head is not None and scope != "branch":
@@ -1437,7 +1518,9 @@ async def claude_review_changes_async(
             truncated=True,
             hint=ctx_data.truncation_hint,
             workspace_source=ws_source,
-            requested_budget=r.budget,
+            requested_budget=r.requested_budget,
+            configured_budget=r.configured_budget,
+            effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             head=head,
         )
@@ -1460,7 +1543,9 @@ async def claude_review_changes_async(
         base,
         effective_paths,
         workspace_source=ws_source,
-        requested_budget=r.budget,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
         head=head,
     )
@@ -1485,7 +1570,9 @@ async def claude_review_changes_async(
         timeout_seconds=jobs.max_seconds(),
         workspace_source=ws_source,
         context_summary=ctx_data.summary,
-        requested_max_budget_usd=r.budget,
+        requested_max_budget_usd=r.requested_budget,
+        configured_max_budget_usd=r.configured_budget,
+        effective_max_budget_usd=r.budget,
         paths=effective_paths,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
@@ -1571,7 +1658,9 @@ async def claude_review_changes_async(
             base,
             effective_paths,
             workspace_source=ws_source,
-            requested_budget=r.budget,
+            requested_budget=r.requested_budget,
+            configured_budget=r.configured_budget,
+            effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             compat_warnings=dropped,
             security_warnings=hook_security_warnings(cwd, r.config_mode),

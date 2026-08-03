@@ -238,6 +238,17 @@ async def test_common_optional_params_are_described():
         assert tools[name].inputSchema["properties"]["paths"]["description"]
 
 
+async def test_paid_tools_publish_budget_bounds():
+    tools = await _tools_by_name()
+    for name in PAID_TOOLS:
+        prop = tools[name].inputSchema["properties"]["max_budget_usd"]
+        number_schema = next(
+            branch for branch in prop.get("anyOf", [prop]) if branch.get("type") == "number"
+        )
+        assert number_schema["minimum"] == 0.01, name
+        assert number_schema["maximum"] == 5.0, name
+
+
 async def test_status_reports_config_modes(monkeypatch):
     import claude_in_codex.server as srv
 
@@ -499,7 +510,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-28"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-29"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -595,7 +606,9 @@ async def test_status_reports_resolved_defaults(monkeypatch):
     monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_BUDGET_USD", "99")  # above clamp
     async with Client(mcp) as client:
         result = await client.call_tool("claude_status", {})
-    rd = structured(result)["resolved_defaults"]
+    data = structured(result)
+    assert data["raw_defaults"]["max_budget_usd"] == 99.0
+    rd = data["resolved_defaults"]
     assert rd["config_mode"] == "scoped"
     assert rd["access"] == "toolless"
     assert rd["effort"] == "xhigh"  # depth-first default effort
@@ -1150,7 +1163,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-28"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-29"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1589,6 +1602,21 @@ async def test_meta_echoes_requested_budget(fake_claude, monkeypatch, git_repo):
             await client.call_tool("claude_ask", {"prompt": "x", "max_budget_usd": 0.25})
         )
     assert data["meta"]["requested_max_budget_usd"] == 0.25
+    assert data["meta"]["effective_max_budget_usd"] == 0.25
+    assert "configured_max_budget_usd" not in data["meta"]
+
+
+async def test_meta_distinguishes_raw_env_budget_from_effective_budget(
+    fake_claude, monkeypatch, git_repo
+):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_BUDGET_USD", "99")
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool("claude_ask", {"prompt": "x", "workspace_root": str(git_repo)})
+        )
+    assert "requested_max_budget_usd" not in data["meta"]
+    assert data["meta"]["configured_max_budget_usd"] == 99.0
+    assert data["meta"]["effective_max_budget_usd"] == 5.0
 
 
 async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
@@ -2429,6 +2457,61 @@ async def test_invalid_enum_argument_returns_envelope():
     assert err["code"] == "invalid_arguments"
     assert err["offending_param"] == "scope"
     assert "working_tree" in err["repair"]
+
+
+@pytest.mark.parametrize("max_budget_usd", [0.0, -1.0, 5.01])
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("claude_ask", {"prompt": "x"}),
+        ("claude_review_changes", {"scope": "working_tree"}),
+        ("claude_adversarial_review", {"target": "x"}),
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+    ],
+)
+async def test_out_of_range_budget_is_rejected_before_paid_runner(
+    monkeypatch, tool, arguments, max_budget_usd
+):
+    import claude_in_codex.server as srv
+
+    async def fail_sync_runner(*args, **kwargs):
+        pytest.fail("out-of-range budget reached the synchronous paid runner")
+
+    def fail_async_runner(*args, **kwargs):
+        pytest.fail("out-of-range budget reached the background paid runner")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_sync_runner)
+    monkeypatch.setattr(srv.jobs, "start_job", fail_async_runner)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            tool,
+            {**arguments, "max_budget_usd": max_budget_usd},
+            raise_on_error=False,
+        )
+    assert result.is_error is True
+    error = structured(result)["error"]
+    assert error["code"] == "invalid_arguments"
+    assert error["offending_param"] == "max_budget_usd"
+
+
+@pytest.mark.parametrize("max_budget_usd", [0.0, -1.0, 5.01])
+def test_resolve_defensively_rejects_out_of_range_budget(max_budget_usd, tmp_path):
+    import claude_in_codex.server as srv
+
+    resolved, error = srv._resolve(
+        None,
+        None,
+        None,
+        max_budget_usd,
+        None,
+        "summary",
+        str(tmp_path),
+    )
+    assert resolved is None
+    assert error["error"]["code"] == "invalid_arguments"
+    assert error["error"]["offending_param"] == "max_budget_usd"
+    assert error["meta"]["requested_max_budget_usd"] == max_budget_usd
+    assert "effective_max_budget_usd" not in error["meta"]
 
 
 @pytest.mark.parametrize("job_id", ["../outside", "/tmp/outside", "A" * 32, "a" * 31])

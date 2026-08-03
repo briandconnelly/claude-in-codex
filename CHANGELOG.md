@@ -7,6 +7,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## 0.7.0 - 2026-08-03
 
+### Fixed
+
+- Explicit per-call `max_budget_usd` values outside `$0.01-$5.00` are now rejected before
+  Claude can launch instead of being silently clamped. Paid-tool input schemas publish both
+  bounds, while result metadata distinguishes the raw requested/configured value from the
+  effective value used after compatibility clamping of environment defaults (#92). Bumps the
+  contract fingerprint to `claude-in-codex/0.1/schema-29`.
+
 ### Added
 
 - Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-28`):

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-28"
+FINGERPRINT = "claude-in-codex/0.1/schema-29"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -164,10 +164,15 @@ class Meta(BaseModel):
     paths: list[str] | None = None
     timeout_seconds: int
     elapsed_ms: int
-    # The effective (env-defaulted + clamped) value passed to claude as
-    # --max-budget-usd. It is a best-effort stop threshold, not a hard cap; compare
-    # against cost_usd to see how close actual spend came.
+    # The explicit per-call argument. None when the caller omitted it and the
+    # configured default was used instead.
     requested_max_budget_usd: float | None = None
+    # The raw configured default used when no explicit argument was supplied.
+    # It may be outside the supported range and clamped for compatibility.
+    configured_max_budget_usd: float | None = None
+    # The value actually passed to claude as --max-budget-usd. It is a best-effort
+    # stop threshold, not a hard cap; compare against cost_usd for actual spend.
+    effective_max_budget_usd: float | None = None
     truncated: bool = False
     truncation_hint: str | None = None
     command_exit_code: int | None = None
@@ -442,7 +447,8 @@ _META_STUB = {
     "description": (
         "Execution metadata: cwd, workspace_source/warning, config_mode, access, "
         "scope, base/head/diff_range, paths, timeout_seconds, elapsed_ms, "
-        "requested_max_budget_usd, truncated/truncation_hint, command_exit_code, "
+        "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
+        "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
         "usage, job_id, request_id, fingerprint. Full contract: claude_capabilities."
     ),
