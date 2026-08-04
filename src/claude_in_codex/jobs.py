@@ -825,9 +825,13 @@ def _stderr_tail(jd: Path, meta: dict, limit: int = 200) -> str | None:
     return redact_text(text)[0][-limit:] or None
 
 
-def result(cwd: str, job_id: str, consume: bool = False):
+def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = None):
     """Return (payload, found). payload is the normalized SuccessResult|ErrorResult
-    dict; found is False when no such job exists."""
+    dict; found is False when no such job exists.
+
+    The raw envelope is stored, not the rendered result, so `detail` re-renders it
+    at fetch time: passing "full" recovers content a bounded summary truncated (#94)
+    without another paid call. None keeps the level the job was started with."""
     with _JOBS_LOCK:
         live = _read_live_job(cwd, job_id)
         if live is None:
@@ -841,7 +845,7 @@ def result(cwd: str, job_id: str, consume: bool = False):
                 meta.get("kind", "claude_review_changes"),
                 env_text,
                 _build_meta(meta),
-                detail=meta.get("config", {}).get("detail", "summary"),
+                detail=detail or meta.get("config", {}).get("detail", "summary"),
                 context_summary=ctx_summary,
             )
             if consume:

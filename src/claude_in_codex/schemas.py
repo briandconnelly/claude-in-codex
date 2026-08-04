@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-32"
+FINGERPRINT = "claude-in-codex/0.1/schema-33"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -22,6 +22,7 @@ FINGERPRINT_COVERS = [
     "error envelope shape (typed details and the repair action)",
     "async-lifecycle descriptor",
     "config_mode/access/scope/detail/effort value sets",
+    "detail-level field density, output bounds, and the truncation contract",
     "capability summary and capabilities payload",
 ]
 
@@ -145,6 +146,88 @@ class RawResponse(BaseModel):
     model: str | None = None
 
 
+# Output bounds (#94). `detail` is a field-density level, and summary is a strict
+# subset of full: identical field names and types, never an item or character full
+# does not also carry. Both levels are bounded server-side so a nominal summary
+# cannot consume an unexpected slice of the caller's context window, and neither
+# level can silently drop content — whatever a cap removes is reported in the
+# result's `truncation` block. Caps are per-field and measured after redaction, so
+# a bound can never re-expose a scrubbed secret.
+#
+# Sizing: the summary profile holds a worst-case result to roughly 6 KB of
+# structured text (~1.5k tokens); the full profile is the bounded fallback for a
+# result too large to relay whole, not a second opinion on how much detail to give.
+TRUNCATION_MARKER = "…[truncated]"
+
+
+class OutputBounds(BaseModel):
+    """Per-field caps for one `detail` level."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_findings: int
+    max_list_items: int  # questions / assumptions / next_steps, each
+    max_summary_chars: int
+    max_finding_title_chars: int
+    max_finding_text_chars: int  # evidence / risk / recommendation, each
+    max_list_item_chars: int
+    max_raw_text_chars: int
+
+
+OUTPUT_BOUNDS: dict[str, OutputBounds] = {
+    "summary": OutputBounds(
+        max_findings=10,
+        max_list_items=5,
+        max_summary_chars=1_200,
+        max_finding_title_chars=160,
+        max_finding_text_chars=400,
+        max_list_item_chars=300,
+        # summary omits raw_response.text entirely; the cap is inert there.
+        max_raw_text_chars=0,
+    ),
+    "full": OutputBounds(
+        max_findings=100,
+        max_list_items=50,
+        max_summary_chars=8_000,
+        max_finding_title_chars=400,
+        max_finding_text_chars=4_000,
+        max_list_item_chars=2_000,
+        max_raw_text_chars=100_000,
+    ),
+}
+
+
+class TruncatedField(BaseModel):
+    """One field a `detail`-level cap shortened."""
+
+    model_config = ConfigDict(extra="forbid")
+    # Dotted path into this result, e.g. "findings" or "raw_response.text".
+    field: str
+    unit: Literal["items", "chars"]
+    returned: int  # items/characters relayed, excluding the truncation marker
+    total: int  # items/characters the model produced before the cap
+
+
+class Truncation(BaseModel):
+    """Set only when a cap dropped content; absent means the result is complete.
+
+    Distinct from `meta.truncated`, which reports truncation of the INPUT diff
+    before the call. `fields` names every shortened field with exact counts, and
+    `next_step`/`tool`/`arguments` are the callable way to get the rest: for a
+    background-job result that is a free re-read via claude_job_result with
+    detail="full"; for a sync summary it is the same call re-issued with
+    detail="full" (paid, so `arguments` is omitted — the original call is yours to
+    rebuild). At detail="full" the caps are the relay ceiling, and the step is to
+    narrow scope/paths/focus and run a smaller review."""
+
+    model_config = ConfigDict(extra="forbid")
+    detail: Detail  # the level that produced this result
+    fields: list[TruncatedField]
+    next_step: Literal["call_tool", "retry_with_changes"]
+    tool: str | None = None
+    # Present only when literally callable as-is (the free job re-read).
+    arguments: dict | None = None
+
+
 class ContextSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     files_changed: int = 0
@@ -208,6 +291,8 @@ class SuccessResult(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
     raw_response: RawResponse = Field(default_factory=RawResponse)
     context_summary: ContextSummary | None = None
+    # Set only when a detail-level cap dropped content (#94); absent = complete.
+    truncation: Truncation | None = None
     meta: Meta
 
 
@@ -477,6 +562,22 @@ class AsyncLifecycle(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class DetailModes(BaseModel):
+    """The `detail` contract for every paid tool, in one machine-readable place."""
+
+    model_config = ConfigDict(extra="forbid")
+    levels: list[str]
+    default: Detail
+    # Fields present at full and absent at summary. Everything else is identical
+    # in name and type across the two levels.
+    full_only_fields: list[str]
+    # Level -> per-field caps. Applied after redaction, so a cap never re-exposes
+    # a scrubbed secret.
+    bounds: dict[str, OutputBounds]
+    truncation_marker: str
+    truncation: str
+
+
 class CapabilitiesResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
@@ -506,6 +607,10 @@ class CapabilitiesResult(BaseModel):
     argument_reconstruction: str
     # The background-job lifecycle, structurally.
     async_lifecycle: AsyncLifecycle
+    # The `detail` contract: which fields each level carries, the exact per-field
+    # caps, and how truncation is signalled and recovered. Published once here so
+    # the four paid tools advertise only a pointer (#94).
+    detail_modes: DetailModes
     # Machine-readable egress disclosure: where paid-tool context goes and the
     # precise limits of redaction. Mirrors the per-tool docstring notes.
     data_egress: str
@@ -678,6 +783,27 @@ _CAPABILITIES_SUBSTUBS = {
         "One tool: name, cost, use_when, required_params, key_optional_params, "
         "returns, error_codes."
     ),
+    "DetailModes": (
+        "The `detail` contract: levels, default, full_only_fields, per-level "
+        "bounds, truncation_marker, truncation (semantics and recovery)."
+    ),
+    "OutputBounds": (
+        "One level's caps: max_findings, max_list_items, max_summary_chars, "
+        "max_finding_title_chars, max_finding_text_chars, max_list_item_chars, "
+        "max_raw_text_chars."
+    ),
+}
+
+
+# Advertised Truncation slimming (#94): the block rides in every advertised
+# result union (7 records), and its own field docs are the same contract
+# claude_capabilities.detail_modes publishes once. The wire payload is unchanged.
+_TRUNCATION_STUB = {
+    "type": "object",
+    "description": (
+        "Set only when a detail cap dropped content; absent = complete result. "
+        "Shape, caps, and recovery: claude_capabilities.detail_modes."
+    ),
 }
 
 
@@ -732,6 +858,11 @@ def _slim(schema: dict) -> dict:
     # would pay for the same contract twice.
     for name in ("ErrorDetails", "RepairAction"):
         defs.pop(name, None)
+    if "Truncation" in defs:
+        defs["Truncation"] = dict(_TRUNCATION_STUB)
+        # TruncatedField only ever appears inside Truncation, which the stub above
+        # already describes field by field.
+        defs.pop("TruncatedField", None)
     # CapabilitiesResult is self-describing on the wire: its payload names every
     # field of these blocks, so advertising their full definitions to every client
     # that only wants the tool list is pure discovery cost.

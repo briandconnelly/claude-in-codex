@@ -11,7 +11,7 @@ from tests.conftest import structured
 
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.preflight import FlagSupport
-from claude_in_codex.schemas import ErrorCode, JobState
+from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
 from claude_in_codex.server import (
     _ERROR_CATALOG,
     _TOOL_ERROR_CODES,
@@ -558,7 +558,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-32"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-33"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1211,7 +1211,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-32"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-33"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -3050,3 +3050,98 @@ def test_capabilities_documents_annotations_policy():
     for mode in ("inherit", "scoped", "safe", "bare"):
         assert f"config_mode={mode}" in policy
     assert "lazy maintenance" in policy
+
+
+async def test_capabilities_publishes_the_detail_contract():
+    """The paid tools advertise only a pointer, so this must be the real home (#94).
+
+    Guards the failure the pointer would otherwise create: a `detail` description
+    that names claude_capabilities.detail_modes while that field says nothing
+    actionable about caps, subsetting, or recovery."""
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    modes = data["detail_modes"]
+    assert modes["levels"] == ["summary", "full"]
+    assert modes["default"] == "summary"
+    assert set(modes["full_only_fields"]) == {"raw_response.text", "context_summary"}
+    assert modes["truncation_marker"] == TRUNCATION_MARKER
+    # Every published cap must match the bounds the server actually enforces.
+    for level, bounds in OUTPUT_BOUNDS.items():
+        assert modes["bounds"][level] == bounds.model_dump(mode="json")
+    # summary must be the tighter level on every cap that is live at both levels.
+    summary, full = modes["bounds"]["summary"], modes["bounds"]["full"]
+    for cap in summary:
+        if cap == "max_raw_text_chars":
+            continue  # inert at summary, which omits raw_response.text entirely
+        assert summary[cap] < full[cap], cap
+    # The prose is the only home for the truncation block's shape and recovery.
+    for required in ("strict subset", "truncation{", "claude_job_result", "NEW PAID CALL"):
+        assert required in modes["truncation"], required
+
+
+async def test_paid_tool_detail_params_point_at_the_capability_contract():
+    tools = await _tools_by_name()
+    for name in (
+        "claude_ask",
+        "claude_review_changes",
+        "claude_adversarial_review",
+        "claude_review_changes_async",
+    ):
+        described = tools[name].inputSchema["properties"]["detail"]["description"]
+        assert "claude_capabilities.detail_modes" in described, name
+    for name in ("claude_job_result", "claude_job_consume_result"):
+        assert "detail" in tools[name].inputSchema["properties"], name
+
+
+async def test_job_result_accepts_a_detail_override_over_mcp(monkeypatch, git_repo, tmp_path):
+    """The next step a truncated job result hands back must be literally callable."""
+    import json as _json
+    import time as _time
+
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    inner = {"summary": "ok", "verdict": "pass", "confidence": "high", "findings": []}
+    envelope = _json.dumps(
+        {"type": "result", "subtype": "success", "is_error": False, "result": _json.dumps(inner)}
+    )
+    monkeypatch.setattr(
+        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+    )
+
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": str(git_repo), "detail": "summary"},
+            )
+        )
+        job_id = started["job_id"]
+        deadline = _time.time() + 5
+        while _time.time() < deadline:
+            status = structured(
+                await client.call_tool(
+                    "claude_job_status", {"job_id": job_id, "workspace_root": str(git_repo)}
+                )
+            )
+            if status["status"] == "done":
+                break
+            await anyio.sleep(0.05)
+        assert status["status"] == "done"
+        summary = structured(
+            await client.call_tool(
+                "claude_job_result", {"job_id": job_id, "workspace_root": str(git_repo)}
+            )
+        )
+        # These are exactly the arguments a truncated summary's truncation block
+        # publishes for recovery.
+        full = structured(
+            await client.call_tool(
+                "claude_job_result",
+                {"job_id": job_id, "detail": "full", "workspace_root": str(git_repo)},
+            )
+        )
+    assert summary["ok"] is True
+    assert "text" not in summary["raw_response"]
+    assert full["ok"] is True
+    assert full["raw_response"]["text"]

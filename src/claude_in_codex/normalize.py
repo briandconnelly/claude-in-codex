@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
 from claude_in_codex.context import redact_text, redact_tree
 from claude_in_codex.schemas import (
+    OUTPUT_BOUNDS,
+    TRUNCATION_MARKER,
     Confidence,
     ContextSummary,
+    Detail,
     ErrorInfo,
     ErrorResult,
     Finding,
     Meta,
+    OutputBounds,
     RawResponse,
     Severity,
     SuccessResult,
+    TruncatedField,
+    Truncation,
     Usage,
     Verdict,
     branch_range,
@@ -156,6 +162,134 @@ def _clean_findings(raw: Any) -> list[Finding]:
     return findings
 
 
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "nit": 4}
+
+# Order matters only for readability of the emitted `fields` list; the set is
+# fixed and small, so a truncation block can never itself grow unboundedly.
+_TRUNCATION_FIELD_ORDER = (
+    "summary",
+    "findings",
+    "findings[].title",
+    "findings[].evidence",
+    "findings[].risk",
+    "findings[].recommendation",
+    "questions",
+    "questions[]",
+    "assumptions",
+    "assumptions[]",
+    "next_steps",
+    "next_steps[]",
+    "raw_response.text",
+)
+
+
+class _Caps:
+    """Applies one detail level's caps and accumulates what they dropped.
+
+    Per-item string caps are aggregated under one collective path (e.g.
+    ``findings[].evidence``) rather than one entry per index, so the truncation
+    block stays a fixed size no matter how many items were shortened."""
+
+    def __init__(self, bounds: OutputBounds) -> None:
+        self.bounds = bounds
+        # path -> (unit, returned, total), summed across every item under that path.
+        self._dropped: dict[str, list[Any]] = {}
+
+    def _record(self, path: str, unit: str, returned: int, total: int) -> None:
+        entry = self._dropped.setdefault(path, [unit, 0, 0])
+        entry[1] += returned
+        entry[2] += total
+
+    def text(self, value: str, limit: int, path: str) -> str:
+        """Cap one string, appending a visible marker so truncation is legible inline.
+
+        `returned` counts relayed content characters and excludes the marker."""
+        if len(value) <= limit:
+            return value
+        self._record(path, "chars", limit, len(value))
+        return value[:limit] + TRUNCATION_MARKER
+
+    def items(self, values: list, limit: int, path: str) -> list:
+        if len(values) <= limit:
+            return values
+        self._record(path, "items", limit, len(values))
+        return values[:limit]
+
+    def fields(self) -> list[TruncatedField]:
+        return [
+            TruncatedField(
+                field=path,
+                unit=cast("Literal['items', 'chars']", self._dropped[path][0]),
+                returned=self._dropped[path][1],
+                total=self._dropped[path][2],
+            )
+            for path in _TRUNCATION_FIELD_ORDER
+            if path in self._dropped
+        ]
+
+
+def _bound_result(result: SuccessResult, tool: str, detail: str) -> None:
+    """Bound a result to its detail level, recording anything a cap dropped (#94).
+
+    Findings are ordered most-severe-first (stable within a severity) in BOTH
+    modes, so a cap drops the least severe finding rather than an arbitrary one and
+    the two modes agree on ordering. Caps run after redaction, so shortening a
+    string can never re-expose a scrubbed secret."""
+    bounds = OUTPUT_BOUNDS.get(detail, OUTPUT_BOUNDS["summary"])
+    caps = _Caps(bounds)
+
+    result.summary = caps.text(result.summary, bounds.max_summary_chars, "summary")
+
+    result.findings.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, len(_SEVERITY_RANK)))
+    result.findings = caps.items(result.findings, bounds.max_findings, "findings")
+    for finding in result.findings:
+        finding.title = caps.text(finding.title, bounds.max_finding_title_chars, "findings[].title")
+        for attr in ("evidence", "risk", "recommendation"):
+            setattr(
+                finding,
+                attr,
+                caps.text(
+                    getattr(finding, attr), bounds.max_finding_text_chars, f"findings[].{attr}"
+                ),
+            )
+
+    for name in ("questions", "assumptions", "next_steps"):
+        values = caps.items(getattr(result, name), bounds.max_list_items, name)
+        setattr(
+            result,
+            name,
+            [caps.text(v, bounds.max_list_item_chars, f"{name}[]") for v in values],
+        )
+
+    if result.raw_response.text is not None:
+        result.raw_response.text = caps.text(
+            result.raw_response.text, bounds.max_raw_text_chars, "raw_response.text"
+        )
+
+    dropped = caps.fields()
+    if not dropped:
+        return
+    if detail == "summary" and result.meta.job_id:
+        # A stored job record can be re-read at full detail for free — no respend.
+        result.truncation = Truncation(
+            detail="summary",
+            fields=dropped,
+            next_step="call_tool",
+            tool="claude_job_result",
+            arguments={"job_id": result.meta.job_id, "detail": "full"},
+        )
+        return
+    # Sync summary: re-issuing the call with detail="full" is a PAID call, so the
+    # arguments are deliberately not echoed back as if they were free to replay.
+    # At detail="full" the caps are the relay ceiling; narrow the request instead.
+    result.truncation = Truncation(
+        detail=cast("Detail", detail if detail in OUTPUT_BOUNDS else "summary"),
+        fields=dropped,
+        next_step="retry_with_changes",
+        tool=tool,
+    )
+
+
 def _error(info: ErrorInfo, meta: Meta) -> dict:
     return ErrorResult(error=info, meta=meta).model_dump(mode="json", exclude_none=True)
 
@@ -261,6 +395,7 @@ def normalize_envelope(
         )
         if denials:
             result.meta.permission_denials = denials
+        _bound_result(result, tool, detail)
         return result.model_dump(mode="json", exclude_none=True)
 
     result = SuccessResult(
@@ -278,4 +413,5 @@ def normalize_envelope(
     )
     if denials:
         result.meta.permission_denials = denials
+    _bound_result(result, tool, detail)
     return result.model_dump(mode="json", exclude_none=True)

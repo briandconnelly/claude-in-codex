@@ -3,7 +3,13 @@ import json
 import pytest
 
 from claude_in_codex.normalize import build_prompt, extract_json, normalize_envelope
-from claude_in_codex.schemas import FINGERPRINT, Meta
+from claude_in_codex.schemas import (
+    FINGERPRINT,
+    OUTPUT_BOUNDS,
+    TRUNCATION_MARKER,
+    ContextSummary,
+    Meta,
+)
 
 
 def _meta():
@@ -540,3 +546,159 @@ def test_permission_denials_secret_in_dict_key_is_redacted_in_meta():
     )
     out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
     assert _SECRET not in json.dumps(out["meta"]["permission_denials"])
+
+
+# --- detail-level bounds (#94) -------------------------------------------------
+
+
+def _finding(severity="low", title="t", text="e"):
+    return {
+        "severity": severity,
+        "title": title,
+        "evidence": text,
+        "risk": "r",
+        "recommendation": "rec",
+    }
+
+
+def _bulk_inner(n_findings=0, n_items=0, summary="ok", severity="low", text="e"):
+    return {
+        "summary": summary,
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [_finding(severity, f"t{i}", text) for i in range(n_findings)],
+        "questions": [f"q{i}" for i in range(n_items)],
+        "assumptions": [f"a{i}" for i in range(n_items)],
+        "next_steps": [f"s{i}" for i in range(n_items)],
+    }
+
+
+def test_bounds_are_inert_for_a_small_result():
+    """The instrument must be able to report 'not truncated' — otherwise every
+    assertion below would pass against a function that truncates unconditionally."""
+    res = normalize_envelope("claude_ask", _env(_bulk_inner(2, 2)), _meta(), detail="summary")
+    assert "truncation" not in res
+    assert len(res["findings"]) == 2
+    assert res["questions"] == ["q0", "q1"]
+
+
+def test_summary_caps_findings_and_lists_and_reports_counts():
+    bounds = OUTPUT_BOUNDS["summary"]
+    over = bounds.max_findings + 4
+    res = normalize_envelope(
+        "claude_ask", _env(_bulk_inner(over, bounds.max_list_items + 3)), _meta(), detail="summary"
+    )
+    assert len(res["findings"]) == bounds.max_findings
+    for name in ("questions", "assumptions", "next_steps"):
+        assert len(res[name]) == bounds.max_list_items
+    reported = {f["field"]: f for f in res["truncation"]["fields"]}
+    assert reported["findings"] == {
+        "field": "findings",
+        "unit": "items",
+        "returned": bounds.max_findings,
+        "total": over,
+    }
+    assert reported["questions"]["total"] == bounds.max_list_items + 3
+
+
+def test_summary_caps_strings_and_marks_them():
+    bounds = OUTPUT_BOUNDS["summary"]
+    long_summary = "S" * (bounds.max_summary_chars + 50)
+    long_evidence = "E" * (bounds.max_finding_text_chars + 10)
+    inner = _bulk_inner(2, 0, summary=long_summary, text=long_evidence)
+    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    assert res["summary"] == "S" * bounds.max_summary_chars + TRUNCATION_MARKER
+    assert res["findings"][0]["evidence"].endswith(TRUNCATION_MARKER)
+    reported = {f["field"]: f for f in res["truncation"]["fields"]}
+    assert reported["summary"] == {
+        "field": "summary",
+        "unit": "chars",
+        "returned": bounds.max_summary_chars,
+        "total": len(long_summary),
+    }
+    # Per-item string caps aggregate under one collective path, so the truncation
+    # block cannot itself grow with the number of items it describes.
+    assert reported["findings[].evidence"]["returned"] == 2 * bounds.max_finding_text_chars
+    assert reported["findings[].evidence"]["total"] == 2 * len(long_evidence)
+
+
+def test_summary_is_a_strict_subset_of_full():
+    bounds = OUTPUT_BOUNDS["summary"]
+    inner = _bulk_inner(bounds.max_findings + 5, bounds.max_list_items + 5, severity="high")
+    env = _env(inner)
+    ctx = ContextSummary(files_changed=1, lines_added=2, lines_removed=3)
+    summary = normalize_envelope("claude_ask", env, _meta(), "summary", ctx)
+    full = normalize_envelope("claude_ask", env, _meta(), "full", ctx)
+    # Same field names and types; full adds only the documented full-only fields.
+    # `truncation` is metadata ABOUT the bounding, not content, so it is compared
+    # separately below.
+    content = lambda r: set(r) - {"truncation"}  # noqa: E731
+    assert content(summary) <= content(full)
+    assert content(full) - content(summary) == {"context_summary"}
+    assert "text" in full["raw_response"] and "text" not in summary["raw_response"]
+    # Every summary item is an item full also carries, in the same order.
+    assert summary["findings"] == full["findings"][: len(summary["findings"])]
+    for name in ("questions", "assumptions", "next_steps"):
+        assert summary[name] == full[name][: len(summary[name])]
+    assert "truncation" not in full  # the same result fits inside the full caps
+
+
+def test_findings_are_ordered_most_severe_first_so_caps_drop_the_least_severe():
+    bounds = OUTPUT_BOUNDS["summary"]
+    order = ["nit", "low", "medium", "high", "critical"]
+    findings = [_finding(order[i % len(order)], f"t{i}") for i in range(bounds.max_findings + 5)]
+    inner = {"summary": "x", "verdict": "pass", "confidence": "high", "findings": findings}
+    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    severities = [f["severity"] for f in res["findings"]]
+    assert severities == sorted(severities, key=["critical", "high", "medium", "low", "nit"].index)
+    assert "critical" in severities
+    assert "nit" not in severities  # the cap dropped the least severe, not an arbitrary one
+
+
+def test_full_mode_bounds_raw_text_and_reports_it():
+    bounds = OUTPUT_BOUNDS["full"]
+    huge = "x" * (bounds.max_raw_text_chars + 100)
+    res = normalize_envelope("claude_ask", _env(huge), _meta(), detail="full")
+    assert len(res["raw_response"]["text"]) == bounds.max_raw_text_chars + len(TRUNCATION_MARKER)
+    reported = {f["field"]: f for f in res["truncation"]["fields"]}
+    assert reported["raw_response.text"]["total"] == len(huge)
+    assert res["truncation"]["detail"] == "full"
+
+
+def test_sync_truncation_next_step_does_not_offer_a_free_replay():
+    bounds = OUTPUT_BOUNDS["summary"]
+    res = normalize_envelope(
+        "claude_review_changes",
+        _env(_bulk_inner(bounds.max_findings + 1)),
+        _meta(),
+        detail="summary",
+    )
+    trunc = res["truncation"]
+    assert trunc["next_step"] == "retry_with_changes"
+    assert trunc["tool"] == "claude_review_changes"
+    # Re-issuing a sync call is a NEW PAID call, so no callable arguments.
+    assert "arguments" not in trunc
+
+
+def test_job_backed_truncation_points_at_the_free_full_reread():
+    bounds = OUTPUT_BOUNDS["summary"]
+    meta = _meta()
+    meta.job_id = "0" * 32
+    res = normalize_envelope(
+        "claude_review_changes", _env(_bulk_inner(bounds.max_findings + 1)), meta, detail="summary"
+    )
+    trunc = res["truncation"]
+    assert trunc["next_step"] == "call_tool"
+    assert trunc["tool"] == "claude_job_result"
+    assert trunc["arguments"] == {"job_id": "0" * 32, "detail": "full"}
+
+
+def test_bounds_run_after_redaction_so_a_cap_cannot_re_expose_a_secret():
+    bounds = OUTPUT_BOUNDS["summary"]
+    secret = "sk-ant-api03-" + "A" * 95
+    inner = _bulk_inner(0, 0, summary=secret + " " + "B " * bounds.max_summary_chars)
+    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    assert secret not in res["summary"]
+    # The cap fired, and still no fragment of the secret survives at its edge.
+    assert res["truncation"]["fields"][0]["field"] == "summary"
+    assert "sk-ant" not in res["summary"]

@@ -125,6 +125,28 @@ def test_job_done_returns_normalized_result(tmp_path):
     assert payload["meta"]["cost_usd"] == 0.0123
 
 
+def test_job_result_detail_re_renders_the_stored_envelope(tmp_path):
+    """A truncated background summary is recoverable at full detail for free (#94).
+
+    The stored artifact is the raw claude envelope, not a rendered result, so the
+    same record answers both densities without another paid call."""
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg(detail="summary"))
+    _await_done(cwd, job_id)
+
+    summary, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert "text" not in summary["raw_response"]  # the job's own level still applies
+
+    full, found = jobs.result(cwd, job_id, detail="full")
+    assert found is True
+    assert full["raw_response"]["text"]
+    assert full["verdict"] == summary["verdict"]
+    # Non-destructive: the override does not rewrite the record's own level.
+    again, _ = jobs.result(cwd, job_id)
+    assert "text" not in again["raw_response"]
+
+
 def test_start_job_sends_stdin_without_argv_prompt(tmp_path):
     cwd = str(tmp_path)
     cmd = ["sh", "-c", "cat"]

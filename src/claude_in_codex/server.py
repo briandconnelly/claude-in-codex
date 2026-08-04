@@ -71,14 +71,17 @@ from claude_in_codex.schemas import (
     JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
     MODEL_CATALOG_SCHEMA,
+    OUTPUT_BOUNDS,
     RESULT_SCHEMA,
     STATUS_SCHEMA,
+    TRUNCATION_MARKER,
     Access,
     AsyncLifecycle,
     CapabilitiesResult,
     Confidence,
     ConfigMode,
     Detail,
+    DetailModes,
     DryRunResult,
     Effort,
     ErrorCode,
@@ -134,6 +137,19 @@ PRACTICAL_MIN_BUDGET_HINT = (
 
 _BUDGET_DESCRIPTION = (
     "Best-effort Claude spend threshold ($0.01-$5.00); omit for configured default."
+)
+
+# Field-density level, not a content selector: summary is a strict subset of full
+# (#94). Exact caps live in claude_capabilities.detail_modes so the four paid tools
+# do not each pay to advertise them.
+_DETAIL_DESCRIPTION = (
+    "Field density; summary (default) is a bounded strict subset of full, dropping "
+    "only raw_response.text and context_summary. Caps and truncation semantics: "
+    "claude_capabilities.detail_modes."
+)
+
+_JOB_DETAIL_DESCRIPTION = (
+    "Re-render the stored result at this density (free); omit to keep the job's own."
 )
 
 mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
@@ -1029,7 +1045,7 @@ async def claude_ask(
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
-    detail: Annotated[Detail, Field(description="summary|full")] = "summary",
+    detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
     """Get Claude's view on a question or design choice; not for diffs or attacks.
@@ -1122,7 +1138,7 @@ async def claude_review_changes(
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
-    detail: Annotated[Detail, Field(description="summary|full")] = "summary",
+    detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
     """Review a working_tree, staged, or branch git diff with Claude (blocking).
@@ -1303,7 +1319,7 @@ async def claude_adversarial_review(
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
-    detail: Annotated[Detail, Field(description="summary|full")] = "summary",
+    detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
     """Have Claude attack a plan or decision; optionally attach a diff.
@@ -1547,7 +1563,7 @@ async def claude_review_changes_async(
         float | None,
         Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
     ] = None,
-    detail: Annotated[Detail, Field(description="summary|full")] = "summary",
+    detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     idempotency_key: Annotated[
         str | None,
         Field(
@@ -1845,21 +1861,22 @@ async def claude_job_result(
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
     ] = None,
+    detail: Annotated[Detail | None, Field(description=_JOB_DETAIL_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
     """Fetch a finished background review without deleting the job record.
-    Polling performs lazy maintenance: an overdue job is killed and marked
-    timeout, and TTL-expired records are deleted; a terminal job's stored
-    result is never altered.
+    Polling lazily reaps: an overdue job is killed and marked timeout, and
+    TTL-expired records deleted; a terminal result is never altered.
 
-    Use when claude_job_status reports result_available=true. Returns the same
-    structured envelope as claude_review_changes, with meta.job_id set. Use
-    claude_job_consume_result to fetch and delete instead.
+    Use when claude_job_status reports result_available=true. Returns the
+    claude_review_changes envelope with meta.job_id set. Free: detail="full"
+    re-renders it, recovering a truncated summary without spending.
+    claude_job_consume_result deletes.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root, ws_roots))
-    payload, found = await run_sync(lambda: jobs.result(cwd, job_id, False))
+    payload, found = await run_sync(lambda: jobs.result(cwd, job_id, False, detail))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
         return _result(_job_not_found_error(job_id, meta))
@@ -1880,6 +1897,7 @@ async def claude_job_consume_result(
         str | None,
         Field(description="Workspace the job belongs to (defaults like the async tools)."),
     ] = None,
+    detail: Annotated[Detail | None, Field(description=_JOB_DETAIL_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
     """Fetch a finished background review and delete the stored job record.
@@ -1887,12 +1905,12 @@ async def claude_job_consume_result(
     Use only when you no longer need to poll or re-read the job. Returns the same
     structured envelope as claude_job_result, then deletes completed job state.
     Non-done jobs are not deleted. Deletion is irreversible; the result cannot be
-    re-fetched afterward.
+    re-fetched afterward — pass detail="full" here if a summary was truncated.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
         return _result(_workspace_error(ws_err, workspace_root, ws_roots))
-    payload, found = await run_sync(lambda: jobs.result(cwd, job_id, True))
+    payload, found = await run_sync(lambda: jobs.result(cwd, job_id, True, detail))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
         return _result(_job_not_found_error(job_id, meta))
@@ -2525,6 +2543,33 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
 ]
 
 
+_DETAIL_MODES = DetailModes(
+    levels=["summary", "full"],
+    default="summary",
+    full_only_fields=["raw_response.text", "context_summary"],
+    bounds=OUTPUT_BOUNDS,
+    truncation_marker=TRUNCATION_MARKER,
+    truncation=(
+        "summary is a strict subset of full: identical field names and types, never "
+        "an item or character full does not also carry. Both levels are bounded, so "
+        "no result grows without limit, and nothing is dropped silently. A result "
+        "that hit a cap carries truncation{detail, fields[{field, unit:items|chars, "
+        "returned, total}], next_step:call_tool|retry_with_changes, tool, arguments}; "
+        "an absent block means the result is complete. `field` is a dotted path into "
+        "the result, and per-item string caps are aggregated under one collective "
+        "path (e.g. findings[].evidence) so the block itself stays bounded; "
+        "`returned` excludes the truncation_marker appended to a shortened string. "
+        "findings are ordered most-severe-first at both levels, so an item cap drops "
+        "the least severe finding, never an arbitrary one. Recovery: a background-job "
+        "result re-reads for free via claude_job_result with detail=full, and there "
+        "`arguments` is literally callable; a sync summary must be re-issued with "
+        "detail=full, which is a NEW PAID CALL, so `arguments` is deliberately "
+        "omitted rather than offered as a free replay. At detail=full the caps are "
+        "the relay ceiling — narrow scope, paths, or focus and run a smaller review. "
+        "Distinct from meta.truncated, which reports truncation of the input diff."
+    ),
+)
+
 _ASYNC_LIFECYCLE = AsyncLifecycle(
     start_tools=["claude_review_changes_async"],
     status_tool="claude_job_status",
@@ -2775,6 +2820,7 @@ def _capabilities_payload() -> dict:
             "action.next_step first."
         ),
         async_lifecycle=_ASYNC_LIFECYCLE,
+        detail_modes=_DETAIL_MODES,
         data_egress=(
             "Paid tools (claude_ask, claude_review_changes, claude_adversarial_review, "
             "claude_review_changes_async) send context to Anthropic via the `claude` CLI. "
