@@ -793,13 +793,23 @@ async def test_review_changes_empty_diff_skips_paid_call(monkeypatch, git_repo):
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_review_changes", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo), "detail": "full"},
+        )
+        # The unspent path honors `detail` like a real result: context_summary is
+        # a full-only field, so summary mode must not leak it (#94).
+        at_summary = structured(
+            await client.call_tool(
+                "claude_review_changes", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            )
         )
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "pass"
     assert "No changes" in data["summary"]
     assert data["context_summary"]["files_changed"] == 0
+    assert "context_summary" not in at_summary
+    assert at_summary["summary"] == data["summary"]
 
 
 async def test_review_changes_empty_filtered_diff_is_transparent(monkeypatch, git_repo):
@@ -812,7 +822,12 @@ async def test_review_changes_empty_filtered_diff_is_transparent(monkeypatch, gi
     async with Client(mcp) as client:
         result = await client.call_tool(
             "claude_review_changes",
-            {"scope": "working_tree", "paths": ["missing.py"], "workspace_root": str(git_repo)},
+            {
+                "scope": "working_tree",
+                "paths": ["missing.py"],
+                "workspace_root": str(git_repo),
+                "detail": "full",
+            },
         )
     data = structured(result)
     assert data["ok"] is True
@@ -849,7 +864,12 @@ async def test_adversarial_empty_attached_diff_skips_paid_call(monkeypatch, git_
     async with Client(mcp) as client:
         result = await client.call_tool(
             "claude_adversarial_review",
-            {"target": "review plan", "scope": "working_tree", "workspace_root": str(git_repo)},
+            {
+                "target": "review plan",
+                "scope": "working_tree",
+                "workspace_root": str(git_repo),
+                "detail": "full",
+            },
         )
     data = structured(result)
     assert data["ok"] is True

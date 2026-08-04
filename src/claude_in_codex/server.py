@@ -703,7 +703,15 @@ def _empty_diff_result(
     paths: list[str] | None = None,
     verdict: Verdict = "pass",
     confidence: Confidence = "high",
+    detail: str = "full",
 ) -> dict:
+    """The unspent result for a scope that matched no changes.
+
+    Honors `detail` for the same reason a real result does: context_summary is a
+    full-only field (#94), and a success path that leaked it at summary would
+    break the strict-subset guarantee claude_capabilities.detail_modes publishes.
+    Nothing is lost by dropping it here — an empty diff's counts are all zero, and
+    the summary text already says so."""
     summary = "No changes in scope; skipped Claude call."
     if paths:
         summary = "No changes matched paths; skipped Claude call."
@@ -713,7 +721,7 @@ def _empty_diff_result(
         verdict=verdict,
         confidence=confidence,
         raw_response=RawResponse(),
-        context_summary=context_summary,
+        context_summary=context_summary if detail == "full" else None,
         meta=meta,
     )
     return result.model_dump(mode="json", exclude_none=True)
@@ -1251,7 +1259,9 @@ async def claude_review_changes(
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         return _result(
-            _empty_diff_result("claude_review_changes", meta, ctx_data.summary, effective_paths)
+            _empty_diff_result(
+                "claude_review_changes", meta, ctx_data.summary, effective_paths, detail=r.detail
+            )
         )
     out = await _execute(
         "claude_review_changes",
@@ -1483,6 +1493,7 @@ async def claude_adversarial_review(
                     effective_paths,
                     verdict="unknown",
                     confidence="low",
+                    detail=r.detail,
                 )
             )
         context_text, context_summary = ctx_data.text, ctx_data.summary
@@ -1693,7 +1704,9 @@ async def claude_review_changes_async(
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         return _result(
-            _empty_diff_result("claude_review_changes", meta, ctx_data.summary, effective_paths)
+            _empty_diff_result(
+                "claude_review_changes", meta, ctx_data.summary, effective_paths, detail=r.detail
+            )
         )
     prompt = build_prompt(
         "claude_review_changes",
