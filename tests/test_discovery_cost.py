@@ -58,19 +58,22 @@ def _per_tool_report(payload: list[dict]) -> str:
 
 
 async def test_tools_list_discovery_cost_within_budget():
-    """One test, both budgets.
+    """One test, both budgets, asserted independently.
 
-    The proxy is a pure function of the byte count, so asserting it separately
-    would be the same assertion twice. Both numbers are reported because issue
-    #90 sets its target in tokens while the byte count stays authoritative."""
+    The budgets are currently proportional (13,250 == 53,000/4) and the proxy is
+    a pure function of the byte count, so neither can be busted alone today. They
+    are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
+    actually enforce the tighter bound rather than be silently ignored."""
     wire, payload = await _tools_list_wire()
     proxy = _token_proxy(len(wire))
-    assert (len(wire), proxy) <= (WIRE_BUDGET_BYTES, TOKEN_PROXY_BUDGET), (
-        f"tools/list discovery cost is {len(wire)} bytes / ~{proxy} proxy tokens, "
-        f"over the {WIRE_BUDGET_BYTES} byte / {TOKEN_PROXY_BUDGET} token budget; "
+    detail = (
+        f"tools/list discovery cost is {len(wire)} bytes / ~{proxy} proxy tokens "
+        f"(budget {WIRE_BUDGET_BYTES} bytes / {TOKEN_PROXY_BUDGET} tokens); "
         "slim the advertised schemas instead of raising the budget.\n"
         f"{_per_tool_report(payload)}"
     )
+    assert len(wire) <= WIRE_BUDGET_BYTES, detail
+    assert proxy <= TOKEN_PROXY_BUDGET, detail
 
 
 def test_slim_keeps_property_named_title():

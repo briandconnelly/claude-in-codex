@@ -533,9 +533,9 @@ def _object_union_schema(adapter: TypeAdapter) -> dict:
     a bare ``anyOf`` is rejected. We keep the discriminating ``ok`` key visible
     at the top and carry the full branch schemas (and their $defs) underneath.
 
-    The caller passes only the SUCCESS models; the compact ``_ERROR_BRANCH_STUB``
-    is appended here so every advertised union still accepts an ok:false envelope
-    without inlining the error catalog once per tool.
+    The caller passes only the SUCCESS models; the compact branch built by
+    ``_error_branch`` is appended here so every advertised union still accepts an
+    ok:false envelope without inlining the error catalog once per tool.
     """
     union = adapter.json_schema()
     branches = union.get("anyOf") or [{k: v for k, v in union.items() if k != "$defs"}]
