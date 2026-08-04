@@ -1,5 +1,8 @@
+import ast
+import inspect
 import json
 import types
+from typing import get_args
 
 import anyio
 import pytest
@@ -8,13 +11,58 @@ from tests.conftest import structured
 
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.preflight import FlagSupport
+from claude_in_codex.schemas import ErrorCode, JobState
 from claude_in_codex.server import (
+    _ERROR_CATALOG,
+    _TOOL_ERROR_CODES,
     CAPABILITY_SUMMARY,
     _capabilities_payload,
     _first_root,
     _resolve_workspace,
     mcp,
 )
+
+
+def _statically_reachable_error_codes() -> dict[str, set[str]]:
+    """Per-tool error codes reachable through server.py's own call graph.
+
+    Walks the module AST for literal first arguments to _err(...) and code= on
+    ErrorInfo(...), then propagates them up through same-module calls. Codes
+    passed as a variable (only _workspace_error does this) and codes raised in
+    other modules are invisible here — see the caller's docstring."""
+    import claude_in_codex.server as srv
+
+    tree = ast.parse(inspect.getsource(srv))
+    funcs = {
+        n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+    def direct(node):
+        codes, calls = set(), set()
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Call):
+                continue
+            name = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+            if name == "_err" and n.args and isinstance(n.args[0], ast.Constant):
+                codes.add(n.args[0].value)
+            if name == "ErrorInfo":
+                for kw in n.keywords:
+                    if kw.arg == "code" and isinstance(kw.value, ast.Constant):
+                        codes.add(kw.value.value)
+            if name:
+                calls.add(name)
+        return codes, calls
+
+    def resolve(name, seen=()):
+        if name in seen or name not in funcs:
+            return set()
+        codes, calls = direct(funcs[name])
+        for call in calls - {name}:
+            codes |= resolve(call, (*seen, name))
+        return codes
+
+    return {tool: resolve(tool) for tool in _TOOL_ERROR_CODES}
+
 
 PAID_TOOLS = (
     "claude_ask",
@@ -66,7 +114,7 @@ async def test_resolve_workspace_param_inside_root_beats_root_default(tmp_path):
     child = tmp_path / "repo"
     child.mkdir()
     ctx = _FakeRoots([tmp_path.as_uri()])
-    path, err, source = await _resolve_workspace(str(child), ctx)
+    path, err, source, _roots = await _resolve_workspace(str(child), ctx)
     assert err is None
     assert path == str(child)
     assert source == "param"
@@ -74,7 +122,7 @@ async def test_resolve_workspace_param_inside_root_beats_root_default(tmp_path):
 
 async def test_resolve_workspace_uses_roots_when_no_param(tmp_path):
     ctx = _FakeRoots([tmp_path.as_uri()])
-    path, err, source = await _resolve_workspace(None, ctx)
+    path, err, source, _roots = await _resolve_workspace(None, ctx)
     assert err is None
     assert path == str(tmp_path)
     assert source == "roots"
@@ -86,7 +134,7 @@ async def test_resolve_workspace_param_must_be_inside_roots(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     ctx = _FakeRoots([root.as_uri()])
-    path, err, source = await _resolve_workspace(str(outside), ctx)
+    path, err, source, _roots = await _resolve_workspace(str(outside), ctx)
     assert path is None
     assert err == "workspace_outside_roots"
     assert source is None
@@ -97,7 +145,7 @@ async def test_resolve_workspace_param_inside_roots_allowed(tmp_path):
     child = root / "repo"
     child.mkdir(parents=True)
     ctx = _FakeRoots([root.as_uri()])
-    path, err, source = await _resolve_workspace(str(child), ctx)
+    path, err, source, _roots = await _resolve_workspace(str(child), ctx)
     assert err is None
     assert path == str(child)
     assert source == "param"
@@ -105,14 +153,14 @@ async def test_resolve_workspace_param_inside_roots_allowed(tmp_path):
 
 async def test_resolve_workspace_falls_back_to_cwd(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    path, err, source = await _resolve_workspace(None, _FakeRoots(raises=True))
+    path, err, source, _roots = await _resolve_workspace(None, _FakeRoots(raises=True))
     assert err is None
     assert path == str(tmp_path)
     assert source == "cwd"
 
 
 async def test_resolve_workspace_rejects_nonexistent_param():
-    path, err, source = await _resolve_workspace("/no/such/dir/xyz", _FakeRoots())
+    path, err, source, _roots = await _resolve_workspace("/no/such/dir/xyz", _FakeRoots())
     assert path is None
     assert err == "invalid_workspace_root"
 
@@ -122,7 +170,7 @@ async def test_resolve_workspace_rejects_relative_param(tmp_path, monkeypatch):
     # untrusted cwd that workspace resolution exists to bypass.
     monkeypatch.chdir(tmp_path)
     (tmp_path / "sub").mkdir()
-    path, err, source = await _resolve_workspace("sub", _FakeRoots())
+    path, err, source, _roots = await _resolve_workspace("sub", _FakeRoots())
     assert path is None
     assert err == "invalid_workspace_root"
 
@@ -510,7 +558,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-31"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-32"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -530,7 +578,7 @@ async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch,
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "context_too_large"
-    assert data["error"]["offending_param"] == "prompt"
+    assert data["error"]["details"]["field"] == "prompt"
 
 
 async def test_adversarial_rejects_oversized_evidence_before_paid_call(monkeypatch, tmp_path):
@@ -550,7 +598,7 @@ async def test_adversarial_rejects_oversized_evidence_before_paid_call(monkeypat
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "context_too_large"
-    assert data["error"]["offending_param"] == "evidence"
+    assert data["error"]["details"]["field"] == "evidence"
 
 
 async def test_invalid_enum_param_rejected_by_schema(fake_claude):
@@ -783,7 +831,7 @@ async def test_invalid_paths_are_structured_error(fake_claude, git_repo):
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_paths"
-    assert data["error"]["offending_param"] == "paths"
+    assert data["error"]["details"]["field"] == "paths"
     assert "repo-relative" in data["error"]["repair"]
 
 
@@ -827,7 +875,7 @@ async def test_adversarial_paths_without_scope_is_invalid(fake_claude, tmp_path)
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_paths"
-    assert data["error"]["offending_param"] == "paths"
+    assert data["error"]["details"]["field"] == "paths"
 
 
 async def test_adversarial_invalid_scope_param_rejected_by_schema(
@@ -864,7 +912,7 @@ async def test_adversarial_bad_base_ref_is_structured_error(fake_claude, monkeyp
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
-    assert data["error"]["offending_param"] == "base"
+    assert data["error"]["details"]["field"] == "base"
 
 
 async def test_paid_tools_declare_cost_safety_hints():
@@ -925,7 +973,7 @@ async def test_review_invalid_workspace_root_is_structured_error(fake_claude):
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_workspace_root"
-    assert data["error"]["offending_param"] == "workspace_root"
+    assert data["error"]["details"]["field"] == "workspace_root"
 
 
 async def test_review_invalid_root_without_param_does_not_blame_workspace_root(
@@ -939,7 +987,7 @@ async def test_review_invalid_root_without_param_does_not_blame_workspace_root(
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_workspace_root"
-    assert "offending_param" not in data["error"]
+    assert "field" not in data["error"].get("details", {})
     assert "workspace_root 'None'" not in data["error"]["message"]
 
 
@@ -957,7 +1005,7 @@ async def test_review_workspace_outside_roots_is_structured_error(fake_claude, t
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "workspace_outside_roots"
-    assert data["error"]["offending_param"] == "workspace_root"
+    assert data["error"]["details"]["field"] == "workspace_root"
 
 
 async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
@@ -1163,7 +1211,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-31"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-32"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -1423,7 +1471,7 @@ async def test_dry_run_rejects_safe_when_help_omits_flag(monkeypatch, git_repo):
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "unsupported_config_mode"
-    assert data["error"]["offending_param"] == "config_mode"
+    assert data["error"]["details"]["field"] == "config_mode"
 
 
 async def test_review_result_reports_redacted_paths(fake_claude, git_repo):
@@ -1568,7 +1616,7 @@ async def test_dry_run_nonexistent_base_is_invalid_base(git_repo):
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
-    assert data["error"]["offending_param"] == "base"
+    assert data["error"]["details"]["field"] == "base"
 
 
 async def test_cwd_resolution_sets_workspace_warning(fake_claude, monkeypatch, git_repo):
@@ -2008,7 +2056,7 @@ async def test_nonexistent_base_ref_is_invalid_base(
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
-    assert data["error"]["offending_param"] == "base"
+    assert data["error"]["details"]["field"] == "base"
 
 
 async def test_adversarial_with_nonempty_diff_calls_claude(fake_claude, git_repo):
@@ -2245,7 +2293,7 @@ async def test_review_changes_malformed_head_is_invalid_head(fake_claude, git_re
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_head"
-    assert data["error"]["offending_param"] == "head"
+    assert data["error"]["details"]["field"] == "head"
 
 
 async def test_review_changes_empty_head_is_invalid_head(fake_claude, git_repo):
@@ -2265,7 +2313,7 @@ async def test_review_changes_empty_head_is_invalid_head(fake_claude, git_repo):
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_head"
-    assert data["error"]["offending_param"] == "head"
+    assert data["error"]["details"]["field"] == "head"
 
 
 async def test_review_changes_nonexistent_head_is_invalid_head(fake_claude, git_repo):
@@ -2293,7 +2341,7 @@ async def test_review_changes_nonexistent_head_is_invalid_head(fake_claude, git_
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_head"
-    assert data["error"]["offending_param"] == "head"
+    assert data["error"]["details"]["field"] == "head"
 
 
 async def test_review_changes_head_rejected_for_non_branch_scope(fake_claude, git_repo):
@@ -2307,7 +2355,7 @@ async def test_review_changes_head_rejected_for_non_branch_scope(fake_claude, gi
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_head"
-    assert data["error"]["offending_param"] == "head"
+    assert data["error"]["details"]["field"] == "head"
 
 
 async def test_adversarial_threads_head_when_diff_attached(fake_claude, git_repo):
@@ -2341,7 +2389,7 @@ async def test_adversarial_head_without_scope_is_rejected(fake_claude, git_repo)
         )
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_head"
-    assert data["error"]["offending_param"] == "head"
+    assert data["error"]["details"]["field"] == "head"
 
 
 async def test_dry_run_reports_effective_head_and_range(monkeypatch, git_repo):
@@ -2456,7 +2504,7 @@ async def test_invalid_enum_argument_returns_envelope():
     assert payload["ok"] is False
     err = payload["error"]
     assert err["code"] == "invalid_arguments"
-    assert err["offending_param"] == "scope"
+    assert err["details"]["field"] == "scope"
     assert "working_tree" in err["repair"]
 
 
@@ -2492,7 +2540,7 @@ async def test_out_of_range_budget_is_rejected_before_paid_runner(
     assert result.is_error is True
     error = structured(result)["error"]
     assert error["code"] == "invalid_arguments"
-    assert error["offending_param"] == "max_budget_usd"
+    assert error["details"]["field"] == "max_budget_usd"
 
 
 @pytest.mark.parametrize("max_budget_usd", [0.0, -1.0, 5.01])
@@ -2510,7 +2558,7 @@ def test_resolve_defensively_rejects_out_of_range_budget(max_budget_usd, tmp_pat
     )
     assert resolved is None
     assert error["error"]["code"] == "invalid_arguments"
-    assert error["error"]["offending_param"] == "max_budget_usd"
+    assert error["error"]["details"]["field"] == "max_budget_usd"
     assert error["meta"]["requested_max_budget_usd"] == max_budget_usd
     assert "effective_max_budget_usd" not in error["meta"]
 
@@ -2522,7 +2570,7 @@ async def test_invalid_job_id_returns_validation_envelope(job_id):
     assert res.is_error is True
     err = structured(res)["error"]
     assert err["code"] == "invalid_arguments"
-    assert err["offending_param"] == "job_id"
+    assert err["details"]["field"] == "job_id"
 
 
 async def test_missing_required_argument_returns_envelope():
@@ -2531,7 +2579,10 @@ async def test_missing_required_argument_returns_envelope():
     assert res.is_error is True
     err = structured(res)["error"]
     assert err["code"] == "invalid_arguments"
-    assert err["offending_param"] == "scope"
+    assert err["details"]["field"] == "scope"
+    # A missing argument has no rejected value; pydantic reports the whole
+    # arguments dict there, which would name every argument as the offender.
+    assert "value" not in err["details"]
 
 
 async def test_invalid_enum_argument_carries_allowed_values():
@@ -2541,7 +2592,7 @@ async def test_invalid_enum_argument_carries_allowed_values():
         )
     err = structured(res)["error"]
     assert err["code"] == "invalid_arguments"
-    assert err["allowed_values"] == ["working_tree", "staged", "branch"]
+    assert err["details"]["allowed_values"] == ["working_tree", "staged", "branch"]
 
 
 def test_capability_summary_names_error_carrier():
@@ -2569,7 +2620,7 @@ def test_invalid_scope_error_carries_allowed_values():
 
     payload = _invalid_scope_error(_meta("", "inherit", "toolless", 0, 0, None), "bogus")
     err = payload["error"]
-    assert err["allowed_values"] == ["working_tree", "staged", "branch"]
+    assert err["details"]["allowed_values"] == ["working_tree", "staged", "branch"]
 
 
 async def test_job_not_found_carries_repair_tool(tmp_path):
@@ -2581,7 +2632,215 @@ async def test_job_not_found_carries_repair_tool(tmp_path):
         )
     err = structured(res)["error"]
     assert err["code"] == "job_not_found"
-    assert err["repair_tool"] == "claude_job_list"
+    assert err["action"]["tool"] == "claude_job_list"
+
+
+# --- first-repair contract (#60) ---------------------------------------------
+# Each of these asserts the error is repairable on the FIRST attempt: the agent
+# can act on `action` (and `details`) without parsing prose or guessing arguments.
+
+
+async def test_invalid_enum_repair_rebuilds_the_call_minus_the_bad_field():
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_review_dry_run",
+            {"scope": "bogus", "base": "main", "paths": ["src"]},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    action = err["action"]
+    assert err["retryable"] is False  # the identical call can never succeed
+    assert action["next_step"] == "retry_with_changes"
+    assert action["tool"] == "claude_review_dry_run"
+    # Every still-valid argument survives; only the invalid one is dropped.
+    assert action["arguments"] == {"base": "main", "paths": ["src"]}
+    assert err["details"]["value"] == "bogus"
+
+
+async def test_oversized_repair_arguments_are_omitted_not_echoed(monkeypatch):
+    """A giant prompt must not come back inside the repair block."""
+    from claude_in_codex.server import REPAIR_ARGS_MAX_BYTES
+
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_ask",
+            {"prompt": "x" * (REPAIR_ARGS_MAX_BYTES + 1), "effort": "bogus"},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    assert err["action"]["next_step"] == "retry_with_changes"
+    assert err["action"]["tool"] == "claude_ask"
+    assert "arguments" not in err["action"]
+
+
+async def test_job_not_found_repair_pins_the_resolved_workspace(tmp_path):
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_job_status",
+            {"job_id": "d" * 32, "workspace_root": str(tmp_path)},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    assert err["action"]["next_step"] == "call_tool"
+    assert err["action"]["tool"] == "claude_job_list"
+    # Listing under a differently-resolved workspace would show an unrelated set.
+    assert err["action"]["arguments"] == {"workspace_root": str(tmp_path)}
+    assert err["details"] == {"field": "job_id", "value": "d" * 32, "reason": "unknown_or_expired"}
+
+
+async def test_oversized_user_input_reports_typed_sizes(monkeypatch):
+    # 1_000 is max_input_bytes' hard floor, so it is the smallest testable cap.
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    async with Client(mcp) as client:
+        res = await client.call_tool("claude_ask", {"prompt": "y" * 2000}, raise_on_error=False)
+    err = structured(res)["error"]
+    assert err["code"] == "context_too_large"
+    details = err["details"]
+    assert details["limit_bytes"] == 1000
+    assert details["actual_bytes"] == 2000
+    assert details["field"] == "prompt"
+
+
+async def test_oversized_diff_reports_typed_sizes(monkeypatch, git_repo):
+    import claude_in_codex.context as ctx_mod
+    import claude_in_codex.server as srv
+
+    monkeypatch.setattr(ctx_mod, "MAX_DIFF_BYTES", 32)
+    monkeypatch.setattr(srv, "MAX_DIFF_BYTES", 32)
+    (git_repo / "big.txt").write_text("z" * 5000)
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    assert err["code"] == "context_too_large"
+    assert err["details"]["max_diff_bytes"] == 32
+    assert err["details"]["diff_bytes"] > 32
+
+
+async def test_workspace_outside_roots_publishes_the_allowed_roots(fake_claude, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    async with Client(mcp, roots=[root.as_uri()]) as client:
+        res = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(outside)},
+            raise_on_error=False,
+        )
+    err = structured(res)["error"]
+    assert err["details"]["allowed_roots"] == [str(root)]
+    # The corrected call is spelled out, not left for the agent to infer.
+    assert err["action"]["arguments"] == {"workspace_root": str(root)}
+
+
+def test_every_error_carries_exactly_one_next_step():
+    """`action` is total: no error can leave the caller without a branch."""
+    from claude_in_codex.schemas import ErrorInfo
+
+    for code in get_args(ErrorCode):
+        info = ErrorInfo(code=code, message="m", repair="r")
+        assert info.action is not None and info.action.next_step
+
+
+def test_retryable_never_pairs_with_a_changed_call():
+    """retryable=True means the IDENTICAL call may succeed — never a corrected one."""
+    from claude_in_codex.schemas import DEFAULT_NEXT_STEP, ErrorInfo
+
+    assert ErrorInfo(code="timeout", message="m", repair="r", retryable=True).action.next_step == (
+        "retry_same_call"
+    )
+    for code, _cond, ever_retryable, _fields in _ERROR_CATALOG:
+        if DEFAULT_NEXT_STEP[code] == "retry_with_changes":
+            assert not ever_retryable, f"{code} says a changed call is also a plain retry"
+
+
+def test_published_next_step_is_the_one_errors_actually_carry():
+    """The catalog is a claim about emitted errors; check it against real ones.
+
+    Without this the documented default and the envelope's default are two
+    hand-maintained copies, and the published one is the copy nobody exercises."""
+    from claude_in_codex.schemas import ErrorInfo
+
+    published = {row["code"]: row["next_step"] for row in _capabilities_payload()["error_catalog"]}
+    for code in get_args(ErrorCode):
+        emitted = ErrorInfo(code=code, message="m", repair="r").action.next_step
+        assert published[code] == emitted, f"{code}: documents {published[code]}, emits {emitted}"
+
+
+def test_error_catalog_covers_every_code_exactly_once():
+    documented = [row[0] for row in _ERROR_CATALOG]
+    assert sorted(documented) == sorted(get_args(ErrorCode))
+    assert len(documented) == len(set(documented))
+
+
+def test_catalog_detail_fields_exist_on_error_details():
+    from claude_in_codex.schemas import ErrorDetails
+
+    for code, _cond, _retryable, fields in _ERROR_CATALOG:
+        unknown = set(fields) - set(ErrorDetails.model_fields)
+        assert not unknown, f"{code} documents non-existent detail fields {unknown}"
+
+
+def test_per_tool_error_codes_cover_the_statically_reachable_ones():
+    """The published branch map must not under-report what the code can raise.
+
+    A static walk of server.py resolves the literal codes each tool's own call
+    graph can produce; every one of those must appear in that tool's published
+    set. Codes raised outside server.py (claude.py's CLI classification, jobs.py's
+    lifecycle) are not visible to this walk, so it is a floor, not a ceiling — but
+    it is a floor that moves whenever someone adds an error path and forgets the
+    map."""
+    reachable = _statically_reachable_error_codes()
+    # Instrument check: a walk that resolves nothing would make the loop below
+    # vacuously pass, so pin codes each tool demonstrably raises in server.py.
+    assert "invalid_scope" in reachable["claude_review_dry_run"]
+    assert "context_too_large" in reachable["claude_ask"]
+    assert "job_not_found" in reachable["claude_job_status"]
+    for tool, codes in reachable.items():
+        missing = codes - set(_TOOL_ERROR_CODES[tool])
+        assert not missing, f"{tool} can raise {sorted(missing)} but does not publish them"
+
+
+def test_async_starter_does_not_advertise_completion_time_errors():
+    """The starter returns a job handle, so a code that can only be produced by a
+    finished claude run must come from the result tools, not from the start call."""
+    from claude_in_codex.server import _CLAUDE_ERRORS
+
+    starter = set(_TOOL_ERROR_CODES["claude_review_changes_async"])
+    # claude_not_found is the exception: it fails before any job is spawned.
+    assert starter & set(_CLAUDE_ERRORS) == {"claude_not_found"}
+    for fetcher in ("claude_job_result", "claude_job_consume_result"):
+        assert set(_CLAUDE_ERRORS) <= set(_TOOL_ERROR_CODES[fetcher])
+
+
+def test_per_tool_error_codes_are_all_documented():
+    catalog = {row[0] for row in _ERROR_CATALOG}
+    for tool, codes in _TOOL_ERROR_CODES.items():
+        assert set(codes) <= catalog, f"{tool} publishes codes missing from the catalog"
+
+
+def test_published_tool_names_match_the_error_map():
+    payload = _capabilities_payload()
+    # Every advertised tool has a branch map, including the ones without a
+    # tool_details entry — otherwise a tool could ship with no documented errors.
+    assert set(_TOOL_ERROR_CODES) == set(payload["paid_tools"]) | set(payload["free_tools"])
+    assert {t["name"] for t in payload["tool_details"]} <= set(_TOOL_ERROR_CODES)
+
+
+def test_capabilities_publishes_the_async_lifecycle():
+    lifecycle = _capabilities_payload()["async_lifecycle"]
+    tools = {t["name"] for t in _capabilities_payload()["tool_details"]}
+    for field in ("status_tool", "result_tool", "consume_tool", "cancel_tool", "list_tool"):
+        assert lifecycle[field] in tools, f"{field} names an unregistered tool"
+    assert set(lifecycle["start_tools"]) <= tools
+    assert set(lifecycle["nonresult_terminal_codes"]) <= set(get_args(ErrorCode))
+    assert set(lifecycle["terminal_states"]) | set(lifecycle["running_states"]) == set(
+        get_args(JobState)
+    )
 
 
 async def test_async_same_idempotency_key_returns_existing_job(git_repo, monkeypatch):
@@ -2686,7 +2945,7 @@ async def test_async_reservation_holder_with_no_record_is_internal_error(git_rep
         )
     assert result["ok"] is False
     assert result["error"]["code"] == "internal_error"
-    assert result["error"]["offending_param"] == "idempotency_key"
+    assert result["error"]["details"]["field"] == "idempotency_key"
     assert result["error"]["retryable"] is True
     jobs.release_idempotency_key(str(git_repo), "ghost-key", ghost)
 

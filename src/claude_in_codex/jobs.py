@@ -42,9 +42,11 @@ from claude_in_codex.schemas import (
     JOB_ID_PATTERN,
     ContextSummary,
     ErrorCode,
+    ErrorDetails,
     ErrorInfo,
     ErrorResult,
     Meta,
+    RepairAction,
     branch_range,
     workspace_warning_for,
 )
@@ -900,19 +902,27 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
     env = _read_envelope(jd)
     if env:
         apply_cost_usage(bmeta, env)
-    repair_tool = None
-    repair_arguments = None
+    action = None
+    retry_after_ms = None
     if code == "job_running":
-        repair_tool = "claude_job_status"
-        repair_arguments = {"job_id": meta.get("job_id")}
+        # Poll status rather than re-fetching the result: status is the cheap
+        # lifecycle read, and its poll_after_ms is the authoritative pacing hint.
+        # Pin the same workspace the lookup used — jobs are per-workspace.
+        action = RepairAction(
+            next_step="call_tool",
+            tool="claude_job_status",
+            arguments={"job_id": meta.get("job_id"), "workspace_root": bmeta.cwd},
+        )
+        retry_after_ms = poll_after_ms()
     return ErrorResult(
         error=ErrorInfo(
             code=cast("ErrorCode", code),
             message=message,
             repair=repair,
             retryable=retryable,
-            repair_tool=repair_tool,
-            repair_arguments=repair_arguments,
+            retry_after_ms=retry_after_ms,
+            details=ErrorDetails(field="job_id", value=str(meta.get("job_id") or "") or None),
+            action=action,
         ),
         meta=bmeta,
     ).model_dump(mode="json", exclude_none=True)

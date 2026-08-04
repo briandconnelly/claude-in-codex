@@ -808,8 +808,10 @@ def test_job_running_result_error_carries_repair_call(tmp_path, monkeypatch):
     assert found
     err = payload["error"]
     assert err["code"] == "job_running"
-    assert err["repair_tool"] == "claude_job_status"
-    assert err["repair_arguments"] == {"job_id": job_id}
+    assert err["action"]["tool"] == "claude_job_status"
+    # The workspace is pinned: jobs are per-workspace, so a status call that
+    # resolved a different workspace would report job_not_found.
+    assert err["action"]["arguments"] == {"job_id": job_id, "workspace_root": str(tmp_path)}
     jobs.cancel(str(tmp_path), job_id)
 
 

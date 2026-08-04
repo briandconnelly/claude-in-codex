@@ -9,6 +9,30 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Changed
 
+- Failure recovery is now machine-actionable without parsing prose. `ErrorInfo`'s four
+  scattered recovery fields (`offending_param`, `allowed_values`, `repair_tool`,
+  `repair_arguments`) are replaced by two typed blocks: `details` (`field`, `value`,
+  `reason`, `allowed_values`, `limit_bytes`/`actual_bytes`, `max_diff_bytes`/`diff_bytes`,
+  `allowed_roots`) and `action` — always present, naming exactly one `next_step` of
+  `retry_same_call`, `retry_with_changes`, `call_tool`, `fix_environment`, or
+  `no_automatic_repair`, plus a registered `tool` and literally callable `arguments` where
+  one applies. `retryable` now means only "the identical call may succeed later" and is
+  paired with a nullable `retry_after_ms`; a call that needs different arguments is
+  `retryable: false` with `next_step: retry_with_changes`. Repairs are callable on the
+  first attempt: an `invalid_arguments` failure returns the original call with only the
+  invalid argument removed (omitted above 8 KiB so a large prompt is never echoed back),
+  `job_not_found` and `job_running` pin the resolved `workspace_root`, `context_too_large`
+  reports both the cap and the actual size, and `workspace_outside_roots` publishes the
+  client's roots. `claude_capabilities` gains `error_catalog` (per-code condition, default
+  next step, whether the code is ever retryable as-is, and the typed detail fields it may
+  populate — the next step is derived from the same table the envelope uses, so the
+  documented and emitted defaults cannot drift), `argument_reconstruction`, a structured
+  `async_lifecycle` descriptor for the background-job tools, and a per-tool `error_codes`
+  branch map on every `tool_details` entry. Discovery cost is held roughly flat — 51,855 ->
+  52,579 `tools/list` bytes (+1.4%) — by stubbing the new capability sub-models out of the
+  advertised schemas. Bumps the contract fingerprint to `claude-in-codex/0.1/schema-32`
+  (#60).
+
 - Cut the `tools/list` discovery cost from 63,970 bytes / 15,381 tokens to 51,855 bytes /
   12,570 tokens (-19%), the per-session tax every preloading client pays before its first
   useful call. The 30-value error-code catalog was inlined into 11 of 13 output schemas via
