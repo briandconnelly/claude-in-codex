@@ -170,6 +170,7 @@ _TRUNCATION_FIELD_ORDER = (
     "summary",
     "findings",
     "findings[].title",
+    "findings[].file",
     "findings[].evidence",
     "findings[].risk",
     "findings[].recommendation",
@@ -180,6 +181,8 @@ _TRUNCATION_FIELD_ORDER = (
     "next_steps",
     "next_steps[]",
     "raw_response.text",
+    "meta.permission_denials",
+    "meta.permission_denials[]",
 )
 
 
@@ -188,11 +191,17 @@ class _Caps:
 
     Per-item string caps are aggregated under one collective path (e.g.
     ``findings[].evidence``) rather than one entry per index, so the truncation
-    block stays a fixed size no matter how many items were shortened."""
+    block stays a fixed size no matter how many items were shortened.
+
+    For a collective path the counts cover ONLY the occurrences a cap actually
+    shortened — an item that fit is not added to either total. Mixing untruncated
+    items into the sums would make `total` read as "characters produced under this
+    path", which is a different measurement and would obscure how much was lost.
+    claude_capabilities.detail_modes states this explicitly."""
 
     def __init__(self, bounds: OutputBounds) -> None:
         self.bounds = bounds
-        # path -> (unit, returned, total), summed across every item under that path.
+        # path -> (unit, returned, total), summed across the SHORTENED occurrences.
         self._dropped: dict[str, list[Any]] = {}
 
     def _record(self, path: str, unit: str, returned: int, total: int) -> None:
@@ -228,13 +237,20 @@ class _Caps:
         ]
 
 
-def _bound_result(result: SuccessResult, tool: str, detail: str) -> None:
+def _bound_result(
+    result: SuccessResult, tool: str, detail: str, record_survives: bool = True
+) -> None:
     """Bound a result to its detail level, recording anything a cap dropped (#94).
 
     Findings are ordered most-severe-first (stable within a severity) in BOTH
     modes, so a cap drops the least severe finding rather than an arbitrary one and
     the two modes agree on ordering. Caps run after redaction, so shortening a
-    string can never re-expose a scrubbed secret."""
+    string can never re-expose a scrubbed secret.
+
+    `record_survives` is False when the caller is destroying the stored job record
+    as it reads (claude_job_consume_result). The free re-read step is then a lie —
+    the record it names is already gone — so the truncation block must fall back to
+    the paid re-run instead of publishing a call that returns job_not_found."""
     bounds = OUTPUT_BOUNDS.get(detail, OUTPUT_BOUNDS["summary"])
     caps = _Caps(bounds)
 
@@ -244,6 +260,12 @@ def _bound_result(result: SuccessResult, tool: str, detail: str) -> None:
     result.findings = caps.items(result.findings, bounds.max_findings, "findings")
     for finding in result.findings:
         finding.title = caps.text(finding.title, bounds.max_finding_title_chars, "findings[].title")
+        if finding.file is not None:
+            # A model-supplied path is still model-derived text, so it needs a cap
+            # like any other string; it shares the title cap.
+            finding.file = caps.text(
+                finding.file, bounds.max_finding_title_chars, "findings[].file"
+            )
         for attr in ("evidence", "risk", "recommendation"):
             setattr(
                 finding,
@@ -266,17 +288,43 @@ def _bound_result(result: SuccessResult, tool: str, detail: str) -> None:
             result.raw_response.text, bounds.max_raw_text_chars, "raw_response.text"
         )
 
+    if result.meta.permission_denials:
+        # Model-derived and arbitrarily nested: a denial record carries whatever
+        # the tool call contained, so an uncapped list here would reopen exactly
+        # the unbounded-growth hole the rest of this function closes.
+        kept = caps.items(
+            result.meta.permission_denials,
+            bounds.max_list_items,
+            "meta.permission_denials",
+        )
+        # A record that fits is passed through structurally unchanged; only an
+        # oversized one degrades to its bounded string form, so the common case
+        # keeps the shape existing callers already parse.
+        result.meta.permission_denials = [
+            d
+            if len(str(d)) <= bounds.max_list_item_chars
+            else caps.text(str(d), bounds.max_list_item_chars, "meta.permission_denials[]")
+            for d in kept
+        ]
+
     dropped = caps.fields()
     if not dropped:
         return
-    if detail == "summary" and result.meta.job_id:
-        # A stored job record can be re-read at full detail for free — no respend.
+    if detail == "summary" and result.meta.job_id and record_survives:
+        # A surviving job record can be re-read at full detail for free — no
+        # respend. The workspace is part of the lookup key, so pinning the
+        # resolved cwd is what makes these arguments callable from a caller whose
+        # own default workspace differs from the one the job was started in.
         result.truncation = Truncation(
             detail="summary",
             fields=dropped,
             next_step="call_tool",
             tool="claude_job_result",
-            arguments={"job_id": result.meta.job_id, "detail": "full"},
+            arguments={
+                "job_id": result.meta.job_id,
+                "detail": "full",
+                "workspace_root": result.meta.cwd,
+            },
         )
         return
     # Sync summary: re-issuing the call with detail="full" is a PAID call, so the
@@ -318,7 +366,12 @@ def normalize_envelope(
     meta: Meta,
     detail: str,
     context_summary: ContextSummary | None = None,
+    record_survives: bool = True,
 ) -> dict:
+    """Render one claude envelope into the normalized contract at `detail`.
+
+    `record_survives` is passed through to the output bounds: see _bound_result.
+    It only matters for a job-backed result being consumed as it is read."""
     try:
         env = json.loads(stdout)
     except json.JSONDecodeError:
@@ -399,7 +452,7 @@ def normalize_envelope(
         )
         if denials:
             result.meta.permission_denials = denials
-        _bound_result(result, tool, detail)
+        _bound_result(result, tool, detail, record_survives)
         return result.model_dump(mode="json", exclude_none=True)
 
     result = SuccessResult(
@@ -417,5 +470,5 @@ def normalize_envelope(
     )
     if denials:
         result.meta.permission_denials = denials
-    _bound_result(result, tool, detail)
+    _bound_result(result, tool, detail, record_survives)
     return result.model_dump(mode="json", exclude_none=True)

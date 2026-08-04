@@ -643,6 +643,43 @@ def test_summary_is_a_strict_subset_of_full():
     assert "truncation" not in full  # the same result fits inside the full caps
 
 
+def test_subsetting_holds_when_caps_actually_fire_at_summary_only():
+    """The subset claim must survive the case it is hardest to satisfy.
+
+    The test above compares a result small enough that no string cap fires. Here
+    summary truncates strings and items while full does not, which is exactly
+    where a naive reading of "summary carries no character full lacks" breaks:
+    summary carries the truncation marker and the truncation block. The published
+    contract scopes the claim to CONTENT, so compare content."""
+    s_bounds = OUTPUT_BOUNDS["summary"]
+    long_item = "Q" * (s_bounds.max_list_item_chars + 100)
+    inner = {
+        "summary": "S" * (s_bounds.max_summary_chars + 100),
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [_finding("high", "t", "E" * (s_bounds.max_finding_text_chars + 100))],
+        "questions": [long_item] * (s_bounds.max_list_items + 2),
+        "assumptions": [],
+        "next_steps": [],
+    }
+    env = _env(inner)
+    summary = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    full = normalize_envelope("claude_ask", env, _meta(), detail="full")
+    assert "truncation" in summary and "truncation" not in full
+
+    def content(value):
+        """Strip the marker so comparison is over relayed content, not metadata."""
+        return value[: -len(TRUNCATION_MARKER)] if value.endswith(TRUNCATION_MARKER) else value
+
+    assert full["summary"].startswith(content(summary["summary"]))
+    assert len(summary["questions"]) < len(full["questions"])
+    for i, q in enumerate(summary["questions"]):
+        assert full["questions"][i].startswith(content(q))
+    s_finding, f_finding = summary["findings"][0], full["findings"][0]
+    assert f_finding["evidence"].startswith(content(s_finding["evidence"]))
+    assert set(s_finding) == set(f_finding)  # identical field names in both levels
+
+
 def test_findings_are_ordered_most_severe_first_so_caps_drop_the_least_severe():
     bounds = OUTPUT_BOUNDS["summary"]
     order = ["nit", "low", "medium", "high", "critical"]
@@ -690,7 +727,86 @@ def test_job_backed_truncation_points_at_the_free_full_reread():
     trunc = res["truncation"]
     assert trunc["next_step"] == "call_tool"
     assert trunc["tool"] == "claude_job_result"
-    assert trunc["arguments"] == {"job_id": "0" * 32, "detail": "full"}
+    # workspace_root is part of the job lookup key, so omitting it would return
+    # job_not_found for any caller whose default workspace differs from the job's.
+    assert trunc["arguments"] == {"job_id": "0" * 32, "detail": "full", "workspace_root": "/repo"}
+
+
+def test_consumed_result_never_points_at_the_record_it_destroyed():
+    """record_survives=False means the free re-read no longer exists (#94).
+
+    Publishing claude_job_result there would hand back a call that can only
+    return job_not_found, having already deleted the content it promises."""
+    bounds = OUTPUT_BOUNDS["summary"]
+    meta = _meta()
+    meta.job_id = "0" * 32
+    res = normalize_envelope(
+        "claude_review_changes",
+        _env(_bulk_inner(bounds.max_findings + 1)),
+        meta,
+        "summary",
+        None,
+        record_survives=False,
+    )
+    trunc = res["truncation"]
+    assert trunc["next_step"] == "retry_with_changes"
+    assert trunc["tool"] == "claude_review_changes"
+    assert "arguments" not in trunc
+
+
+def test_finding_file_paths_are_capped():
+    bounds = OUTPUT_BOUNDS["summary"]
+    long_path = "d/" * bounds.max_finding_title_chars + "app.py"
+    inner = {
+        "summary": "x",
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [{**_finding(), "file": long_path}],
+    }
+    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    assert res["findings"][0]["file"] == long_path[: bounds.max_finding_title_chars] + (
+        TRUNCATION_MARKER
+    )
+    assert {f["field"] for f in res["truncation"]["fields"]} == {"findings[].file"}
+
+
+def test_permission_denials_are_bounded():
+    """Denial records are model-derived and arbitrarily nested, so an uncapped
+    list here would reopen the unbounded-growth hole everywhere else closes."""
+    bounds = OUTPUT_BOUNDS["summary"]
+    denials = [{"tool": "Bash", "input": "x" * 50} for _ in range(bounds.max_list_items + 6)]
+    denials[0] = {"tool": "Bash", "input": "y" * (bounds.max_list_item_chars + 500)}
+    inner = {"summary": "x", "verdict": "pass", "confidence": "high"}
+    res = normalize_envelope(
+        "claude_ask", _env(inner, permission_denials=denials), _meta(), detail="summary"
+    )
+    kept = res["meta"]["permission_denials"]
+    assert len(kept) == bounds.max_list_items
+    # The oversized record degrades to a bounded string; the ones that fit keep
+    # the structural shape existing callers already parse.
+    assert isinstance(kept[0], str) and kept[0].endswith(TRUNCATION_MARKER)
+    assert all(isinstance(d, dict) for d in kept[1:])
+    reported = {f["field"] for f in res["truncation"]["fields"]}
+    assert reported == {"meta.permission_denials", "meta.permission_denials[]"}
+
+
+def test_collective_counts_cover_only_the_shortened_occurrences():
+    """Documented semantics: an item that fit contributes to neither count.
+
+    The alternative reading — 'characters produced under this path' — would make
+    `total` a different measurement and hide how much was actually lost."""
+    bounds = OUTPUT_BOUNDS["summary"]
+    over = "E" * (bounds.max_finding_text_chars + 60)
+    inner = {
+        "summary": "x",
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [_finding(text=over), _finding(text="short")],
+    }
+    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    reported = {f["field"]: f for f in res["truncation"]["fields"]}
+    assert reported["findings[].evidence"]["returned"] == bounds.max_finding_text_chars
+    assert reported["findings[].evidence"]["total"] == len(over)  # NOT len(over) + 5
 
 
 def test_bounds_run_after_redaction_so_a_cap_cannot_re_expose_a_secret():

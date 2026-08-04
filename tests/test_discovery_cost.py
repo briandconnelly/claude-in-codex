@@ -21,13 +21,13 @@ from claude_in_codex.schemas import (
 )
 from claude_in_codex.server import mcp
 
-# Measured 55,258 bytes, down from 63,970 before the error branch was compacted
+# Measured 55,367 bytes, down from 63,970 before the error branch was compacted
 # (and 113,495 before Meta was stubbed). Budgets carry ~2% headroom deliberately:
 # an earlier ceiling sat 30 bytes above the payload, so unrelated metadata churn
 # broke CI. Raising either budget is a reviewed, deliberate act — do not bump one
 # to make a test pass.
 #
-# Raised from 53,000 for the bounded-`detail` contract (#94): +2,674 bytes / +5.1%
+# Raised from 53,000 for the bounded-`detail` contract (#94): +2,783 bytes / +5.3%
 # over the 52,584 measured just before it. That buys the `truncation` block on
 # every result union, a `detail` param on the two job-result tools (the free
 # full-detail re-read), and the per-tool pointer to the caps. Kept to ~5% by

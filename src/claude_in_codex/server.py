@@ -149,7 +149,8 @@ _DETAIL_DESCRIPTION = (
 )
 
 _JOB_DETAIL_DESCRIPTION = (
-    "Re-render the stored result at this density (free); omit to keep the job's own."
+    "Re-render the stored result at this density (free). Omit to keep the job's own "
+    "level — except on consume, which defaults to full because deletion is final."
 )
 
 mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
@@ -1915,10 +1916,10 @@ async def claude_job_consume_result(
 ) -> ToolResult:
     """Fetch a finished background review and delete the stored job record.
 
-    Use only when you no longer need to poll or re-read the job. Returns the same
-    structured envelope as claude_job_result, then deletes completed job state.
-    Non-done jobs are not deleted. Deletion is irreversible; the result cannot be
-    re-fetched afterward — pass detail="full" here if a summary was truncated.
+    Use only when you no longer need to poll or re-read the job. Returns the
+    claude_job_result envelope, then deletes completed job state. Non-done jobs
+    are not deleted. Deletion is irreversible, so this renders at full detail
+    unless you pass an explicit `detail`.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -2563,22 +2564,34 @@ _DETAIL_MODES = DetailModes(
     bounds=OUTPUT_BOUNDS,
     truncation_marker=TRUNCATION_MARKER,
     truncation=(
-        "summary is a strict subset of full: identical field names and types, never "
-        "an item or character full does not also carry. Both levels are bounded, so "
-        "no result grows without limit, and nothing is dropped silently. A result "
-        "that hit a cap carries truncation{detail, fields[{field, unit:items|chars, "
-        "returned, total}], next_step:call_tool|retry_with_changes, tool, arguments}; "
-        "an absent block means the result is complete. `field` is a dotted path into "
-        "the result, and per-item string caps are aggregated under one collective "
-        "path (e.g. findings[].evidence) so the block itself stays bounded; "
-        "`returned` excludes the truncation_marker appended to a shortened string. "
-        "findings are ordered most-severe-first at both levels, so an item cap drops "
-        "the least severe finding, never an arbitrary one. Recovery: a background-job "
-        "result re-reads for free via claude_job_result with detail=full, and there "
-        "`arguments` is literally callable; a sync summary must be re-issued with "
-        "detail=full, which is a NEW PAID CALL, so `arguments` is deliberately "
-        "omitted rather than offered as a free replay. At detail=full the caps are "
-        "the relay ceiling — narrow scope, paths, or focus and run a smaller review. "
+        "SUBSETTING, precisely: across the CONTENT fields, summary carries no item "
+        "and no content character that full does not also carry, with identical "
+        "field names and types. Two things are deliberately outside that claim, "
+        "because both are metadata ABOUT the bounding rather than content: the "
+        "`truncation` block itself (a capped summary carries it while an uncapped "
+        "full result does not), and the truncation_marker appended to a shortened "
+        "string. Compare content, not markers. "
+        "Both levels are bounded, so no result grows without limit, and nothing is "
+        "dropped silently. A result that hit a cap carries truncation{detail, "
+        "fields[{field, unit:items|chars, returned, total}], "
+        "next_step:call_tool|retry_with_changes, tool, arguments}; an absent block "
+        "means the result is complete. `field` is a dotted path into the result, and "
+        "per-item string caps are aggregated under one collective path (e.g. "
+        "findings[].evidence) so the block itself stays bounded. COUNTS on a "
+        "collective path cover only the occurrences that were actually shortened — "
+        "an item that fit contributes to neither `returned` nor `total` — and "
+        "`returned` excludes the marker. findings are ordered most-severe-first at "
+        "both levels, so an item cap drops the least severe finding, never an "
+        "arbitrary one. "
+        "RECOVERY: a surviving background-job record re-reads for free via "
+        "claude_job_result with detail=full, and there `arguments` is literally "
+        "callable and pins the job's workspace_root. A sync summary must be "
+        "re-issued with detail=full, which is a NEW PAID CALL, so `arguments` is "
+        "deliberately omitted rather than offered as a free replay. "
+        "claude_job_consume_result deletes the record as it reads, so it renders at "
+        "full detail unless you pass an explicit `detail`, and its truncation block "
+        "never names the record it just destroyed. At detail=full the caps are the "
+        "relay ceiling — narrow scope, paths, or focus and run a smaller review. "
         "Distinct from meta.truncated, which reports truncation of the input diff."
     ),
 )

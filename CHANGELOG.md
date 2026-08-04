@@ -22,13 +22,20 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   naming each shortened field with exact `returned`/`total` counts, a
   `…[truncated]` marker on shortened strings, and a callable next step. `findings`
   are now ordered most-severe-first at both levels, so an item cap drops the least
-  severe finding rather than an arbitrary one. `claude_job_result` and
-  `claude_job_consume_result` accept `detail`, which re-renders the *stored*
-  envelope — so a truncated background-job summary is recoverable at full detail
-  for free, and that call is what a job result's `truncation.arguments` hands back
-  ready to run. The complete contract (per-level caps, truncation semantics,
+  severe finding rather than an arbitrary one. Model-derived finding paths and
+  `meta.permission_denials` are bounded too, so no model-supplied field escapes the
+  caps. `claude_job_result` and `claude_job_consume_result` accept `detail`, which
+  re-renders the *stored* envelope — so a truncated background-job summary is
+  recoverable at full detail for free, and that call is what a job result's
+  `truncation.arguments` hands back ready to run, workspace pinned so it is callable
+  as-is. Because deletion is irreversible, `claude_job_consume_result` renders at
+  full detail unless an explicit `detail` is passed, and a consumed result's
+  truncation block never names the record it just destroyed. Subsetting is scoped
+  precisely: it covers content items and characters, deliberately excluding the
+  `truncation` block itself and the truncation marker, which are metadata about the
+  bounding. The complete contract (per-level caps, truncation semantics,
   recovery) is published once as `claude_capabilities.detail_modes`; the paid tools
-  advertise only a pointer, holding discovery cost to 52,584 -> 55,258 `tools/list`
+  advertise only a pointer, holding discovery cost to 52,584 -> 55,367 `tools/list`
   bytes (+5.1%). Bumps the contract fingerprint to `claude-in-codex/0.1/schema-33`
   (#94).
 

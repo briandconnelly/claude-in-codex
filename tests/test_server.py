@@ -3094,8 +3094,17 @@ async def test_capabilities_publishes_the_detail_contract():
         if cap == "max_raw_text_chars":
             continue  # inert at summary, which omits raw_response.text entirely
         assert summary[cap] < full[cap], cap
-    # The prose is the only home for the truncation block's shape and recovery.
-    for required in ("strict subset", "truncation{", "claude_job_result", "NEW PAID CALL"):
+    # The prose is the only home for the truncation block's shape and recovery,
+    # including the two documented exclusions from the subset claim and the
+    # consume-mode rule that keeps a deleted record from being advertised.
+    for required in (
+        "truncation{",
+        "claude_job_result",
+        "NEW PAID CALL",
+        "workspace_root",
+        "claude_job_consume_result",
+        "only the occurrences that were actually shortened",
+    ):
         assert required in modes["truncation"], required
 
 
