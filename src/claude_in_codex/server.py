@@ -63,6 +63,7 @@ from claude_in_codex.jobs import JobConfig
 from claude_in_codex.normalize import apply_cost_usage, build_prompt, normalize_envelope
 from claude_in_codex.schemas import (
     CAPABILITIES_SCHEMA,
+    DEFAULT_NEXT_STEP,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
     FINGERPRINT_COVERS,
@@ -73,6 +74,7 @@ from claude_in_codex.schemas import (
     RESULT_SCHEMA,
     STATUS_SCHEMA,
     Access,
+    AsyncLifecycle,
     CapabilitiesResult,
     Confidence,
     ConfigMode,
@@ -80,6 +82,8 @@ from claude_in_codex.schemas import (
     DryRunResult,
     Effort,
     ErrorCode,
+    ErrorCodeDoc,
+    ErrorDetails,
     ErrorInfo,
     ErrorResult,
     JobId,
@@ -87,6 +91,7 @@ from claude_in_codex.schemas import (
     Meta,
     RawDefaults,
     RawResponse,
+    RepairAction,
     ResolvedDefaults,
     Scope,
     StatusResult,
@@ -246,6 +251,27 @@ def _meta(
     )
 
 
+# Ceiling on the reconstructed repair call. Above it the corrected arguments are
+# omitted rather than echoed, so an oversized input cannot be returned twice.
+REPAIR_ARGS_MAX_BYTES = 8192
+# Ceiling on the echoed rejected value in ErrorDetails.value.
+DETAIL_VALUE_MAX_CHARS = 200
+
+
+def _render_value(value: object) -> str | None:
+    """The rejected value as a bounded string, for ErrorDetails.value.
+
+    None is dropped rather than rendered as "None": an absent detail field means
+    "not applicable", and a caller that genuinely passed null learns that from the
+    message, not from a string that is indistinguishable from a literal."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else repr(value)
+    if len(text) > DETAIL_VALUE_MAX_CHARS:
+        return text[:DETAIL_VALUE_MAX_CHARS] + "…"
+    return text
+
+
 def _err(
     code: str,
     message: str,
@@ -255,19 +281,31 @@ def _err(
     retryable: bool = False,
     *,
     allowed_values: list[str] | None = None,
-    repair_tool: str | None = None,
-    repair_arguments: dict | None = None,
+    details: ErrorDetails | None = None,
+    action: RepairAction | None = None,
+    retry_after_ms: int | None = None,
 ) -> dict:
+    """Build the ok:false envelope.
+
+    `offending`/`allowed_values` are folded into the typed `details` block so call
+    sites stay terse while the wire shape keeps one home for recovery data. An
+    explicitly passed `details` wins for any field it sets."""
+    merged = (details or ErrorDetails()).model_copy(
+        update={
+            k: v
+            for k, v in (("field", offending), ("allowed_values", allowed_values))
+            if v is not None and getattr(details, k, None) is None
+        }
+    )
     return ErrorResult(
         error=ErrorInfo(
             code=cast("ErrorCode", code),
             message=message,
             repair=repair,
-            offending_param=offending,
             retryable=retryable,
-            allowed_values=allowed_values,
-            repair_tool=repair_tool,
-            repair_arguments=repair_arguments,
+            retry_after_ms=retry_after_ms,
+            details=merged if merged.model_dump(exclude_none=True) else None,
+            action=action,
         ),
         meta=meta,
     ).model_dump(mode="json", exclude_none=True)
@@ -304,6 +342,12 @@ class ValidationEnvelopeMiddleware(Middleware):
                     "then retry the same call."
                 )
             allowed = await self._allowed_values(context, loc)
+            # `input` is the rejected value — except for a missing required
+            # argument, where pydantic reports the whole arguments dict. Echoing
+            # that as details.value would name every argument as the offender.
+            # (FastMCP reports "missing_argument"; pydantic's own is "missing".)
+            missing = str(first.get("type") or "").startswith("missing")
+            rejected = None if missing else first.get("input")
             # Placeholder meta: arguments never validated, so no resolved
             # cwd/config exists for this call — the error block is the contract.
             meta = _meta("", "inherit", "toolless", 0, 0, None)
@@ -315,8 +359,40 @@ class ValidationEnvelopeMiddleware(Middleware):
                     meta,
                     offending=field,
                     allowed_values=allowed,
+                    details=ErrorDetails(value=_render_value(rejected)),
+                    action=self._repair_action(context, loc),
                 )
             )
+
+    @staticmethod
+    def _repair_action(context, loc) -> RepairAction:
+        """A corrected call carrying every still-valid original argument.
+
+        Only the invalid top-level argument is dropped — the agent fills it back
+        in — so a long prompt or context never has to be restated. Arguments are
+        omitted entirely (leaving a bare retry_with_changes) when they exceed
+        REPAIR_ARGS_MAX_BYTES, so a repair block cannot become the largest thing in
+        the response; that bound is published as argument_reconstruction.
+
+        The echo is deliberate and bounded rather than filtered: no tool here takes
+        a credential-shaped argument (the free-text ones are prompt/context/
+        evidence/target/focus, which the caller just wrote), and the values go back
+        to that same caller in the same response. Filtering them would make the
+        repair non-callable, which is the whole point of the block. If a
+        secret-bearing argument is ever added, exclude it here — an argument that
+        must not be echoed must not be reconstructed."""
+        name = getattr(getattr(context, "message", None), "name", None)
+        args = getattr(getattr(context, "message", None), "arguments", None)
+        if not name or not isinstance(args, dict) or not loc:
+            return RepairAction(next_step="retry_with_changes")
+        remaining = {k: v for k, v in args.items() if k != str(loc[0])}
+        try:
+            size = len(json.dumps(remaining, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            return RepairAction(next_step="retry_with_changes", tool=str(name))
+        if size > REPAIR_ARGS_MAX_BYTES:
+            return RepairAction(next_step="retry_with_changes", tool=str(name))
+        return RepairAction(next_step="retry_with_changes", tool=str(name), arguments=remaining)
 
     @staticmethod
     async def _allowed_values(context, loc) -> list[str] | None:
@@ -353,13 +429,20 @@ def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
 
 
 def _job_not_found_error(job_id: str, meta: Meta) -> dict:
+    """Jobs are per-workspace, so the repair call must pin the SAME workspace the
+    lookup used — listing under a differently-resolved workspace would show an
+    unrelated (usually empty) set and read as confirmation that the job is gone."""
     return _err(
         "job_not_found",
         f"No job '{job_id}' in this workspace.",
         "Check the job_id, or start a new job; records expire after the TTL.",
         meta,
-        offending="job_id",
-        repair_tool="claude_job_list",
+        details=ErrorDetails(field="job_id", value=job_id, reason="unknown_or_expired"),
+        action=RepairAction(
+            next_step="call_tool",
+            tool="claude_job_list",
+            arguments={"workspace_root": meta.cwd},
+        ),
     )
 
 
@@ -453,7 +536,15 @@ def _resolve_paths(paths: list[str] | None, meta: Meta) -> tuple[list[str] | Non
         return None, _invalid_paths_error(meta, str(exc))
 
 
-def _workspace_error(code: str, workspace_root: str | None = None) -> dict:
+def _workspace_error(
+    code: str, workspace_root: str | None = None, roots: list[str] | None = None
+) -> dict:
+    """Build the ok:false envelope for a workspace-resolution failure.
+
+    `roots` is the snapshot the resolver already fetched, not a fresh lookup:
+    workspace_outside_roots is only reachable because that snapshot was non-empty,
+    so re-asking the client would add a round-trip that could fail or answer
+    differently and strip the very repair data this error exists to carry."""
     meta = _meta("", "inherit", "toolless", 0, 0, None)
     if code == "workspace_outside_roots":
         return _err(
@@ -462,7 +553,16 @@ def _workspace_error(code: str, workspace_root: str | None = None) -> dict:
             "Pass a workspace_root contained by an MCP root, omit workspace_root to "
             "use the first root, or configure the intended directory as a root.",
             meta,
-            offending="workspace_root",
+            details=ErrorDetails(
+                field="workspace_root",
+                value=workspace_root,
+                reason="outside_mcp_roots",
+                allowed_roots=roots or None,
+            ),
+            action=RepairAction(
+                next_step="retry_with_changes",
+                arguments={"workspace_root": roots[0]} if roots else None,
+            ),
         )
     if workspace_root is None:
         return _err(
@@ -520,7 +620,9 @@ async def _resolve_workspace(workspace_root, ctx):
 
     Order: explicit workspace_root arg -> first file:// MCP root -> os.getcwd().
     Returns (path, error_code, source). error_code is None on success; on failure
-    path is None and source is None."""
+    path is None and source is None. `roots` is the snapshot used for the
+    containment check, returned so the error builder can name the allowed roots
+    without asking the client again."""
     roots = await _file_roots(ctx)
     if workspace_root:
         path, source = workspace_root, "param"
@@ -534,10 +636,10 @@ async def _resolve_workspace(workspace_root, ctx):
     # against the very cwd this resolution exists to stop trusting. Roots (file:// URIs)
     # and os.getcwd() are always absolute already.
     if not os.path.isabs(path) or not os.path.isdir(path):  # noqa: PTH117, PTH112 — path is a str by contract
-        return None, "invalid_workspace_root", None
+        return None, "invalid_workspace_root", None, roots
     if workspace_root and roots and not any(_contained_by(path, root) for root in roots):
-        return None, "workspace_outside_roots", None
-    return path, None, source
+        return None, "workspace_outside_roots", None, roots
+    return path, None, source, roots
 
 
 def _utf8_len(value: str | None) -> int:
@@ -556,7 +658,25 @@ def _validate_input_size(fields: dict[str, str | None], meta: Meta) -> dict | No
         "Shorten the prompt/evidence/context, split the request, or raise "
         "CLAUDE_IN_CODEX_MAX_INPUT_BYTES if this workspace intentionally allows it.",
         meta,
-        offending=largest,
+        details=ErrorDetails(
+            field=largest,
+            reason="user_input_over_limit",
+            limit_bytes=limit,
+            actual_bytes=total,
+        ),
+        action=RepairAction(next_step="retry_with_changes"),
+    )
+
+
+def _oversized_diff_details(ctx_data) -> ErrorDetails:
+    """Typed sizes for a diff that blew the gathered-context cap.
+
+    diff_bytes is the pre-truncation size of the redacted diff, so the pair is
+    directly comparable and an agent can compute how much to narrow by."""
+    return ErrorDetails(
+        reason="diff_over_limit",
+        max_diff_bytes=MAX_DIFF_BYTES,
+        diff_bytes=ctx_data.diff_bytes,
     )
 
 
@@ -922,9 +1042,9 @@ async def claude_ask(
     Egress: prompt/context and access=readonly reads are verbatim; reply
     redaction is best effort.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     r, err = _resolve(
         config_mode,
         access,
@@ -1015,9 +1135,9 @@ async def claude_review_changes(
     Egress: redaction is best effort for gathered diff/output, not free-form
     inputs or access=readonly reads.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     # Validate options BEFORE touching git, so bad config isn't masked by git errors.
     r, err = _resolve(
         config_mode,
@@ -1091,6 +1211,8 @@ async def claude_review_changes(
                 "The diff is too large to review safely.",
                 ctx_data.truncation_hint or "Narrow the scope.",
                 meta,
+                details=_oversized_diff_details(ctx_data),
+                action=RepairAction(next_step="retry_with_changes"),
             )
         )
     meta = _meta(
@@ -1194,9 +1316,9 @@ async def claude_adversarial_review(
     Egress: redaction is best effort for gathered diff/output, not free-form
     inputs or access=readonly reads.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     r, err = _resolve(
         config_mode,
         access,
@@ -1315,6 +1437,8 @@ async def claude_adversarial_review(
                     "The attached diff is too large to review safely.",
                     ctx_data.truncation_hint or "Narrow the scope.",
                     meta,
+                    details=_oversized_diff_details(ctx_data),
+                    action=RepairAction(next_step="retry_with_changes"),
                 )
             )
         meta = _meta(
@@ -1449,9 +1573,9 @@ async def claude_review_changes_async(
     Egress: redaction is best effort for gathered diff/output, not free-form
     inputs or access=readonly reads.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     r, err = _resolve(
         config_mode,
         access,
@@ -1530,6 +1654,8 @@ async def claude_review_changes_async(
                 "The diff is too large to review safely.",
                 ctx_data.truncation_hint or "Narrow the scope.",
                 meta,
+                details=_oversized_diff_details(ctx_data),
+                action=RepairAction(next_step="retry_with_changes"),
             )
         )
     meta = _meta(
@@ -1695,9 +1821,9 @@ async def claude_job_status(
     result_available, polling hints, and cost when available. If
     result_available is true, call claude_job_result.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     data = await run_sync(lambda: jobs.status(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
@@ -1730,9 +1856,9 @@ async def claude_job_result(
     structured envelope as claude_review_changes, with meta.job_id set. Use
     claude_job_consume_result to fetch and delete instead.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     payload, found = await run_sync(lambda: jobs.result(cwd, job_id, False))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
@@ -1763,9 +1889,9 @@ async def claude_job_consume_result(
     Non-done jobs are not deleted. Deletion is irreversible; the result cannot be
     re-fetched afterward.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     payload, found = await run_sync(lambda: jobs.result(cwd, job_id, True))
     if not found:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
@@ -1795,9 +1921,9 @@ async def claude_job_cancel(
     process and marks the job cancelled; cancelled jobs cannot be resumed.
     Already-terminal jobs are returned unchanged.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     data = await run_sync(lambda: jobs.cancel(cwd, job_id))
     if data is None:
         meta = _meta(cwd, "inherit", "toolless", 0, 0, None, workspace_source=ws_source)
@@ -1840,9 +1966,9 @@ async def claude_review_dry_run(
     diff byte size, whether it would be truncated, and how many secret-looking
     files would be redacted. Read-only; makes no paid call.
     """
-    cwd, ws_err, ws_source = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     dry_config_mode, cm_err = _resolve_config_mode_only(
         config_mode, cwd, scope=scope, base=base, paths=paths, workspace_source=ws_source, head=head
     )
@@ -1921,9 +2047,9 @@ async def claude_job_list(
     timeout, and TTL-expired records are deleted; a terminal job's stored result is
     never altered.
     """
-    cwd, ws_err, _ = await _resolve_workspace(workspace_root, ctx)
+    cwd, ws_err, _, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
-        return _result(_workspace_error(ws_err, workspace_root))
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
     data = await run_sync(lambda: jobs.list_jobs(cwd))
     return _result(data)
 
@@ -1955,8 +2081,12 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 code="unsupported_config_mode",
                 message=f"Unknown config_mode '{d.config_mode}'.",
                 repair="Set CLAUDE_IN_CODEX_CLAUDE_CONFIG to one of: inherit, scoped, safe, bare.",
-                offending_param="config_mode",
-                allowed_values=["inherit", "scoped", "safe", "bare"],
+                details=ErrorDetails(
+                    field="config_mode",
+                    value=str(d.config_mode),
+                    allowed_values=["inherit", "scoped", "safe", "bare"],
+                ),
+                action=RepairAction(next_step="fix_environment"),
             )
         )
     if d.access not in ("toolless", "readonly") and not access_is_placeholder:
@@ -1965,8 +2095,12 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                 code="unsupported_access",
                 message=f"Unknown access '{d.access}'.",
                 repair="Set CLAUDE_IN_CODEX_ACCESS to one of: toolless, readonly.",
-                offending_param="access",
-                allowed_values=["toolless", "readonly"],
+                details=ErrorDetails(
+                    field="access",
+                    value=str(d.access),
+                    allowed_values=["toolless", "readonly"],
+                ),
+                action=RepairAction(next_step="fix_environment"),
             )
         )
     if d.config_mode == "safe" and found and not safe_available(fs.help_parsed, fs.supported):
@@ -1978,8 +2112,13 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                     "Update Claude Code, or set CLAUDE_IN_CODEX_CLAUDE_CONFIG to "
                     "inherit, scoped, or bare."
                 ),
-                offending_param="config_mode",
-                allowed_values=["inherit", "scoped", "bare"],
+                details=ErrorDetails(
+                    field="config_mode",
+                    value="safe",
+                    reason="unsupported_by_installed_cli",
+                    allowed_values=["inherit", "scoped", "bare"],
+                ),
+                action=RepairAction(next_step="fix_environment"),
             )
         )
     if d.config_mode == "bare" and found and not bare_available():
@@ -1991,7 +2130,8 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
                     "Set ANTHROPIC_API_KEY, or set CLAUDE_IN_CODEX_CLAUDE_CONFIG to "
                     "inherit, scoped, or safe."
                 ),
-                offending_param="config_mode",
+                details=ErrorDetails(field="config_mode", value="bare", reason="api_key_missing"),
+                action=RepairAction(next_step="fix_environment"),
             )
         )
     return errors
@@ -2142,6 +2282,279 @@ def claude_status() -> ToolResult:
     return _result(status.model_dump(mode="json", exclude_none=True))
 
 
+# Per-tool error branch maps (#60). Grouped by the stage that raises them, so a
+# tool's set is the union of the stages it actually runs. tests/test_server.py
+# cross-checks these against a static walk of the real _err/ErrorInfo call sites.
+
+# Any tool that takes arguments: ValidationEnvelopeMiddleware runs before the body.
+_ARG_ERRORS = ["invalid_arguments"]
+# Any tool that resolves a workspace directory.
+_WORKSPACE_ERRORS = ["invalid_workspace_root", "workspace_outside_roots"]
+# Resolving the run configuration for a call that will launch claude.
+_CONFIG_ERRORS = ["unsupported_config_mode", "unsupported_access", "api_key_missing"]
+# Gathering a git diff (and the size cap that applies to gathered context).
+_GIT_ERRORS = [
+    "invalid_scope",
+    "invalid_base",
+    "invalid_head",
+    "invalid_paths",
+    "not_a_git_repo",
+    "git_unavailable",
+    "context_too_large",
+]
+# Launching claude and interpreting what came back.
+_CLAUDE_ERRORS = [
+    "claude_not_found",
+    "claude_auth_required",
+    "api_key_invalid",
+    "claude_permission_error",
+    "budget_exceeded",
+    "timeout",
+    "nonzero_exit",
+    "invalid_json",
+    "cli_contract_changed",
+]
+# Looking a background job up by id in a workspace.
+_JOB_LOOKUP_ERRORS = ["job_not_found"]
+# Fetching the result of a job that did not finish with an envelope.
+_JOB_NONDONE_ERRORS = ["job_running", "job_cancelled", "job_timeout", "job_failed"]
+_INTERNAL_ERRORS = ["internal_error"]
+
+# Everything a paid call can fail on BEFORE claude produces output. The async
+# starter stops here: it returns a job handle, so every completion-time code
+# surfaces later through claude_job_result, not from the start call.
+_PAID_PREFLIGHT_ERRORS = [
+    *_ARG_ERRORS,
+    *_WORKSPACE_ERRORS,
+    *_CONFIG_ERRORS,
+    # The only launch failure the starter reports itself: the executable is
+    # missing, so no job is ever spawned.
+    "claude_not_found",
+    *_INTERNAL_ERRORS,
+]
+_PAID_SYNC_ERRORS = [*_PAID_PREFLIGHT_ERRORS, *_CLAUDE_ERRORS]
+_JOB_LIFECYCLE_ERRORS = [*_ARG_ERRORS, *_WORKSPACE_ERRORS, *_JOB_LOOKUP_ERRORS]
+
+_TOOL_ERROR_CODES: dict[str, list[str]] = {
+    # No arguments and no workspace, so no ok:false envelope is possible. These
+    # codes reach the caller through StatusResult.default_errors instead — a
+    # different carrier, but the same codes and the same recovery contract.
+    "claude_status": [*_CONFIG_ERRORS, "unexpanded_env_placeholder"],
+    "claude_capabilities": [],
+    "claude_models": [],
+    "claude_review_dry_run": [
+        *_ARG_ERRORS,
+        *_WORKSPACE_ERRORS,
+        "unsupported_config_mode",
+        *_GIT_ERRORS,
+        *_INTERNAL_ERRORS,
+    ],
+    # No diff gathering: context_too_large here is the user-supplied-text cap.
+    "claude_ask": [*_PAID_SYNC_ERRORS, "context_too_large"],
+    "claude_review_changes": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
+    "claude_adversarial_review": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
+    # Preflight only: a started job's own failures arrive via claude_job_result.
+    "claude_review_changes_async": [*_PAID_PREFLIGHT_ERRORS, *_GIT_ERRORS],
+    "claude_job_status": _JOB_LIFECYCLE_ERRORS,
+    "claude_job_cancel": _JOB_LIFECYCLE_ERRORS,
+    # The fetched envelope is the original tool's, so its failure codes surface
+    # here too, alongside the not-done lifecycle codes.
+    "claude_job_result": [
+        *_JOB_LIFECYCLE_ERRORS,
+        *_JOB_NONDONE_ERRORS,
+        *_CLAUDE_ERRORS,
+        *_INTERNAL_ERRORS,
+    ],
+    "claude_job_consume_result": [
+        *_JOB_LIFECYCLE_ERRORS,
+        *_JOB_NONDONE_ERRORS,
+        *_CLAUDE_ERRORS,
+        *_INTERNAL_ERRORS,
+    ],
+    "claude_job_list": [*_ARG_ERRORS, *_WORKSPACE_ERRORS],
+}
+
+# code -> (condition, ever-retryable, ErrorDetails fields it may populate).
+# next_step is NOT listed here: it comes from schemas.DEFAULT_NEXT_STEP, which is
+# the same table the error envelope itself uses, so the published default and the
+# emitted default cannot disagree.
+_ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
+    ("claude_not_found", "The `claude` executable is not on PATH.", False, []),
+    (
+        "claude_auth_required",
+        "claude is installed but not logged in for the resolved config_mode.",
+        False,
+        [],
+    ),
+    (
+        "api_key_missing",
+        "config_mode=bare was resolved but ANTHROPIC_API_KEY is unset.",
+        False,
+        ["field", "value", "reason"],
+    ),
+    ("api_key_invalid", "ANTHROPIC_API_KEY is set but the API rejected it.", False, []),
+    (
+        "unsupported_config_mode",
+        "config_mode is not one of the four modes, or =safe on a CLI without --safe-mode.",
+        False,
+        ["field", "value", "reason", "allowed_values"],
+    ),
+    (
+        "unsupported_access",
+        "access is not toolless or readonly.",
+        False,
+        ["field", "value", "allowed_values"],
+    ),
+    (
+        "unexpanded_env_placeholder",
+        "A tracked env var arrived as a literal ${...}; the host did not expand it.",
+        False,
+        [],
+    ),
+    (
+        "invalid_arguments",
+        "An argument failed the tool's inputSchema before the body ran.",
+        False,
+        ["field", "value", "allowed_values"],
+    ),
+    (
+        "invalid_scope",
+        "scope is not working_tree, staged, or branch.",
+        False,
+        ["field", "allowed_values"],
+    ),
+    ("invalid_base", "base is not a locally resolvable git ref.", False, ["field"]),
+    (
+        "invalid_head",
+        "head is not locally resolvable, or was passed without scope=branch.",
+        False,
+        ["field"],
+    ),
+    (
+        "invalid_paths",
+        "paths is not a list of plain repo-relative paths.",
+        False,
+        ["field"],
+    ),
+    (
+        "invalid_workspace_root",
+        "The resolved workspace is not an existing absolute directory.",
+        False,
+        ["field"],
+    ),
+    (
+        "workspace_outside_roots",
+        "workspace_root is not contained by any client-supplied MCP root.",
+        False,
+        ["field", "value", "reason", "allowed_roots"],
+    ),
+    (
+        "not_a_git_repo",
+        "The resolved workspace is not inside a git repository.",
+        False,
+        [],
+    ),
+    ("git_unavailable", "git is not on PATH.", False, []),
+    (
+        "context_too_large",
+        "User-supplied text exceeded the input cap, or the gathered diff exceeded the diff cap.",
+        False,
+        ["field", "reason", "limit_bytes", "actual_bytes", "max_diff_bytes", "diff_bytes"],
+    ),
+    ("timeout", "claude did not finish within timeout_seconds.", True, []),
+    (
+        "budget_exceeded",
+        "claude hit the best-effort max-budget stop threshold. Replaying it unchanged "
+        "spends again and stops the same way.",
+        False,
+        [],
+    ),
+    (
+        "claude_permission_error",
+        "claude was denied a permission the run needed.",
+        False,
+        [],
+    ),
+    (
+        "nonzero_exit",
+        "claude exited non-zero or reported an error result. Rate-limit and overload "
+        "cases are marked retryable on the error itself.",
+        True,
+        [],
+    ),
+    ("invalid_json", "claude's output was not the expected JSON envelope.", False, []),
+    (
+        "cli_contract_changed",
+        "The installed claude rejected a flag or value this plugin sends.",
+        False,
+        [],
+    ),
+    ("internal_error", "An unexpected server-side failure.", True, ["field"]),
+    (
+        "job_not_found",
+        "No job with that id in the resolved workspace (wrong id, wrong workspace, "
+        "or the record expired).",
+        False,
+        ["field", "value", "reason"],
+    ),
+    (
+        "job_running",
+        "The job has not finished; no result exists yet. The same fetch succeeds once it does.",
+        True,
+        ["field", "value"],
+    ),
+    (
+        "job_cancelled",
+        "The job was cancelled before producing a result.",
+        False,
+        ["field", "value"],
+    ),
+    (
+        "job_timeout",
+        "The job passed its wall-clock deadline and was reaped.",
+        False,
+        ["field", "value"],
+    ),
+    (
+        "job_failed",
+        "The job's process ended without writing a result envelope. Terminal: the "
+        "same fetch returns job_failed forever, so diagnose and start a new job.",
+        False,
+        ["field", "value"],
+    ),
+]
+
+
+_ASYNC_LIFECYCLE = AsyncLifecycle(
+    start_tools=["claude_review_changes_async"],
+    status_tool="claude_job_status",
+    result_tool="claude_job_result",
+    consume_tool="claude_job_consume_result",
+    cancel_tool="claude_job_cancel",
+    list_tool="claude_job_list",
+    handle_param="job_id",
+    poll_delay_field="poll_after_ms",
+    result_ready_field="result_available",
+    state_field="status",
+    running_states=["running"],
+    terminal_states=["done", "failed", "cancelled", "timeout"],
+    nonresult_terminal_codes=["job_failed", "job_cancelled", "job_timeout"],
+    notes=[
+        "This server predates MCP's native task support; the lifecycle is these "
+        "tools, not tasks/* requests.",
+        "Jobs are scoped to the resolved workspace: pass the same workspace_root to "
+        "every lifecycle call, or a valid job_id reads as job_not_found.",
+        "Wait at least poll_after_ms between claude_job_status calls.",
+        "Fetch the result only once result_available is true; fetching earlier "
+        "returns an ok:false envelope with job_running.",
+        "A started job keeps running and keeps spending if you never poll it; "
+        "claude_job_cancel is the only way to stop it early.",
+        "An expired record is deleted, so it reports job_not_found rather than a "
+        "distinct expired state.",
+    ],
+)
+
+
 def _capabilities_payload() -> dict:
     """Build the capability contract. Shared by claude_capabilities."""
 
@@ -2160,6 +2573,9 @@ def _capabilities_payload() -> dict:
             required_params=required or [],
             key_optional_params=optional or [],
             returns=returns,
+            # Deduped and sorted so the branch map is stable and comparable; the
+            # groups it is composed from deliberately overlap.
+            error_codes=sorted(set(_TOOL_ERROR_CODES[name])),
         )
 
     execution_knobs = ["config_mode", "access", "model", "effort", "max_budget_usd"]
@@ -2337,6 +2753,28 @@ def _capabilities_payload() -> dict:
         # Published once here so the advertised output schemas can carry the
         # compact error branch instead of inlining this enum 11 times.
         error_codes=sorted(get_args(ErrorCode)),
+        error_catalog=[
+            ErrorCodeDoc(
+                code=code,
+                condition=condition,
+                next_step=DEFAULT_NEXT_STEP[code],
+                ever_retryable=ever_retryable,
+                detail_fields=detail_fields,
+            )
+            for code, condition, ever_retryable, detail_fields in _ERROR_CATALOG
+        ],
+        argument_reconstruction=(
+            "On invalid_arguments the action carries the original call with only the "
+            f"invalid argument removed, so you refill one field. Above {REPAIR_ARGS_MAX_BYTES} "
+            "bytes of remaining arguments it omits them and names only the tool, so a "
+            "large prompt is never echoed back. Those arguments are your own inputs "
+            "returned verbatim to you — no tool here takes a credential argument — but "
+            "treat the block as input-grade content if your transcript is retained "
+            "differently from your requests. Other codes name a follow-up tool call "
+            "(action.tool + action.arguments) or no call at all — always branch on "
+            "action.next_step first."
+        ),
+        async_lifecycle=_ASYNC_LIFECYCLE,
         data_egress=(
             "Paid tools (claude_ask, claude_review_changes, claude_adversarial_review, "
             "claude_review_changes_async) send context to Anthropic via the `claude` CLI. "

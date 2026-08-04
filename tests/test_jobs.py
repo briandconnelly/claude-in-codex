@@ -411,6 +411,22 @@ def test_failed_job_with_drift_stderr_is_cli_contract_changed(tmp_path):
     assert payload["error"]["code"] == "cli_contract_changed"
 
 
+def test_job_failed_is_not_retryable_and_names_the_readiness_probe(tmp_path):
+    """A terminal record never becomes ok:true, so re-fetching it is not a retry.
+
+    retryable=True here would loop an agent on a fetch that returns job_failed
+    forever; the recoverable action is to diagnose, then launch a new job."""
+    job_id, _ = jobs.start_job(["sh", "-c", "exit 3"], str(tmp_path), _cfg())
+    _await_done(str(tmp_path), job_id)
+    payload, found = jobs.result(str(tmp_path), job_id)
+    assert found
+    err = payload["error"]
+    assert err["code"] == "job_failed"
+    assert err["retryable"] is False
+    assert "retry_after_ms" not in err
+    assert err["action"] == {"next_step": "call_tool", "tool": "claude_status"}
+
+
 def test_failed_job_without_drift_stays_job_failed(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(["sh", "-c", "printf 'boom' 1>&2; exit 1"], cwd, _cfg())
@@ -808,8 +824,10 @@ def test_job_running_result_error_carries_repair_call(tmp_path, monkeypatch):
     assert found
     err = payload["error"]
     assert err["code"] == "job_running"
-    assert err["repair_tool"] == "claude_job_status"
-    assert err["repair_arguments"] == {"job_id": job_id}
+    assert err["action"]["tool"] == "claude_job_status"
+    # The workspace is pinned: jobs are per-workspace, so a status call that
+    # resolved a different workspace would report job_not_found.
+    assert err["action"]["arguments"] == {"job_id": job_id, "workspace_root": str(tmp_path)}
     jobs.cancel(str(tmp_path), job_id)
 
 

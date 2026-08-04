@@ -137,8 +137,12 @@ def test_advertised_schema_still_accepts_a_real_error_envelope(name):
             "message": "No job exists in this workspace.",
             "repair": "Call claude_job_list to see live jobs.",
             "retryable": False,
-            "repair_tool": "claude_job_list",
-            "repair_arguments": {"workspace_root": "/repo"},
+            "details": {"field": "job_id", "value": "abc", "reason": "unknown_or_expired"},
+            "action": {
+                "next_step": "call_tool",
+                "tool": "claude_job_list",
+                "arguments": {"workspace_root": "/repo"},
+            },
         },
         "meta": {"cwd": "/repo", "elapsed_ms": 1, "fingerprint": "x"},
     }

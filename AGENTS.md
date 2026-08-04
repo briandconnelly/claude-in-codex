@@ -67,7 +67,9 @@ uv run pytest tests/test_jobs.py --no-cov
   procedure.
 - Do not change the `.mcp.json` `@vX.Y.Z` ref except as part of an intentional,
   coordinated release/version bump.
-- Changelog entries live in `CHANGELOG.md` under `## X.Y.Z - YYYY-MM-DD`. This
+- Add changelog entries under `## Unreleased` at the top of `CHANGELOG.md`. A
+  release renames that heading to `## X.Y.Z - YYYY-MM-DD`; never add entries to an
+  already-released section. This
   project uses pre-1.0 semantic versioning: minor versions may change the
   agent-visible MCP surface, and patch versions are for compatible fixes.
 - Agent-visible MCP surface changes must bump `FINGERPRINT` in

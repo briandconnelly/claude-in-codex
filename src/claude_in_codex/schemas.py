@@ -6,19 +6,21 @@ import json
 from typing import Annotated, Literal, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-31"
+FINGERPRINT = "claude-in-codex/0.1/schema-32"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
 FINGERPRINT_COVERS = [
     "tool records (names, descriptions, titles, annotations, input/output schemas)",
     "resource and resource-template records and prompt scaffolds",
-    "error-code catalog",
+    "error-code catalog, per-code conditions, and per-tool error maps",
+    "error envelope shape (typed details and the repair action)",
+    "async-lifecycle descriptor",
     "config_mode/access/scope/detail/effort value sets",
     "capability summary and capabilities payload",
 ]
@@ -209,19 +211,145 @@ class SuccessResult(BaseModel):
     meta: Meta
 
 
+class ErrorDetails(BaseModel):
+    """Typed failure detail, so recovery never requires parsing `message`.
+
+    Every field is optional and populated only where it applies to the code; an
+    absent field means "not applicable / not known", never "zero". Field names are
+    stable across codes, so an agent branches on presence rather than on prose."""
+
+    model_config = ConfigDict(extra="forbid")
+    # The offending argument, as a dotted path into the call's arguments.
+    field: str | None = None
+    # The rejected value, rendered as a string so the detail block never carries a
+    # secret-bearing structure verbatim. Omitted when echoing it adds nothing.
+    value: str | None = None
+    # Short machine-comparable reason token (e.g. "not_a_member", "expired").
+    reason: str | None = None
+    # Valid choices for `field` when it is a closed enum.
+    allowed_values: list[str] | None = None
+    # context_too_large, user-supplied text path: the cap and what was supplied.
+    limit_bytes: int | None = None
+    actual_bytes: int | None = None
+    # context_too_large, gathered-diff path: the cap and the redacted diff's size.
+    max_diff_bytes: int | None = None
+    diff_bytes: int | None = None
+    # workspace_outside_roots: the client-supplied MCP roots the workspace must
+    # sit under. Empty is impossible here — the code only fires when roots exist.
+    allowed_roots: list[str] | None = None
+
+
+RepairStep = Literal[
+    # The identical call may succeed later without any change (pairs with retryable).
+    "retry_same_call",
+    # Change the named argument(s) and call the same tool again. `arguments`, when
+    # present, is the corrected call.
+    "retry_with_changes",
+    # Call the named tool with the given arguments first, then decide.
+    "call_tool",
+    # Fix something outside the call (install/auth/config); no argument change helps.
+    "fix_environment",
+    # Nothing mechanical applies; read `repair` prose.
+    "no_automatic_repair",
+]
+
+
+# The next step every error of a given code gets when its call site does not name
+# a more specific one. Published verbatim as claude_capabilities.error_catalog so
+# the documented default and the emitted default cannot drift; a call site that
+# CAN do better (a rebuilt call, a job lookup) passes its own RepairAction.
+# Every ErrorCode must appear here — tests/test_schemas.py enforces it.
+DEFAULT_NEXT_STEP: dict[str, RepairStep] = {
+    # Nothing about the call is wrong; the machine or account is not ready.
+    "claude_not_found": "fix_environment",
+    "claude_auth_required": "fix_environment",
+    "api_key_missing": "fix_environment",
+    "api_key_invalid": "fix_environment",
+    "unexpanded_env_placeholder": "fix_environment",
+    "git_unavailable": "fix_environment",
+    "cli_contract_changed": "fix_environment",
+    # The environment supplied a bad value; env config, not a call argument.
+    "unsupported_config_mode": "fix_environment",
+    "unsupported_access": "fix_environment",
+    # A different call can succeed; the same one never will.
+    "invalid_arguments": "retry_with_changes",
+    "invalid_scope": "retry_with_changes",
+    "invalid_base": "retry_with_changes",
+    "invalid_head": "retry_with_changes",
+    "invalid_paths": "retry_with_changes",
+    "invalid_workspace_root": "retry_with_changes",
+    "workspace_outside_roots": "retry_with_changes",
+    "not_a_git_repo": "retry_with_changes",
+    "context_too_large": "retry_with_changes",
+    # A best-effort stop threshold: replaying it spends again and stops again,
+    # so the caller must raise the cap or shrink the request (#82).
+    "budget_exceeded": "retry_with_changes",
+    "claude_permission_error": "retry_with_changes",
+    # Transient by nature.
+    "timeout": "retry_same_call",
+    # Poll, list, or diagnose rather than re-issuing the failed fetch. A terminal
+    # job_failed never becomes ok:true on retry, so it points at claude_status.
+    "job_not_found": "call_tool",
+    "job_running": "call_tool",
+    "job_failed": "call_tool",
+    # Opaque: the cause is in the message, and no mechanical step follows.
+    "nonzero_exit": "no_automatic_repair",
+    "invalid_json": "no_automatic_repair",
+    "internal_error": "no_automatic_repair",
+    "job_cancelled": "no_automatic_repair",
+    "job_timeout": "no_automatic_repair",
+}
+
+
+class RepairAction(BaseModel):
+    """The single deterministic recovery instruction for an error.
+
+    `tool` names a tool registered by this server and `arguments` are literally
+    callable — pass them through unchanged. Both are absent for the steps that do
+    not name a call (retry_same_call, fix_environment, no_automatic_repair), and
+    `arguments` may be absent on retry_with_changes when the corrected call could
+    not be reconstructed (see `argument_reconstruction` in claude_capabilities)."""
+
+    model_config = ConfigDict(extra="forbid")
+    next_step: RepairStep
+    tool: str | None = None
+    arguments: dict | None = None
+
+
 class ErrorInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     code: ErrorCode
     message: str
+    # Human/agent-readable prose. Recovery logic should branch on `action` and
+    # `details`; this stays for the cases prose explains better.
     repair: str
-    offending_param: str | None = None
+    # True only when re-issuing the IDENTICAL call may succeed later. It never
+    # means "a corrected call may succeed" — that is action.next_step
+    # =retry_with_changes, which is always paired with retryable=False.
     retryable: bool = False
-    # Structured repair (house convention, additive; omitted when not mechanical):
-    # allowed_values lists the valid values for offending_param; repair_tool plus
-    # repair_arguments name a directly callable follow-up.
-    allowed_values: list[str] | None = None
-    repair_tool: str | None = None
-    repair_arguments: dict | None = None
+    # Advisory delay before a retryable retry. None means "no delay is known",
+    # not "retry immediately"; always None when retryable is False.
+    retry_after_ms: int | None = None
+    details: ErrorDetails | None = None
+    # Always present: every error names exactly one next step.
+    action: RepairAction | None = None
+
+    @model_validator(mode="after")
+    def _default_action(self) -> ErrorInfo:
+        """Fill `action` from the code's default when a call site did not name one.
+
+        Keeps the field total (every error has exactly one next step) without
+        forcing all ~30 construction sites to restate the obvious. An explicit
+        retryable=True wins over the table: the site is asserting that this
+        particular failure clears on its own, which is exactly retry_same_call."""
+        if self.action is None:
+            step: RepairStep = (
+                "retry_same_call"
+                if self.retryable
+                else DEFAULT_NEXT_STEP.get(self.code, "no_automatic_repair")
+            )
+            self.action = RepairAction(next_step=step)
+        return self
 
 
 class ErrorResult(BaseModel):
@@ -295,6 +423,58 @@ class ToolCapability(BaseModel):
     required_params: list[str] = Field(default_factory=list)
     key_optional_params: list[str] = Field(default_factory=list)
     returns: str
+    # The error codes this tool can report, as a branch map for the caller. A code
+    # absent here is not raised by this tool. Normally these arrive in an ok:false
+    # envelope; claude_status has no error branch and reports its codes through
+    # StatusResult.default_errors instead. Conditions are documented once in
+    # CapabilitiesResult.error_catalog rather than repeated per tool.
+    error_codes: list[str] = Field(default_factory=list)
+
+
+class ErrorCodeDoc(BaseModel):
+    """One entry in the server-wide error catalog: when a code fires and what to do."""
+
+    model_config = ConfigDict(extra="forbid")
+    code: str
+    condition: str
+    # The default action.next_step for this code, straight from DEFAULT_NEXT_STEP.
+    # A specific error may carry a more specific action (e.g. invalid_arguments
+    # naming the rebuilt call), so read the error's own action first.
+    next_step: RepairStep
+    # Whether this code can EVER be retried as-is. False means no instance of it
+    # is worth replaying unchanged. True means some are — the individual error's
+    # own `retryable` is what says whether this one is.
+    ever_retryable: bool
+    # ErrorDetails fields this code may populate; which ones appear depends on the
+    # failing path. Empty when the code carries no typed detail at all.
+    detail_fields: list[str] = Field(default_factory=list)
+
+
+class AsyncLifecycle(BaseModel):
+    """Structured description of the background-job lifecycle.
+
+    This server predates MCP's native task support, so async work runs through
+    named tools. Publishing the surface structurally lets an agent drive it
+    without parsing capability prose."""
+
+    model_config = ConfigDict(extra="forbid")
+    start_tools: list[str]
+    status_tool: str
+    result_tool: str
+    consume_tool: str
+    cancel_tool: str
+    list_tool: str
+    # The argument that identifies a job on every lifecycle tool.
+    handle_param: str
+    # Fields to branch on while polling.
+    poll_delay_field: str
+    result_ready_field: str
+    state_field: str
+    running_states: list[str]
+    terminal_states: list[str]
+    # States that make the result fetch return an ok:false envelope, not a result.
+    nonresult_terminal_codes: list[str]
+    notes: list[str] = Field(default_factory=list)
 
 
 class CapabilitiesResult(BaseModel):
@@ -318,6 +498,14 @@ class CapabilitiesResult(BaseModel):
     # defaulted: this is now the catalog's only machine-readable home, so a
     # missing one must fail result construction rather than degrade to [].
     error_codes: list[str]
+    # Per-code conditions, default next step, retryability, and typed detail
+    # fields. Required for the same reason as error_codes: this is its only home.
+    error_catalog: list[ErrorCodeDoc]
+    # How ErrorInfo.action.arguments is built, so an agent knows when a
+    # retry_with_changes will and will not carry a literally callable call.
+    argument_reconstruction: str
+    # The background-job lifecycle, structurally.
+    async_lifecycle: AsyncLifecycle
     # Machine-readable egress disclosure: where paid-tool context goes and the
     # precise limits of redaction. Mirrors the per-tool docstring notes.
     data_egress: str
@@ -470,9 +658,25 @@ _META_STUB = {
 _ERROR_INFO_STUB = {
     "type": "object",
     "description": (
-        "Failure detail: code, message, repair, offending_param, retryable, "
-        "allowed_values, repair_tool, repair_arguments. `code` is one of the "
-        "error codes published by claude_capabilities (error_codes)."
+        "Failure detail: code, message, repair, retryable, retry_after_ms, details "
+        "(typed), action{next_step,tool,arguments} (always set — branch on it, not on "
+        "prose). Codes, per-code conditions, and per-tool code maps: claude_capabilities."
+    ),
+}
+
+
+# Sub-blocks of CapabilitiesResult that the payload itself documents field by
+# field. Stubbed in the advertised schema only; the wire payload is unchanged.
+_CAPABILITIES_SUBSTUBS = {
+    "ErrorCodeDoc": ("One error code: code, condition, next_step, ever_retryable, detail_fields."),
+    "AsyncLifecycle": (
+        "Background-job lifecycle: start/status/result/consume/cancel/list tool names, "
+        "handle_param, poll_delay_field, result_ready_field, state_field, "
+        "running/terminal states, nonresult_terminal_codes, notes."
+    ),
+    "ToolCapability": (
+        "One tool: name, cost, use_when, required_params, key_optional_params, "
+        "returns, error_codes."
     ),
 }
 
@@ -523,6 +727,17 @@ def _slim(schema: dict) -> dict:
     # STATUS_SCHEMA even though it has no ErrorResult branch of its own.
     if "ErrorInfo" in defs:
         defs["ErrorInfo"] = dict(_ERROR_INFO_STUB)
+    # ErrorInfo's own sub-models ride in wherever ErrorInfo does; the stub above
+    # already describes their shape, so leaving the full definitions advertised
+    # would pay for the same contract twice.
+    for name in ("ErrorDetails", "RepairAction"):
+        defs.pop(name, None)
+    # CapabilitiesResult is self-describing on the wire: its payload names every
+    # field of these blocks, so advertising their full definitions to every client
+    # that only wants the tool list is pure discovery cost.
+    for name, summary in _CAPABILITIES_SUBSTUBS.items():
+        if name in defs:
+            defs[name] = {"type": "object", "description": summary}
     return cast("dict", _strip_titles(out))
 
 

@@ -5,9 +5,34 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
-## 0.7.0 - 2026-08-03
+## Unreleased
 
 ### Changed
+
+
+- Failure recovery is now machine-actionable without parsing prose. `ErrorInfo`'s four
+  scattered recovery fields (`offending_param`, `allowed_values`, `repair_tool`,
+  `repair_arguments`) are replaced by two typed blocks: `details` (`field`, `value`,
+  `reason`, `allowed_values`, `limit_bytes`/`actual_bytes`, `max_diff_bytes`/`diff_bytes`,
+  `allowed_roots`) and `action` — always present, naming exactly one `next_step` of
+  `retry_same_call`, `retry_with_changes`, `call_tool`, `fix_environment`, or
+  `no_automatic_repair`, plus a registered `tool` and literally callable `arguments` where
+  one applies. `retryable` now means only "the identical call may succeed later" and is
+  paired with a nullable `retry_after_ms`; a call that needs different arguments is
+  `retryable: false` with `next_step: retry_with_changes`. Repairs are callable on the
+  first attempt: an `invalid_arguments` failure returns the original call with only the
+  invalid argument removed (omitted above 8 KiB so a large prompt is never echoed back),
+  `job_not_found` and `job_running` pin the resolved `workspace_root`, `context_too_large`
+  reports both the cap and the actual size, and `workspace_outside_roots` publishes the
+  client's roots. `claude_capabilities` gains `error_catalog` (per-code condition, default
+  next step, whether the code is ever retryable as-is, and the typed detail fields it may
+  populate — the next step is derived from the same table the envelope uses, so the
+  documented and emitted defaults cannot drift), `argument_reconstruction`, a structured
+  `async_lifecycle` descriptor for the background-job tools, and a per-tool `error_codes`
+  branch map on every `tool_details` entry. Discovery cost is held roughly flat — 51,855 ->
+  52,579 `tools/list` bytes (+1.4%) — by stubbing the new capability sub-models out of the
+  advertised schemas. Bumps the contract fingerprint to `claude-in-codex/0.1/schema-32`
+  (#60).
 
 - Cut the `tools/list` discovery cost from 63,970 bytes / 15,381 tokens to 51,855 bytes /
   12,570 tokens (-19%), the per-session tax every preloading client pays before its first
@@ -22,6 +47,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Fixed
 
+
 - `budget_exceeded` errors now set `retryable: false` because replaying the same paid
   call with the same cap cannot resolve the stop condition. Repair guidance names the
   caller-controlled changes that can help: raise `max_budget_usd` or narrow the supplied
@@ -33,9 +59,23 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   effective value used after compatibility clamping of environment defaults (#92). Bumps the
   contract fingerprint to `claude-in-codex/0.1/schema-29`.
 
+- Paid-tool annotations and descriptions now disclose that workspace Claude Code hooks can
+  run arbitrary shell in `config_mode=inherit`/`scoped`: paid tools are `destructiveHint:true`
+  because static annotations must represent the worst-case config mode, and
+  `annotations_policy` names `safe`/`bare` as the hook-disabled modes (#91). Bumps the
+  contract fingerprint to `claude-in-codex/0.1/schema-28`.
+
+- `job_failed` errors no longer set `retryable: true`. The job record is terminal, so
+  re-fetching the same `job_id` returns `job_failed` forever; under the tightened retry
+  semantics that flag would loop an agent on a call that can never succeed. The error now
+  points at the free `claude_status` readiness probe, which is the one mechanical step that
+  separates a broken install or login from a one-off run failure (#60).
+
+## 0.7.0 - 2026-08-03
+
 ### Added
 
-- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-28`):
+- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-27`):
   - Argument-validation failures now return the standard `ok:false` envelope
     (new error code `invalid_arguments`) instead of prose-only text; the
     capability summary names the error carrier.
@@ -53,12 +93,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
     and prompts, and `fingerprint_covers` states that coverage.
   - Honest tool annotations: paid tools and job status/result/list polls are
     advertised `readOnlyHint:false` (spend/egress and lazy job maintenance are
-    observable effects). Paid tools are also `destructiveHint:true` because
-    static annotations represent the worst-case config mode: workspace hooks
-    may run arbitrary shell in `inherit`/`scoped`; paid-tool descriptions and
-    `annotations_policy` name `safe`/`bare` as hook-disabled modes (#91).
-    `claude_job_consume_result` is `destructiveHint:true`, and
-    `claude_job_cancel` is `idempotentHint:true`.
+    observable effects); `claude_job_consume_result` is `destructiveHint:true`;
+    `claude_job_cancel` is `idempotentHint:true`; a new `annotations_policy`
+    field on `claude_capabilities` states the policy.
   - Advertised output schemas slimmed (Meta stubbed, pydantic titles stripped):
     `tools/list` wire size roughly halved (113,495 → 62,642 bytes); a new
     `tests/test_discovery_cost.py` ratchets the budget.
