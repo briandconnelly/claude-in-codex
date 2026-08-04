@@ -7,6 +7,19 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## 0.7.0 - 2026-08-03
 
+### Changed
+
+- Cut the `tools/list` discovery cost from 63,970 bytes / 15,381 tokens to 51,855 bytes /
+  12,570 tokens (-19%), the per-session tax every preloading client pays before its first
+  useful call. The 30-value error-code catalog was inlined into 11 of 13 output schemas via
+  the `ErrorResult` branch (and again into `claude_status` through
+  `StatusResult.default_errors`); advertised schemas now carry a compact `ok:false` branch
+  instead. The branch stays *conforming* — a real error envelope still validates against
+  every advertised schema — so clients that validate structured content are unaffected, and
+  the wire payload is byte-for-byte unchanged with its full typed `ErrorInfo`. The catalog is
+  published once as `claude_capabilities.error_codes`. Bumps the contract fingerprint to
+  `claude-in-codex/0.1/schema-31` (#90).
+
 ### Fixed
 
 - `budget_exceeded` errors now set `retryable: false` because replaying the same paid
