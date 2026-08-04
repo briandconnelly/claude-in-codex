@@ -5,7 +5,7 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
-## 0.7.0 - 2026-08-03
+## Unreleased
 
 ### Changed
 
@@ -32,6 +32,10 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   52,579 `tools/list` bytes (+1.4%) — by stubbing the new capability sub-models out of the
   advertised schemas. Bumps the contract fingerprint to `claude-in-codex/0.1/schema-32`
   (#60).
+
+## 0.7.0 - 2026-08-03
+
+### Changed
 
 - Cut the `tools/list` discovery cost from 63,970 bytes / 15,381 tokens to 51,855 bytes /
   12,570 tokens (-19%), the per-session tax every preloading client pays before its first
