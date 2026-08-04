@@ -702,3 +702,26 @@ def test_bounds_run_after_redaction_so_a_cap_cannot_re_expose_a_secret():
     # The cap fired, and still no fragment of the secret survives at its edge.
     assert res["truncation"]["fields"][0]["field"] == "summary"
     assert "sk-ant" not in res["summary"]
+
+
+def test_unstructured_reply_is_capped_with_a_signal_not_silently_clipped():
+    """The no-JSON fallback used to slice to 500 chars with no truncation signal.
+
+    That is precisely the silent clipping this contract removes, so the fallback
+    must go through the same caps and report what it dropped."""
+    bounds = OUTPUT_BOUNDS["summary"]
+    prose = "P" * (bounds.max_summary_chars + 5_000)
+    res = normalize_envelope("claude_ask", _env(prose), _meta(), detail="summary")
+    assert res["summary"] == "P" * bounds.max_summary_chars + TRUNCATION_MARKER
+    assert res["truncation"]["fields"] == [
+        {
+            "field": "summary",
+            "unit": "chars",
+            "returned": bounds.max_summary_chars,
+            "total": len(prose),
+        }
+    ]
+    # A short unstructured reply still comes back whole, unmarked.
+    short = normalize_envelope("claude_ask", _env("just a sentence"), _meta(), detail="summary")
+    assert short["summary"] == "just a sentence"
+    assert "truncation" not in short

@@ -385,8 +385,12 @@ def normalize_envelope(
     if inner is None:
         result = SuccessResult(
             tool=tool,
-            # Redact before truncating so a secret can't survive at the 500-char edge.
-            summary=_redact_out(text).strip()[:500] or "(no content)",
+            # Unstructured reply: the whole thing becomes the summary, and the
+            # detail-level cap bounds it. It used to be sliced to 500 chars right
+            # here, which dropped content with no truncation signal at all — the
+            # exact silent clipping #94 exists to remove. Redaction still runs
+            # first, so no secret can survive at the cap edge.
+            summary=_redact_out(text).strip() or "(no content)",
             verdict="unknown",
             confidence="low",
             raw_response=raw,
