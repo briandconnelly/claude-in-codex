@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-30"
+FINGERPRINT = "claude-in-codex/0.1/schema-31"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -313,6 +313,11 @@ class CapabilitiesResult(BaseModel):
     access_modes: list[str]
     scope: list[str]  # what this server is for
     negative_scope: list[str]  # what it deliberately does NOT do
+    # The complete error-code catalog, published once here instead of being
+    # inlined into every tool's output schema (see _error_branch). Required, not
+    # defaulted: this is now the catalog's only machine-readable home, so a
+    # missing one must fail result construction rather than degrade to [].
+    error_codes: list[str]
     # Machine-readable egress disclosure: where paid-tool context goes and the
     # precise limits of redaction. Mirrors the per-tool docstring notes.
     data_egress: str
@@ -455,6 +460,43 @@ _META_STUB = {
 }
 
 
+# Advertised error-branch slimming (F6/F7): ErrorResult inlines ErrorInfo, whose
+# `code` is the 30-value ErrorCode literal, into 11 of 13 tools — the single
+# largest repeated block in tools/list. The advertised branch is replaced with an
+# open stub that a real ok:false envelope still validates against, so a client
+# that validates structured content (MCP states no isError carve-out) stays
+# correct. The enum is published once via claude_capabilities.error_codes; the
+# wire payload is unchanged and still carries the full typed ErrorInfo.
+_ERROR_INFO_STUB = {
+    "type": "object",
+    "description": (
+        "Failure detail: code, message, repair, offending_param, retryable, "
+        "allowed_values, repair_tool, repair_arguments. `code` is one of the "
+        "error codes published by claude_capabilities (error_codes)."
+    ),
+}
+
+
+def _error_branch(meta_schema: dict) -> dict:
+    """The advertised ok:false branch, with `meta` supplied by the caller.
+
+    FastMCP dereferences $ref and inlines $defs into each advertised record, so a
+    $ref to Meta would cost the same as repeating the stub. Unions whose success
+    branches already describe Meta pass the bare open object instead, carrying the
+    long description once per tool rather than twice.
+    """
+    return {
+        "type": "object",
+        "description": "Error envelope: ok:false with a machine-readable error block.",
+        "properties": {
+            "ok": {"const": False},
+            "error": dict(_ERROR_INFO_STUB),
+            "meta": meta_schema,
+        },
+        "required": ["ok", "error", "meta"],
+    }
+
+
 def _strip_titles(node: object) -> object:
     """Drop pydantic-generated schema `title` decoration.
 
@@ -474,43 +516,57 @@ def _strip_titles(node: object) -> object:
 def _slim(schema: dict) -> dict:
     """Shrink an advertised output schema without changing the wire payload."""
     out = json.loads(json.dumps(schema))  # deep copy; schema is JSON-safe
-    if "Meta" in out.get("$defs", {}):
-        out["$defs"]["Meta"] = dict(_META_STUB)
+    defs = out.get("$defs", {})
+    if "Meta" in defs:
+        defs["Meta"] = dict(_META_STUB)
+    # StatusResult.default_errors is list[ErrorInfo], so the catalog rides into
+    # STATUS_SCHEMA even though it has no ErrorResult branch of its own.
+    if "ErrorInfo" in defs:
+        defs["ErrorInfo"] = dict(_ERROR_INFO_STUB)
     return cast("dict", _strip_titles(out))
 
 
 def _object_union_schema(adapter: TypeAdapter) -> dict:
-    """Wrap a model union's anyOf in a top-level object schema.
+    """Wrap the success-model union's anyOf in a top-level object schema.
 
     MCP/FastMCP require an output schema whose top level is ``type: object``;
     a bare ``anyOf`` is rejected. We keep the discriminating ``ok`` key visible
     at the top and carry the full branch schemas (and their $defs) underneath.
+
+    The caller passes only the SUCCESS models; the compact branch built by
+    ``_error_branch`` is appended here so every advertised union still accepts an
+    ok:false envelope without inlining the error catalog once per tool.
     """
     union = adapter.json_schema()
+    branches = union.get("anyOf") or [{k: v for k, v in union.items() if k != "$defs"}]
+    # Describe Meta once per advertised record: when a success branch already
+    # carries it, the error branch only needs the open object.
+    has_meta_def = "Meta" in union.get("$defs", {})
+    error_branch = _error_branch({"type": "object"} if has_meta_def else dict(_META_STUB))
     return {
         "type": "object",
         "properties": {
             "ok": {"type": "boolean", "description": "true = success result, false = error result"},
         },
         "required": ["ok"],
-        "anyOf": union["anyOf"],
+        "anyOf": [*branches, error_branch],
         "$defs": union.get("$defs", {}),
     }
 
 
 # Advertised output schemas (convention: a discriminated ok:true|false union),
 # slimmed for discovery cost — see _slim above.
-RESULT_SCHEMA = _slim(_object_union_schema(TypeAdapter(SuccessResult | ErrorResult)))
+RESULT_SCHEMA = _slim(_object_union_schema(TypeAdapter(SuccessResult)))
 STATUS_SCHEMA = _slim(StatusResult.model_json_schema())
 CAPABILITIES_SCHEMA = _slim(CapabilitiesResult.model_json_schema())
 # A failed *_async launch returns the error envelope; an empty diff returns a
 # SuccessResult without starting a job; an idempotency_key match returns the
 # existing job's JobStatus instead of a new JobStarted.
 JOB_STARTED_SCHEMA = _slim(
-    _object_union_schema(TypeAdapter(JobStarted | JobStatus | SuccessResult | ErrorResult))
+    _object_union_schema(TypeAdapter(JobStarted | JobStatus | SuccessResult))
 )
-JOB_STATUS_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStatus | ErrorResult)))
+JOB_STATUS_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStatus)))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.
-DRY_RUN_SCHEMA = _slim(_object_union_schema(TypeAdapter(DryRunResult | ErrorResult)))
-JOB_LIST_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobListResult | ErrorResult)))
+DRY_RUN_SCHEMA = _slim(_object_union_schema(TypeAdapter(DryRunResult)))
+JOB_LIST_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobListResult)))
 MODEL_CATALOG_SCHEMA = _slim(ModelCatalogResult.model_json_schema())

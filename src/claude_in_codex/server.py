@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, cast, get_args
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
@@ -2334,6 +2334,9 @@ def _capabilities_payload() -> dict:
             "does NOT fetch refs, call the GitHub API, or accept PR numbers/URLs; "
             "scope=branch base/head must already resolve locally",
         ],
+        # Published once here so the advertised output schemas can carry the
+        # compact error branch instead of inlining this enum 11 times.
+        error_codes=sorted(get_args(ErrorCode)),
         data_egress=(
             "Paid tools (claude_ask, claude_review_changes, claude_adversarial_review, "
             "claude_review_changes_async) send context to Anthropic via the `claude` CLI. "
