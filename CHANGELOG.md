@@ -9,6 +9,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Changed
 
+
 - Failure recovery is now machine-actionable without parsing prose. `ErrorInfo`'s four
   scattered recovery fields (`offending_param`, `allowed_values`, `repair_tool`,
   `repair_arguments`) are replaced by two typed blocks: `details` (`field`, `value`,
@@ -33,18 +34,6 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   advertised schemas. Bumps the contract fingerprint to `claude-in-codex/0.1/schema-32`
   (#60).
 
-### Fixed
-
-- `job_failed` errors no longer set `retryable: true`. The job record is terminal, so
-  re-fetching the same `job_id` returns `job_failed` forever; under the tightened retry
-  semantics that flag would loop an agent on a call that can never succeed. The error now
-  points at the free `claude_status` readiness probe, which is the one mechanical step that
-  separates a broken install or login from a one-off run failure (#60).
-
-## 0.7.0 - 2026-08-03
-
-### Changed
-
 - Cut the `tools/list` discovery cost from 63,970 bytes / 15,381 tokens to 51,855 bytes /
   12,570 tokens (-19%), the per-session tax every preloading client pays before its first
   useful call. The 30-value error-code catalog was inlined into 11 of 13 output schemas via
@@ -58,6 +47,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Fixed
 
+
 - `budget_exceeded` errors now set `retryable: false` because replaying the same paid
   call with the same cap cannot resolve the stop condition. Repair guidance names the
   caller-controlled changes that can help: raise `max_budget_usd` or narrow the supplied
@@ -69,9 +59,23 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   effective value used after compatibility clamping of environment defaults (#92). Bumps the
   contract fingerprint to `claude-in-codex/0.1/schema-29`.
 
+- Paid-tool annotations and descriptions now disclose that workspace Claude Code hooks can
+  run arbitrary shell in `config_mode=inherit`/`scoped`: paid tools are `destructiveHint:true`
+  because static annotations must represent the worst-case config mode, and
+  `annotations_policy` names `safe`/`bare` as the hook-disabled modes (#91). Bumps the
+  contract fingerprint to `claude-in-codex/0.1/schema-28`.
+
+- `job_failed` errors no longer set `retryable: true`. The job record is terminal, so
+  re-fetching the same `job_id` returns `job_failed` forever; under the tightened retry
+  semantics that flag would loop an agent on a call that can never succeed. The error now
+  points at the free `claude_status` readiness probe, which is the one mechanical step that
+  separates a broken install or login from a one-off run failure (#60).
+
+## 0.7.0 - 2026-08-03
+
 ### Added
 
-- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-28`):
+- Agent-friendliness remediation (fingerprint `claude-in-codex/0.1/schema-27`):
   - Argument-validation failures now return the standard `ok:false` envelope
     (new error code `invalid_arguments`) instead of prose-only text; the
     capability summary names the error carrier.
@@ -89,12 +93,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
     and prompts, and `fingerprint_covers` states that coverage.
   - Honest tool annotations: paid tools and job status/result/list polls are
     advertised `readOnlyHint:false` (spend/egress and lazy job maintenance are
-    observable effects). Paid tools are also `destructiveHint:true` because
-    static annotations represent the worst-case config mode: workspace hooks
-    may run arbitrary shell in `inherit`/`scoped`; paid-tool descriptions and
-    `annotations_policy` name `safe`/`bare` as hook-disabled modes (#91).
-    `claude_job_consume_result` is `destructiveHint:true`, and
-    `claude_job_cancel` is `idempotentHint:true`.
+    observable effects); `claude_job_consume_result` is `destructiveHint:true`;
+    `claude_job_cancel` is `idempotentHint:true`; a new `annotations_policy`
+    field on `claude_capabilities` states the policy.
   - Advertised output schemas slimmed (Meta stubbed, pydantic titles stripped):
     `tools/list` wire size roughly halved (113,495 → 62,642 bytes); a new
     `tests/test_discovery_cost.py` ratchets the budget.
