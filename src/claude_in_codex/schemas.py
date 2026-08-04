@@ -287,10 +287,11 @@ DEFAULT_NEXT_STEP: dict[str, RepairStep] = {
     "claude_permission_error": "retry_with_changes",
     # Transient by nature.
     "timeout": "retry_same_call",
-    "job_failed": "retry_same_call",
-    # Poll or list rather than re-issuing the failed fetch.
+    # Poll, list, or diagnose rather than re-issuing the failed fetch. A terminal
+    # job_failed never becomes ok:true on retry, so it points at claude_status.
     "job_not_found": "call_tool",
     "job_running": "call_tool",
+    "job_failed": "call_tool",
     # Opaque: the cause is in the message, and no mechanical step follows.
     "nonzero_exit": "no_automatic_repair",
     "invalid_json": "no_automatic_repair",
@@ -667,7 +668,7 @@ _ERROR_INFO_STUB = {
 # Sub-blocks of CapabilitiesResult that the payload itself documents field by
 # field. Stubbed in the advertised schema only; the wire payload is unchanged.
 _CAPABILITIES_SUBSTUBS = {
-    "ErrorCodeDoc": ("One error code: code, condition, next_step, retryable, detail_fields."),
+    "ErrorCodeDoc": ("One error code: code, condition, next_step, ever_retryable, detail_fields."),
     "AsyncLifecycle": (
         "Background-job lifecycle: start/status/result/consume/cancel/list tool names, "
         "handle_param, poll_delay_field, result_ready_field, state_field, "

@@ -33,6 +33,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   advertised schemas. Bumps the contract fingerprint to `claude-in-codex/0.1/schema-32`
   (#60).
 
+### Fixed
+
+- `job_failed` errors no longer set `retryable: true`. The job record is terminal, so
+  re-fetching the same `job_id` returns `job_failed` forever; under the tightened retry
+  semantics that flag would loop an agent on a call that can never succeed. The error now
+  points at the free `claude_status` readiness probe, which is the one mechanical step that
+  separates a broken install or login from a one-off run failure (#60).
+
 ## 0.7.0 - 2026-08-03
 
 ### Changed

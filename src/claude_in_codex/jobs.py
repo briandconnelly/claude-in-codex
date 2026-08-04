@@ -889,9 +889,13 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
             code, message, repair = (
                 "job_failed",
                 f"The job failed without producing a result. {tail or ''}".strip(),
-                "Run claude_status to check the CLI is installed and authenticated, then retry.",
+                "Run claude_status to check the CLI is installed and authenticated, "
+                "then start a new job.",
             )
-            retryable = True
+            # NOT retryable: the record is terminal, so re-fetching this job_id
+            # returns job_failed forever. The recoverable action is to diagnose
+            # and launch again, which is a different call.
+            retryable = False
     else:
         code, message, repair = _STATE_TO_ERROR.get(
             state, ("job_failed", "The job did not complete.", "Start a new job.")
@@ -914,6 +918,10 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
             arguments={"job_id": meta.get("job_id"), "workspace_root": bmeta.cwd},
         )
         retry_after_ms = poll_after_ms()
+    elif code == "job_failed":
+        # Free and argument-less: the readiness probe is the one mechanical step
+        # that distinguishes a broken install/auth from a one-off run failure.
+        action = RepairAction(next_step="call_tool", tool="claude_status")
     return ErrorResult(
         error=ErrorInfo(
             code=cast("ErrorCode", code),

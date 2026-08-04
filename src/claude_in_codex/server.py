@@ -2517,8 +2517,9 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
     ),
     (
         "job_failed",
-        "The job's process ended without writing a result envelope.",
-        True,
+        "The job's process ended without writing a result envelope. Terminal: the "
+        "same fetch returns job_failed forever, so diagnose and start a new job.",
+        False,
         ["field", "value"],
     ),
 ]
