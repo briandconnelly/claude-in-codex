@@ -36,7 +36,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   bounding. The complete contract (per-level caps, truncation semantics,
   recovery) is published once as `claude_capabilities.detail_modes`; the paid tools
   advertise only a pointer, holding discovery cost to 52,584 -> 55,367 `tools/list`
-  bytes (+5.1%). Bumps the contract fingerprint to `claude-in-codex/0.1/schema-33`
+  bytes (+5.3%). Bumps the contract fingerprint to `claude-in-codex/0.1/schema-33`
   (#94).
 
 - Failure recovery is now machine-actionable without parsing prose. `ErrorInfo`'s four
