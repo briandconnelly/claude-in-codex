@@ -153,7 +153,11 @@ _JOB_DETAIL_DESCRIPTION = (
     "level — except on consume, which defaults to full because deletion is final."
 )
 
-mcp = FastMCP(name="claude-in-codex", instructions=CAPABILITY_SUMMARY)
+# version is the application's, not FastMCP's: without it FastMCP reports its own
+# release in initialize.serverInfo (#89), so a framework upgrade would read as an
+# application release to hosts that cache or gate on that metadata. Keep this the
+# same source claude_capabilities reports, so the two never disagree.
+mcp = FastMCP(name="claude-in-codex", version=__version__, instructions=CAPABILITY_SUMMARY)
 
 # readOnlyHint tracks observable effects, disclosed via annotations_policy in
 # claude_capabilities. Paid tools spend money and send context to an external

@@ -1,7 +1,12 @@
 import re
+import tomllib
 from pathlib import Path
 
+from fastmcp import Client
+
+from claude_in_codex import __version__
 from claude_in_codex.schemas import FINGERPRINT
+from claude_in_codex.server import _capabilities_payload, mcp
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SKILL = ROOT / "skills" / "collaborating-with-claude" / "SKILL.md"
@@ -42,3 +47,20 @@ def test_changelog_documents_current_fingerprint():
         f"CHANGELOG.md's latest fingerprint {match.group(0)!r} does not match "
         f"schemas.FINGERPRINT {FINGERPRINT!r}; update the changelog (or the bump)."
     )
+
+
+async def test_serverinfo_version_matches_the_release_lockstep():
+    """The version hosts see at initialize is the released application version (#89).
+
+    `__version__` reads installed package metadata, so this ties the MCP surface
+    back to the one file CI's release-lockstep check greps (`pyproject.toml`).
+    Without it, a stale editable install — or a regression to FastMCP's default —
+    would let `serverInfo.version` drift from the version being shipped.
+    """
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    async with Client(mcp) as client:
+        reported = client.initialize_result.serverInfo.version
+
+    assert __version__ == declared
+    assert reported == declared
+    assert _capabilities_payload()["version"] == declared
