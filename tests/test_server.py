@@ -9,6 +9,7 @@ import pytest
 from fastmcp import Client
 from tests.conftest import structured
 
+from claude_in_codex import __version__
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
@@ -558,7 +559,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-33"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-34"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1231,7 +1232,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-33"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-34"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_ask",
@@ -3174,3 +3175,22 @@ async def test_job_result_accepts_a_detail_override_over_mcp(monkeypatch, git_re
     assert "text" not in summary["raw_response"]
     assert full["ok"] is True
     assert full["raw_response"]["text"]
+
+
+async def test_initialize_reports_application_version_and_name():
+    """serverInfo must identify the application, not the MCP framework (#89).
+
+    Hosts read initialize metadata for diagnostics, caching, and compatibility
+    decisions, so a FastMCP upgrade must not look like an application release.
+    Pinning the whole serverInfo block (not just the version) also catches a
+    silent framework-added field or a name drift away from claude_capabilities.
+    """
+    async with Client(mcp) as client:
+        server_info = client.initialize_result.serverInfo.model_dump(mode="json", exclude_none=True)
+        instructions = client.initialize_result.instructions
+    capabilities = _capabilities_payload()
+
+    assert server_info == {"name": "claude-in-codex", "version": __version__}
+    assert server_info["name"] == capabilities["name"]
+    assert server_info["version"] == capabilities["version"]
+    assert instructions == CAPABILITY_SUMMARY

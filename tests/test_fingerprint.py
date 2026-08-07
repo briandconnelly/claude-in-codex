@@ -2,7 +2,8 @@
 
 `FINGERPRINT` (schemas.py) is bumped by hand, so nothing otherwise fails when the
 agent-visible contract changes but the fingerprint is left stale. This test pins a
-digest of that contract surface — the full normalized tool records (names,
+digest of that contract surface — the initialize serverInfo identity (minus the
+release-tracking version), the full normalized tool records (names,
 descriptions, titles, annotations, input/output schemas), resource and
 resource-template records, prompt scaffolds, the capabilities payload (minus the
 fingerprint/version fields themselves), the error-code catalog, and the capability
@@ -24,11 +25,12 @@ from fastmcp import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "1810158874da59ea7f0a6586702357f5b16deebf84679128d42724ad30afb3c1"
+EXPECTED_CONTRACT_DIGEST = "6c9380b8a34db4cce8f93d79e6e7d3fba89f9cf9317b497cda19965542c38925"
 
 
 async def _contract_surface() -> dict:
     async with Client(mcp) as client:
+        server_info = client.initialize_result.serverInfo.model_dump(mode="json", exclude_none=True)
         tools = await client.list_tools()
         resources = await client.list_resources()
         templates = await client.list_resource_templates()
@@ -38,7 +40,13 @@ async def _contract_surface() -> dict:
     # otherwise bumping FINGERPRINT/version would circularly change the digest.
     capabilities.pop("fingerprint", None)
     capabilities.pop("version", None)
+    # Same reason the capabilities version is stripped: serverInfo.version tracks
+    # the release, so leaving it in would move the digest on every version bump and
+    # make the fingerprint churn without a contract change. The identity fields
+    # (name, and title/icons/websiteUrl once set) are contract shape.
+    server_info.pop("version", None)
     return {
+        "server_info": server_info,
         # Full normalized records: descriptions, titles, and annotations are part
         # of the agent-visible contract, not just the schemas. `meta` (FastMCP's
         # own {"fastmcp": {"tags": [...]}} block) is kept — verified identical

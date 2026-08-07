@@ -7,6 +7,19 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+### Fixed
+
+- MCP initialization reported FastMCP's version as the server version, so
+  `initialize.serverInfo` announced e.g. `claude-in-codex/3.4.2` while
+  `claude_capabilities` reported the application version `0.7.0`. Hosts use
+  initialize metadata for diagnostics, caching, and compatibility decisions, so a
+  framework upgrade looked like an application release and an actual release was
+  invisible without spending an extra tool call. `serverInfo.version` is now
+  `claude_in_codex.__version__` — the same source `claude_capabilities` reports —
+  and the contract-fingerprint surface now pins the serverInfo identity (its
+  release-tracking `version` excluded, so the fingerprint does not churn per
+  release). Bumps the contract fingerprint to `claude-in-codex/0.1/schema-34`.
+
 ### Changed
 
 - `detail` is now a documented, bounded field-density level rather than an

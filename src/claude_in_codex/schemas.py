@@ -11,11 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-33"
+FINGERPRINT = "claude-in-codex/0.1/schema-34"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
 FINGERPRINT_COVERS = [
+    "initialize serverInfo identity (server name; version tracks releases instead)",
     "tool records (names, descriptions, titles, annotations, input/output schemas)",
     "resource and resource-template records and prompt scaffolds",
     "error-code catalog, per-code conditions, and per-tool error maps",
