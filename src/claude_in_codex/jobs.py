@@ -825,9 +825,19 @@ def _stderr_tail(jd: Path, meta: dict, limit: int = 200) -> str | None:
     return redact_text(text)[0][-limit:] or None
 
 
-def result(cwd: str, job_id: str, consume: bool = False):
+def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = None):
     """Return (payload, found). payload is the normalized SuccessResult|ErrorResult
-    dict; found is False when no such job exists."""
+    dict; found is False when no such job exists.
+
+    The raw envelope is stored, not the rendered result, so `detail` re-renders it
+    at fetch time: passing "full" recovers content a bounded summary truncated (#94)
+    without another paid call. None keeps the level the job was started with —
+    EXCEPT when consuming, where None renders at full detail: deletion is
+    irreversible, so the last read of a record must hand back everything the caller
+    already paid for rather than silently destroying what a summary cap dropped. An
+    explicit `detail` is still honored, so a caller can opt into the cheap final
+    read; the truncation block on that result then points at a paid re-run, never at
+    the record this call is deleting."""
     with _JOBS_LOCK:
         live = _read_live_job(cwd, job_id)
         if live is None:
@@ -837,12 +847,14 @@ def result(cwd: str, job_id: str, consume: bool = False):
             env_text = (jd / "result.json").read_text()
             summary = meta.get("context_summary")
             ctx_summary = ContextSummary(**summary) if summary else None
+            configured = meta.get("config", {}).get("detail", "summary")
             payload = normalize_envelope(
                 meta.get("kind", "claude_review_changes"),
                 env_text,
                 _build_meta(meta),
-                detail=meta.get("config", {}).get("detail", "summary"),
+                detail=detail or ("full" if consume else configured),
                 context_summary=ctx_summary,
+                record_survives=not consume,
             )
             if consume:
                 _rmtree(jd)

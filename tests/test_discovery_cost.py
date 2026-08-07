@@ -21,18 +21,28 @@ from claude_in_codex.schemas import (
 )
 from claude_in_codex.server import mcp
 
-# Measured 51,855 bytes / 12,570 real o200k_base tokens, down from 63,970 /
-# 15,381 before the error branch was compacted (and 113,495 before Meta was
-# stubbed). Budgets carry ~2% headroom deliberately: the previous ceiling sat 30
-# bytes above the payload, so unrelated metadata churn broke CI. Raising either
-# budget is a reviewed, deliberate act — do not bump one to make a test pass.
-WIRE_BUDGET_BYTES = 53_000
+# Measured 55,367 bytes, down from 63,970 before the error branch was compacted
+# (and 113,495 before Meta was stubbed). Budgets carry ~2% headroom deliberately:
+# an earlier ceiling sat 30 bytes above the payload, so unrelated metadata churn
+# broke CI. Raising either budget is a reviewed, deliberate act — do not bump one
+# to make a test pass.
+#
+# Raised from 53,000 for the bounded-`detail` contract (#94): +2,783 bytes / +5.3%
+# over the 52,584 measured just before it. That buys the `truncation` block on
+# every result union, a `detail` param on the two job-result tools (the free
+# full-detail re-read), and the per-tool pointer to the caps. Kept to ~5% by
+# publishing the contract ONCE in claude_capabilities.detail_modes and stubbing
+# Truncation/DetailModes/OutputBounds in the advertised schemas, the same
+# treatment Meta and ErrorInfo get above — spelling the caps out inline in all
+# four paid tools measured ~2x this.
+WIRE_BUDGET_BYTES = 56_300
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
-# a conservative over-estimate — it reads 12,964 against a measured 12,570 (+3.1%)
-# — and never needs tiktoken in CI. The byte assertion stays authoritative; this
-# one tracks the token budget issue #90 is written against.
-TOKEN_PROXY_BUDGET = 13_250
+# a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
+# at the previous ceiling — and never needs tiktoken in CI. The byte assertion
+# stays authoritative; this one tracks the token budget issue #90 is written
+# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(56,300/4)).
+TOKEN_PROXY_BUDGET = 14_075
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -60,7 +70,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (13,250 == 53,000/4) and the proxy is
+    The budgets are currently proportional (14,075 == 56,300/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""

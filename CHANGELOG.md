@@ -9,6 +9,35 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ### Changed
 
+- `detail` is now a documented, bounded field-density level rather than an
+  undescribed `summary|full` switch. `summary` was already dropping
+  `raw_response.text` and `context_summary`, but it still relayed every finding,
+  question, assumption, and next step at whatever length the model produced, so a
+  nominal summary could consume an unbounded slice of the caller's context. Both
+  levels are now capped server-side per field (`summary`: 10 findings, 5 items per
+  list, 1,200-character summary; `full` raises each cap and adds a 100,000-character
+  ceiling on `raw_response.text`), and `summary` is a strict subset of `full` —
+  identical field names and types, never an item `full` does not also carry.
+  Nothing is dropped silently: a capped result carries a new `truncation` block
+  naming each shortened field with exact `returned`/`total` counts, a
+  `…[truncated]` marker on shortened strings, and a callable next step. `findings`
+  are now ordered most-severe-first at both levels, so an item cap drops the least
+  severe finding rather than an arbitrary one. Model-derived finding paths and
+  `meta.permission_denials` are bounded too, so no model-supplied field escapes the
+  caps. `claude_job_result` and `claude_job_consume_result` accept `detail`, which
+  re-renders the *stored* envelope — so a truncated background-job summary is
+  recoverable at full detail for free, and that call is what a job result's
+  `truncation.arguments` hands back ready to run, workspace pinned so it is callable
+  as-is. Because deletion is irreversible, `claude_job_consume_result` renders at
+  full detail unless an explicit `detail` is passed, and a consumed result's
+  truncation block never names the record it just destroyed. Subsetting is scoped
+  precisely: it covers content items and characters, deliberately excluding the
+  `truncation` block itself and the truncation marker, which are metadata about the
+  bounding. The complete contract (per-level caps, truncation semantics,
+  recovery) is published once as `claude_capabilities.detail_modes`; the paid tools
+  advertise only a pointer, holding discovery cost to 52,584 -> 55,367 `tools/list`
+  bytes (+5.3%). Bumps the contract fingerprint to `claude-in-codex/0.1/schema-33`
+  (#94).
 
 - Failure recovery is now machine-actionable without parsing prose. `ErrorInfo`'s four
   scattered recovery fields (`offending_param`, `allowed_values`, `repair_tool`,

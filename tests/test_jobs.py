@@ -18,6 +18,7 @@ import pytest
 
 from claude_in_codex import _job_worker, jobs
 from claude_in_codex.jobs import JobConfig
+from claude_in_codex.schemas import OUTPUT_BOUNDS
 
 _INNER = {
     "summary": "off-by-one bug",
@@ -123,6 +124,79 @@ def test_job_done_returns_normalized_result(tmp_path):
     assert payload["verdict"] == "concerns"
     assert payload["meta"]["job_id"] == job_id
     assert payload["meta"]["cost_usd"] == 0.0123
+
+
+def test_job_result_detail_re_renders_the_stored_envelope(tmp_path):
+    """A truncated background summary is recoverable at full detail for free (#94).
+
+    The stored artifact is the raw claude envelope, not a rendered result, so the
+    same record answers both densities without another paid call."""
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg(detail="summary"))
+    _await_done(cwd, job_id)
+
+    summary, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert "text" not in summary["raw_response"]  # the job's own level still applies
+
+    full, found = jobs.result(cwd, job_id, detail="full")
+    assert found is True
+    assert full["raw_response"]["text"]
+    assert full["verdict"] == summary["verdict"]
+    # Non-destructive: the override does not rewrite the record's own level.
+    again, _ = jobs.result(cwd, job_id)
+    assert "text" not in again["raw_response"]
+
+
+def test_consume_renders_full_by_default_so_deletion_loses_nothing(tmp_path):
+    """Deletion is irreversible, so the last read must hand back everything (#94).
+
+    Consuming at the job's summary level would delete the stored envelope while
+    the truncation block advertised a free re-read of the record just destroyed."""
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_emit_cmd(), cwd, _cfg(detail="summary"))
+    _await_done(cwd, job_id)
+
+    payload, found = jobs.result(cwd, job_id, consume=True)
+    assert found is True
+    assert payload["raw_response"]["text"]  # full detail, despite the job's summary level
+    # And the record really is gone, so nothing may point back at it.
+    _, still_there = jobs.result(cwd, job_id)
+    assert still_there is False
+
+
+def test_explicit_summary_consume_never_advertises_the_deleted_record(tmp_path):
+    """A caller can still opt into the cheap final read — but the next step it
+    gets back must be the paid re-run, not a call that can only 404."""
+    cwd = str(tmp_path)
+    inner = {
+        "summary": "x",
+        "verdict": "concerns",
+        "confidence": "high",
+        "findings": [
+            {
+                "severity": "low",
+                "title": f"t{i}",
+                "evidence": "e",
+                "risk": "r",
+                "recommendation": "rec",
+            }
+            for i in range(OUTPUT_BOUNDS["summary"].max_findings + 3)
+        ],
+    }
+    envelope = json.dumps(
+        {"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(inner)}
+    )
+    job_id, _ = jobs.start_job(_emit_cmd(envelope), cwd, _cfg(detail="summary"))
+    _await_done(cwd, job_id)
+
+    payload, found = jobs.result(cwd, job_id, consume=True, detail="summary")
+    assert found is True
+    assert payload["truncation"]["next_step"] == "retry_with_changes"
+    assert payload["truncation"]["tool"] == "claude_review_changes"
+    assert "arguments" not in payload["truncation"]
+    _, still_there = jobs.result(cwd, job_id)
+    assert still_there is False
 
 
 def test_start_job_sends_stdin_without_argv_prompt(tmp_path):

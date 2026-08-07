@@ -38,3 +38,18 @@ def test_golden_envelope_parses_to_success_with_cost():
     assert out["meta"]["usage"]["cache_read_input_tokens"] == 10
     assert out["meta"]["configured_max_budget_usd"] == 99.0
     assert out["meta"]["effective_max_budget_usd"] == 5.0
+
+
+def test_golden_envelope_summary_is_bounded_and_a_subset_of_full():
+    """The recorded real envelope must render the same at both densities (#94).
+
+    Small enough to fit inside every cap, so this pins the no-truncation path
+    against a real payload — if it started truncating, the bounds would be wrong."""
+    summary = normalize_envelope("claude_review_changes", _GOLDEN, _meta(), detail="summary")
+    full = normalize_envelope("claude_review_changes", _GOLDEN, _meta(), detail="full")
+    assert "truncation" not in summary
+    assert "truncation" not in full
+    assert set(summary) <= set(full)
+    assert summary["findings"] == full["findings"]
+    assert "text" not in summary["raw_response"]
+    assert full["raw_response"]["text"]
