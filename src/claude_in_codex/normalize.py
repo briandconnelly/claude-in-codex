@@ -40,7 +40,7 @@ _SCHEMA_INSTRUCTION = (
 )
 
 _LEAD = {
-    "claude_ask": "Give an independent second opinion on the following question.",
+    "claude_consult": "Give an independent second opinion on the following question.",
     "claude_review_changes": "Review the following code changes for correctness, "
     "regressions, security, and missing tests.",
     "claude_adversarial_review": "Attack the following plan/claim. Find the strongest "
@@ -65,7 +65,7 @@ def _str_list(value: Any) -> list[str]:
 
 
 def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
-    parts = [_LEAD.get(tool, _LEAD["claude_ask"])]
+    parts = [_LEAD.get(tool, _LEAD["claude_consult"])]
     paths = payload.get("paths")
     paths_note = ""
     if paths:
@@ -74,7 +74,7 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
             "Treat findings as scoped to those paths; access=readonly may still "
             "allow direct workspace reads outside this filter."
         )
-    if tool == "claude_ask":
+    if tool == "claude_consult":
         parts.append(payload["prompt"])
         if payload.get("context"):
             parts.append(f"\nAdditional context:\n{payload['context']}")

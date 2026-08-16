@@ -253,7 +253,11 @@ async def test_tool_descriptions_are_concise_and_disambiguating():
     tools = await _tools_by_name()
     for tool in tools.values():
         assert len(tool.description or "") <= 450, tool.name
-    assert "question or design choice" in tools["claude_ask"].description
+    assert "question or design choice" in tools["claude_consult"].description
+    assert tools["claude_ask"].description.startswith("[DEPRECATED alias of claude_consult")
+    assert tools["claude_review_dry_run"].description.startswith(
+        "[DEPRECATED alias of claude_dry_run"
+    )
     assert "git diff" in tools["claude_review_changes"].description
     assert "background" in tools["claude_review_changes_async"].description
     assert "without deleting" in tools["claude_job_result"].description
@@ -559,7 +563,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-34"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-35"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1232,13 +1236,15 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-34"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-35"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
-        "claude_ask",
+        "claude_consult",
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",
+        # Deprecated alias of claude_consult; removal planned for 0.9.0.
+        "claude_ask",
     }
     assert "claude_status" in data["free_tools"]
     for lifecycle in (
@@ -2818,8 +2824,8 @@ def test_per_tool_error_codes_cover_the_statically_reachable_ones():
     reachable = _statically_reachable_error_codes()
     # Instrument check: a walk that resolves nothing would make the loop below
     # vacuously pass, so pin codes each tool demonstrably raises in server.py.
-    assert "invalid_scope" in reachable["claude_review_dry_run"]
-    assert "context_too_large" in reachable["claude_ask"]
+    assert "invalid_scope" in reachable["claude_dry_run"]
+    assert "context_too_large" in reachable["claude_consult"]
     assert "job_not_found" in reachable["claude_job_status"]
     for tool, codes in reachable.items():
         missing = codes - set(_TOOL_ERROR_CODES[tool])
@@ -3194,3 +3200,23 @@ async def test_initialize_reports_application_version_and_name():
     assert server_info["name"] == capabilities["name"]
     assert server_info["version"] == capabilities["version"]
     assert instructions == CAPABILITY_SUMMARY
+
+
+async def test_deprecated_aliases_return_identical_envelopes(fake_claude):
+    """claude_ask and claude_review_dry_run are pure aliases: same arguments in,
+    same envelope out as their primaries. Removal planned for 0.9.0."""
+    async with Client(mcp) as client:
+        primary = structured(await client.call_tool("claude_consult", {"prompt": "is this safe?"}))
+        alias = structured(await client.call_tool("claude_ask", {"prompt": "is this safe?"}))
+    # Identical modulo the genuinely per-call meta fields.
+    for envelope in (primary, alias):
+        for per_call in ("request_id", "elapsed_ms"):
+            envelope["meta"].pop(per_call, None)
+    assert alias == primary
+
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert tools["claude_ask"].inputSchema == tools["claude_consult"].inputSchema
+    assert tools["claude_ask"].outputSchema == tools["claude_consult"].outputSchema
+    assert tools["claude_review_dry_run"].inputSchema == tools["claude_dry_run"].inputSchema
+    assert tools["claude_review_dry_run"].outputSchema == tools["claude_dry_run"].outputSchema

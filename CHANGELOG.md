@@ -7,6 +7,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Canonical tool verbs (fingerprint `claude-in-codex/0.1/schema-35`):
+  `claude_ask` is renamed `claude_consult` and `claude_review_dry_run` is
+  renamed `claude_dry_run`, matching the verb set shared across the agent
+  bridges. The old names remain registered as deprecated aliases — identical
+  parameters, schemas, and envelopes, with the deprecation surfaced in tool
+  descriptions and `claude_capabilities` — and are planned for removal in
+  0.9.0. The `tools/list` discovery budget is temporarily raised for the
+  duplicated alias schemas and reverts with the removal.
 - Diff redaction preserves the input's trailing newline, so returned diffs are
   `git apply`-able (ports the sibling bridges' fix; end-to-end
   redact-then-apply regression test included). Planned engine unification with
