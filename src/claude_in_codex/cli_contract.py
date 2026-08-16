@@ -208,6 +208,7 @@ PONTIFEX_CONTRACT = _pontifex_contract.BackendContract(
     # claude rejects a bad --effort at arg-parse (VALID_EFFORTS is also enforced
     # at this server's boundary), so upstream is loud, not silent.
     effort_silently_ignored_upstream=False,
+    effort_validation="enumerated",  # VALID_EFFORTS is checked at this server's boundary
     usage_event_markers=tuple(sorted(USAGE_KEYS)),
     failure_signatures=_pontifex_contract.FailureSignatures(
         # Narrow on purpose: a bare "/login" can appear in reviewed content or
