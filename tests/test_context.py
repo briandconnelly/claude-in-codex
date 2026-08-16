@@ -662,11 +662,14 @@ def test_secret_redactor_preserves_key_block_state_across_calls():
     clean, clean_changed = redactor.redact_line("ordinary diagnostic")
 
     assert "BEGIN RSA PRIVATE KEY" in begin
-    assert begin_changed is True
+    # `changed` reports emitted replacement markers (the shared engine's invariant),
+    # not state transitions: bare BEGIN/END marker lines open/close the block but
+    # emit nothing, so they report False. The old local engine said True there.
+    assert begin_changed is False
     assert body not in middle
     assert middle_changed is True
     assert "END RSA PRIVATE KEY" in end
-    assert end_changed is True
+    assert end_changed is False
     assert clean == "ordinary diagnostic"
     assert clean_changed is False
 
@@ -735,3 +738,54 @@ def test_a_redacted_diff_still_applies(tmp_path):
     patch.write_text(redacted)
     git("apply", str(patch))
     assert "def mul" in (tmp_path / "calc.py").read_text()
+
+
+# --- shared-engine adoption differentials ------------------------------------
+# The pontifex engine swap changed three content-level behaviors on purpose.
+# Each is pinned HERE, at this bridge's own seam, so the suite exercises the
+# divergence rather than passing because nothing ever reached it.
+
+
+def test_shared_engine_code_reference_exemption_is_live():
+    from claude_in_codex.context import _redact
+
+    # Old local engine redacted this (labelled pattern, 16+ char value); the shared
+    # engine recognizes a code REFERENCE on a source-file body line and leaves it.
+    diff = "diff --git a/app.py b/app.py\n+    token = some_helper_function(x)\n"
+    out, paths = _redact(diff)
+    assert out == diff
+    assert paths == []
+    # The exemption is source-file-scoped: identical text in YAML stays redacted —
+    # the known-positive proving the exemption, not a broken matcher, is why the
+    # .py line survived.
+    ydiff = "diff --git a/cfg.yaml b/cfg.yaml\n+token: some_helper_function_xx\n"
+    yout, ypaths = _redact(ydiff)
+    assert "some_helper_function_xx" not in yout
+    assert ypaths == ["cfg.yaml"]
+
+
+def test_shared_engine_partial_marker_is_live_in_prose():
+    from claude_in_codex.context import redact_text
+
+    # `@` right after a labelled value is affirmative evidence the match may have
+    # stopped short; the shared engine says so instead of claiming full coverage.
+    out, changed = redact_text("password=aaaaaaaaaaaaaaaa@tailsegment")
+    assert changed is True
+    assert "[redacted: possibly partial secret value]" in out
+
+
+def test_upstreamed_vendor_patterns_still_covered_through_the_wrapper():
+    from claude_in_codex.context import redact_text
+
+    # The five shapes this bridge contributed upstream must stay covered after the
+    # local list's retirement — the "unification must not weaken" invariant.
+    for token in [
+        "sk-ant-api03-" + "aB3-" * 5,
+        "github_pat_" + "aB3_" * 6,
+        "glpat-" + "aB3-" * 5,
+        "npm_" + "aB3d" * 9,
+        "pypi-AgEIcHlwaS5vcmc" + "aB3d" * 4,
+    ]:
+        out, changed = redact_text(f"leaked {token}")
+        assert token not in out, token
+        assert changed is True

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import subprocess
 from dataclasses import dataclass, field
+
+from pontifex.core import redaction as _redaction
 
 from claude_in_codex.config import git_timeout_seconds
 from claude_in_codex.schemas import ContextSummary
@@ -46,42 +47,18 @@ def _valid_ref(ref: str) -> bool:
     return bool(ref) and not ref.startswith("-") and bool(_REF_RE.match(ref))
 
 
-SECRET_PATH_RE = re.compile(
-    r"(^|/)(\.env(\.|$)|\.envrc$|\.netrc$|\.pypirc$|.*\.env$|.*\.pem$|.*\.key$|id_rsa|id_ed25519|.*\.p12$)",
-    re.IGNORECASE,
-)
-
-# Single-token, high-confidence secret shapes. Each is anchored on a vendor prefix
-# with enough trailing entropy that ordinary identifiers do not collide. Kept
-# conservative on purpose: false positives garble otherwise-legitimate diffs.
-SECRET_VALUE_PATTERNS = [
-    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),  # GitHub classic token
-    re.compile(r"github_pat_[0-9A-Za-z_]{22,}"),  # GitHub fine-grained PAT
-    re.compile(r"glpat-[0-9A-Za-z_-]{20,}"),  # GitLab personal access token
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),  # Slack token
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),  # Anthropic API key
-    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),  # OpenAI project key
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI classic key
-    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{16,}"),  # Stripe secret key
-    re.compile(r"AIza[0-9A-Za-z_-]{35}"),  # Google API key
-    re.compile(r"npm_[A-Za-z0-9]{36}"),  # npm automation token
-    re.compile(r"pypi-[A-Za-z0-9_-]{16,}"),  # PyPI upload token
-    re.compile(r"eyJ[A-Za-z0-9_=-]{10,}\.eyJ[A-Za-z0-9_=-]{10,}\.[A-Za-z0-9_=-]{8,}"),  # JWT
-    re.compile(r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/=-]{16,}"),
-    re.compile(
-        r"(?i)((?:(?:api|access|secret|private)?_?(?:key|token|secret)|passw(?:or)?d|pwd|passphrase)\s*[:=]\s*['\"]?)[A-Za-z0-9._~+/=-]{16,}"
-    ),
-    # Connection-string / URI userinfo password: keep the scheme + user + host so the
-    # diff stays reviewable, drop only the password between ':' and '@'.
-    re.compile(r"([a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s:/@]+(?=@)"),
-]
-
-# Multi-line key blocks (PEM/PKCS8/OpenSSH/PGP) are redacted statefully in _redact,
-# not line-by-line, so the whole base64 body is dropped rather than only the BEGIN
-# marker. Trailing "[A-Z0-9 ]*" covers "OPENSSH"/"RSA" prefixes and "PGP ... BLOCK".
-_PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----")
-_PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----")
+# The redaction ENGINE is pontifex's (`pontifex.core.redaction`) — this bridge's
+# local engine was retired once upstream reached parity-or-better on every local
+# behavior: stateful key-block handling, the full vendor-pattern set (including
+# github_pat_/glpat_/sk-ant-/npm_/pypi-, upstreamed from here), and a streaming
+# line redactor for the job worker. What the shared engine ADDS over the old
+# local one: span-merge with `[redacted: possibly partial secret value]` honesty
+# markers, quoted/bracketed labelled keys, richer connection-string coverage,
+# and the source-file code-reference exemption. These names re-export so callers
+# and tests keep one import site.
+SECRET_PATH_RE = _redaction.SECRET_PATH_RE
+SECRET_VALUE_PATTERNS = _redaction.SECRET_VALUE_PATTERNS
+SecretRedactor = _redaction.StreamRedactor
 
 
 @dataclass
@@ -233,123 +210,20 @@ def _summary(cwd: str, diff_args: list[str]) -> ContextSummary:
     return ContextSummary(files_changed=files, lines_added=added, lines_removed=removed)
 
 
-def _diff_path_from_header(line: str) -> str:
-    spec = line[len("diff --git ") :]
-    try:
-        parts = shlex.split(spec)
-    except ValueError:
-        parts = spec.split()
-    if len(parts) >= 2:
-        path = parts[1]
-        return path[2:] if path.startswith("b/") else path
-    return spec
-
-
-def _redact_secret_values(line: str) -> tuple[str, bool]:
-    redacted = False
-    out = line
-    for pattern in SECRET_VALUE_PATTERNS:
-
-        def repl(match: re.Match) -> str:
-            nonlocal redacted
-            redacted = True
-            if match.lastindex:
-                return f"{match.group(1)}[redacted: secret value]"
-            return "[redacted: secret value]"
-
-        out = pattern.sub(repl, out)
-    return out, redacted
-
-
-def _split_diff_prefix(line: str) -> tuple[str, str]:
-    """Split a scannable diff line into its +/-/space marker and its content.
-
-    Lines without a diff marker (e.g. a raw "Authorization:" header) yield an empty
-    prefix so the whole line is treated as content.
-    """
-    if line.startswith(("+", "-", " ")) and not line.startswith(("+++", "---")):
-        return line[0], line[1:]
-    return "", line
-
-
-_REDACTED = "[redacted: secret value]"
-
-
-def _redact_key_content(content: str, in_block: bool) -> tuple[str, bool, bool]:
-    """Redact PEM/OpenSSH/PGP key material within one content line.
-
-    Handles markers that share a physical line (e.g. an escaped one-liner
-    ``key="-----BEGIN...-----\\nMII...\\n-----END...-----"``) as well as true
-    multi-line blocks. The BEGIN/END markers stay visible; only the body between
-    them is dropped, and the open-block state never leaks past an inline END.
-
-    Returns ``(emitted, changed, in_block_after)``.
-    """
-    if in_block:
-        end = _PRIVATE_KEY_END_RE.search(content)
-        if end is None:
-            return _REDACTED, True, True  # still inside the block: drop the whole line
-        # Body may precede the END marker on this closing line; keep END onward.
-        head = content[: end.start()]
-        emit = (_REDACTED if head.strip() else head) + content[end.start() :]
-        return emit, True, False
-
-    begin = _PRIVATE_KEY_BEGIN_RE.search(content)
-    if begin is None:
-        return content, False, False
-    end = _PRIVATE_KEY_END_RE.search(content, begin.end())
-    if end is not None:
-        # Whole key inline on one line: redact between the markers, stay closed.
-        emit = content[: begin.end()] + _REDACTED + content[end.start() :]
-        return emit, True, False
-    # Block opens here; redact any body trailing the BEGIN marker on this line.
-    tail = content[begin.end() :]
-    emit = content[: begin.end()] + (_REDACTED if tail.strip() else tail)
-    return emit, True, True
-
-
-@dataclass
-class SecretRedactor:
-    """Stateful best-effort redactor for a stream of complete text lines.
-
-    Keeping key-block state on the instance lets callers sanitize stderr while it
-    is produced without first retaining the full, potentially sensitive stream.
-    ``line`` must not include its line separator; callers remain responsible for
-    preserving separators in their own transport.
-    """
-
-    in_key_block: bool = False
-
-    def redact_line(self, line: str) -> tuple[str, bool]:
-        if self.in_key_block or _PRIVATE_KEY_BEGIN_RE.search(line):
-            emit, key_changed, self.in_key_block = _redact_key_content(line, self.in_key_block)
-            emit, value_changed = _redact_secret_values(emit)
-            return emit, key_changed or value_changed
-        return _redact_secret_values(line)
-
-
 def redact_text(text: str) -> tuple[str, bool]:
     """Best-effort secret redaction for free-form model output (prose).
 
-    Shares the diff path's pattern set (``SECRET_VALUE_PATTERNS``) and the stateful
-    PEM/OpenSSH/PGP key-block handling (``_redact_key_content``), but with no
-    diff-prefix or file-header awareness — every line is treated as content. A
-    multi-line key block stays open until its END marker (or end of text), so an
-    unterminated block fails closed. Returns ``(scrubbed, changed)``; an empty
-    string passes through as ``("", False)``. Defense-in-depth, NOT a guarantee: a
-    key split across separate fields is out of scope (see #66 / SECURITY.md).
+    Thin wrapper over the shared engine (`pontifex.core.redaction.redact_text`),
+    keeping this bridge's historical `(scrubbed, changed)` tuple shape. The engine
+    applies the inline value patterns AND the stateful key-block pass, failing
+    closed on an unterminated block. `changed` reports whether the text was
+    rewritten at all. Defense-in-depth, NOT a guarantee: a key split across
+    separate fields is out of scope (see #66 / SECURITY.md).
     """
     if not text:
         return text, False
-    out_lines: list[str] = []
-    changed = False
-    redactor = SecretRedactor()
-    # split("\n") (not splitlines) so \n-delimited prose round-trips exactly.
-    for line in text.split("\n"):
-        emit, line_changed = redactor.redact_line(line)
-        changed = changed or line_changed
-        out_lines.append(emit)
-    return "\n".join(out_lines), changed
+    out = _redaction.redact_text(text) or ""
+    return out, out != text
 
 
 def redact_tree(value: object) -> object:
@@ -357,10 +231,10 @@ def redact_tree(value: object) -> object:
 
     Used to scrub untrusted, model/CLI-derived structured payloads (e.g.
     ``permission_denials``) while preserving shape. Dict KEYS are redacted as well
-    as values: this data is relayed verbatim into ``meta`` (which is not
-    str()-coerced like the structured findings path), so a secret-shaped key would
-    otherwise survive. Non-string leaves (ints, None, bools) are returned
-    untouched."""
+    as values — a DELIBERATE divergence from pontifex's own ``redact_tree``: this
+    data is relayed verbatim into ``meta`` (which is not str()-coerced like the
+    structured findings path), so a secret-shaped key would otherwise survive.
+    Non-string leaves (ints, None, bools) are returned untouched."""
     if isinstance(value, str):
         return redact_text(value)[0]
     if isinstance(value, list):
@@ -371,58 +245,16 @@ def redact_tree(value: object) -> object:
 
 
 def _redact(diff: str) -> tuple[str, list[str]]:
-    out_lines: list[str] = []
-    redacted: list[str] = []
-    skipping = False
-    in_key_block = False
-    current_path = ""
+    """Redact secret-looking files and inline values in a unified diff.
 
-    def note_redacted() -> None:
-        if current_path and current_path not in redacted:
-            redacted.append(current_path)
-
-    for line in diff.splitlines():
-        if line.startswith("diff --git "):
-            spec = line[len("diff --git ") :]  # "a/<path> b/<path>" (paths may be quoted)
-            current_path = _diff_path_from_header(line)
-            in_key_block = False  # never let a key block bleed across files
-            skipping = bool(SECRET_PATH_RE.search(spec) or SECRET_PATH_RE.search(current_path))
-            if skipping:
-                redacted.append(current_path or spec)
-                out_lines.append(line)  # keep the real header so reviewers see the file
-                out_lines.append("[redacted: secret-looking file not sent]")
-                continue
-        if skipping:
-            continue
-
-        scan_line = (
-            line.startswith(("+", "-", " ")) and not line.startswith(("+++", "---"))
-        ) or line.startswith("Authorization:")
-        if not scan_line:
-            in_key_block = False  # hunk/metadata boundary ends any open block
-            out_lines.append(line)
-            continue
-
-        prefix, content = _split_diff_prefix(line)
-        if in_key_block or _PRIVATE_KEY_BEGIN_RE.search(content):
-            emit_content, changed, in_key_block = _redact_key_content(content, in_key_block)
-            if changed:
-                note_redacted()
-            out_lines.append(f"{prefix}{emit_content}")
-            continue
-
-        emit_content, changed = _redact_secret_values(content)
-        if changed:
-            note_redacted()
-        out_lines.append(f"{prefix}{emit_content}")
-    # The trailing newline is preserved. `splitlines()` + `"\n".join()` silently drops it,
-    # and for a unified diff that is not cosmetic: `git apply` rejects a patch whose last
-    # line is unterminated with "corrupt patch at line N". Same fix as the sibling
-    # bridges (moonbridge origin, ported to codex-in-claude and pontifex.core).
-    text = "\n".join(out_lines)
-    if diff.endswith(("\n", "\r")) and text:
-        text += "\n"
-    return text, redacted
+    Delegates to the shared engine (`pontifex.core.redaction.redact`), which keeps
+    every property the local engine had — withheld secret-path hunks behind their
+    visible headers, stateful key-block handling that never bleeds across file or
+    hunk boundaries, `Authorization:` header scanning, and trailing-newline
+    preservation so the redacted patch still applies — and adds span-merge partial
+    markers plus the source-file code-reference exemption.
+    """
+    return _redaction.redact(diff)
 
 
 def gather_context(

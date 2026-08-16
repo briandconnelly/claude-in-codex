@@ -7,6 +7,17 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- The redaction engine is now pontifex's (`pontifex.core.redaction`), retiring
+  this bridge's local engine after upstream reached parity-or-better on every
+  local behavior (stateful private-key-block handling, the full vendor-pattern
+  set — the five shapes this bridge contributed are covered upstream — and a
+  streaming line redactor for the job worker). Content-level improvements the
+  shared engine brings: `[redacted: possibly partial secret value]` honesty
+  markers when a match may have stopped short, quoted/bracketed labelled keys,
+  richer connection-string coverage, and a source-file code-reference exemption
+  so ordinary code like `token = helper(x)` in a `.py` diff is no longer
+  masked (data/config files keep unconditional redaction). No schema change;
+  each divergence is pinned by a differential test at this bridge's seam.
 - Background jobs now run on the shared pontifex job store (fingerprint
   `claude-in-codex/0.1/schema-36`): lifecycle mechanics — detached spawn,
   worker-lock liveness, deadline reaping, TTL cleanup, count caps,
