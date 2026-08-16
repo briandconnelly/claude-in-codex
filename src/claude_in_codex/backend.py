@@ -66,7 +66,7 @@ class ClaudeBackend:
         artifacts: answer, cost, and session id all arrive in the stdout JSON
         envelope."""
         config_mode = request.config_mode or config.defaults().config_mode
-        cmd, _dropped = claude.build_command(
+        cmd, dropped = claude.build_command(
             request.prompt,
             config_mode,
             request.access or _KIND_DEFAULT_ACCESS,
@@ -77,11 +77,15 @@ class ClaudeBackend:
             effort=request.reasoning_effort,
             flag_support=preflight.flag_support(),
         )
+        # This backend stages NO file artifacts, so nothing here outlives the
+        # context — which is what lets the async job path use prepare() purely to
+        # obtain argv/dropped_flags and hand them to the detached job store.
         yield PreparedRun(
             argv=tuple(cmd),
             env=self.scrub_env(dict(os.environ), config_mode),
             cwd=request.cwd,
             stdin_text=request.prompt,
+            dropped_flags=tuple(dropped),
         )
 
     def finalize(self, outcome: RunOutcome, request: RunRequest) -> ExecResult:
@@ -149,3 +153,15 @@ class ClaudeBackend:
         merged = {k: v for k, v in env.items() if k not in claude._LOGIN_CREDENTIAL_ENV_VARS}
         merged.update(scrubbed)
         return merged
+
+
+# The adapter is stateless; every production path shares this instance.
+BACKEND = ClaudeBackend()
+
+
+def kind_for_tool(tool: str) -> str:
+    """Map this bridge's tool names onto the protocol's canonical verbs.
+
+    `claude_adversarial_review` is a backend-specific extension, but it is still
+    a review of gathered changes — same access posture, same envelope."""
+    return "review_changes" if "review" in tool else "consult"

@@ -14,12 +14,13 @@ from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from pontifex.backend.protocol import RunRequest
 from pydantic import Field, ValidationError
 
 from claude_in_codex import __version__, cli_contract, jobs, preflight
+from claude_in_codex.backend import BACKEND, kind_for_tool
 from claude_in_codex.claude import (
     auth_status,
-    build_command,
     classify_failure,
     run_claude_async,
 )
@@ -967,6 +968,21 @@ def _resolve_config_mode_only(
     return cm, None
 
 
+def _run_request(kind: str, prompt: str, cwd: str, r: Resolved) -> RunRequest:
+    """One resolved tool call as the protocol's RunRequest — the adapter's input."""
+    return RunRequest(
+        kind=kind,
+        prompt=prompt,
+        cwd=cwd,
+        timeout_seconds=r.timeout,
+        model=r.model,
+        reasoning_effort=r.effort,
+        budget_usd=r.budget,
+        config_mode=r.config_mode,
+        access=r.access,
+    )
+
+
 async def _execute(
     tool,
     payload,
@@ -982,14 +998,21 @@ async def _execute(
     head: str | None = None,
 ) -> dict:
     prompt = build_prompt(tool, payload, context_text)
-    cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
-    run = await run_claude_async(
-        cmd,
-        cwd=cwd,
-        timeout_seconds=r.timeout,
-        stdin_text=prompt,
-        config_mode=r.config_mode,
-    )
+    # Staged through the ClaudeBackend adapter (the freeze-window re-plumb): argv,
+    # prompt-over-stdin, and help-gate drops all come from prepare(). Execution
+    # stays this server's — run_claude_async owns the kill-tree, cancellation, and
+    # per-mode env (identical to prepared.env by construction: scrub_env delegates
+    # to the same _claude_subprocess_env).
+    request = _run_request(kind_for_tool(tool), prompt, cwd, r)
+    async with BACKEND.prepare(request) as prepared:
+        run = await run_claude_async(
+            list(prepared.argv),
+            cwd=cwd,
+            timeout_seconds=r.timeout,
+            stdin_text=prepared.stdin_text,
+            config_mode=r.config_mode,
+        )
+        dropped = list(prepared.dropped_flags)
     meta = _meta(
         cwd,
         r.config_mode,
@@ -1737,7 +1760,11 @@ async def claude_review_changes_async(
         {"scope": scope, "base": base, "head": head, "focus": focus, "paths": effective_paths},
         ctx_data.text,
     )
-    cmd, dropped = build_command(prompt, r.config_mode, r.access, r.model, r.budget, r.effort)
+    # The detached job needs only argv (the prompt streams to the worker's stdin via
+    # the job store, never disk). prepare() may close before the job starts because
+    # this backend stages no file artifacts — documented on ClaudeBackend.prepare.
+    async with BACKEND.prepare(_run_request("review_changes", prompt, cwd, r)) as prepared:
+        cmd, dropped = list(prepared.argv), list(prepared.dropped_flags)
     cfg = JobConfig(
         kind="claude_review_changes",
         config_mode=r.config_mode,

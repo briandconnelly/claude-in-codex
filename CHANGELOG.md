@@ -7,6 +7,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Every model-bearing run now goes through the pontifex `AgentBackend` adapter:
+  the sync tools stage via `ClaudeBackend.prepare()` (shared command builder,
+  prompt over stdin, help-gate drops on `PreparedRun.dropped_flags`) and keep
+  execution local (`run_claude_async` still owns the kill-tree, cancellation,
+  and per-mode environment — identical to the adapter's `scrub_env` by
+  construction), while the async job path uses `prepare()` to obtain argv for
+  the detached worker (safe because this backend stages no file artifacts).
+  Wire shapes and argv are unchanged.
+
 - The redaction engine is now pontifex's (`pontifex.core.redaction`), retiring
   this bridge's local engine after upstream reached parity-or-better on every
   local behavior (stateful private-key-block handling, the full vendor-pattern
