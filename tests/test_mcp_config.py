@@ -34,3 +34,30 @@ def test_bundled_mcp_configs_forward_supported_env_vars():
     assert all(env_vars == all_env_vars[0] for env_vars in all_env_vars)
     assert len(all_env_vars[0]) == len(set(all_env_vars[0]))
     assert set(all_env_vars[0]) == EXPECTED_ENV_VARS
+
+
+def test_codex_plugin_manifest_mirror_stays_in_lockstep():
+    """The marketplace mirror at plugins/claude-in-codex/ is kept in step by hand;
+    COMPATIBILITY.md notes CI does not validate it. This closes the gap the
+    existing env_vars and SKILL.md parity checks left: the plugin manifest
+    itself, whose version must also match pyproject."""
+    import tomllib
+
+    root_manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())
+    mirror_manifest = json.loads(
+        (ROOT / "plugins" / "claude-in-codex" / ".codex-plugin" / "plugin.json").read_text()
+    )
+    assert root_manifest == mirror_manifest
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert root_manifest["version"] == pyproject["project"]["version"]
+
+
+def test_skill_mirror_stays_in_lockstep():
+    """Byte-equality for every file under skills/ and its marketplace mirror."""
+    src_dir = ROOT / "skills"
+    mirror_dir = ROOT / "plugins" / "claude-in-codex" / "skills"
+    src_files = sorted(p.relative_to(src_dir) for p in src_dir.rglob("*") if p.is_file())
+    mirror_files = sorted(p.relative_to(mirror_dir) for p in mirror_dir.rglob("*") if p.is_file())
+    assert src_files == mirror_files
+    for rel in src_files:
+        assert (src_dir / rel).read_bytes() == (mirror_dir / rel).read_bytes(), rel
