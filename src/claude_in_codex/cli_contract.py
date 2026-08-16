@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 
+from pontifex.backend import contract as _pontifex_contract
+
 CLAUDE_BIN = "claude"
 
 # Core invocation that CANNOT be dropped: -p (print mode) + JSON output. If these
@@ -144,4 +146,73 @@ KNOWN_MODELS: tuple[tuple[str, str, str], ...] = (
     ("claude-sonnet-4-6", "Sonnet 4.6", "full"),
     ("claude-haiku-4-5-20251001", "Haiku 4.5", "full"),
     ("claude-fable-5", "Fable 5", "full"),
+)
+
+
+# --- Shared-library contract (pontifex) -------------------------------------------
+# Wire prose that would contradict this contract: cross-bridge contamination
+# canaries (this code now shares a library with the Codex and Kimi bridges, so
+# wrong-direction vocabulary can ride a backport — exactly how moonbridge shipped
+# "kimi exec"), and claims of mechanisms this server refuses or lacks (it never
+# edits code, has no delegate tier, and read-only is a tool allowlist, not a
+# sandbox).
+FORBIDDEN_SURFACE_PHRASES = (
+    "codex exec",
+    "kimi",
+    "moonbridge",
+    "read-only sandbox",
+    "applies the diff",
+)
+
+# The declarative half of this contract, in the shared shape the pontifex
+# conformance/honesty kits consume. Values are DERIVED from the constants above —
+# tests/test_surface_honesty.py pins the derivations so the two can never drift.
+# Behavior (command build, classification) still lives in claude.py; migrating it
+# onto the pontifex AgentBackend lifecycle is the planned next step while the
+# protocol is provisional.
+PONTIFEX_CONTRACT = _pontifex_contract.BackendContract(
+    backend_id="claude",
+    display_name="Claude",
+    bin_name=CLAUDE_BIN,
+    env_prefix="CLAUDE_IN_CODEX_",
+    exec_argv_prefix=CORE_INVOCATION,
+    always_send_flags=tuple(sorted(ALWAYS_SEND_FLAGS)),
+    help_gated_flags=tuple(sorted(HELP_GATED_FLAGS)),
+    forbidden_surface_phrases=FORBIDDEN_SURFACE_PHRASES,
+    # Review-only by design: no delegate, no transfer, no sessions
+    # (--no-session-persistence is ALWAYS sent). Cost accounting comes from the
+    # JSON envelope, not stream events, so usage_accounting is declared with
+    # envelope keys as the markers.
+    supported_features=frozenset({"usage_accounting"}),
+    readonly_honesty_statement=(
+        "access=toolless grants no tools at all; access=readonly grants Read/Grep/Glob, "
+        "which lets Claude read files itself — bypassing diff redaction — and Read "
+        "accepts absolute paths outside the workspace. Neither is an OS sandbox."
+    ),
+    implicit_context_disclosure=(
+        "What the claude CLI auto-loads depends on config_mode: inherit/scoped read the "
+        "workspace's CLAUDE.md and .claude/settings*.json — including hooks, which run "
+        "OUTSIDE the tool allowlist (surfaced as security_warnings); safe disables "
+        "customizations/hooks while preserving OAuth; bare loads nothing but requires "
+        "ANTHROPIC_API_KEY. All modes strip the user's MCP servers."
+    ),
+    # The schema instruction rides the prompt; parsing is tolerant (see normalize).
+    structured_output="prompt_append",
+    model_catalog=_pontifex_contract.ModelCatalog(
+        strategy="static",
+        model_identifier_authority="advisory",
+        effort_metadata_authority="advisory",
+    ),
+    isolation_policy=_pontifex_contract.IsolationPolicy.TOOL_ALLOWLIST,
+    needs_orphan_sweep=False,
+    # claude rejects a bad --effort at arg-parse (VALID_EFFORTS is also enforced
+    # at this server's boundary), so upstream is loud, not silent.
+    effort_silently_ignored_upstream=False,
+    usage_event_markers=tuple(sorted(USAGE_KEYS)),
+    failure_signatures=_pontifex_contract.FailureSignatures(
+        # Narrow on purpose: a bare "/login" can appear in reviewed content or
+        # URLs; these phrasings are the CLI's own (see claude.py::_is_auth_blob).
+        auth=(r"(?i)not logged in", r"(?i)please run /login"),
+        contract_drift=tuple(f"(?i){re.escape(p)}" for p in CONTRACT_DRIFT_STDERR_PATTERNS),
+    ),
 )

@@ -7,6 +7,18 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Add a dependency on [pontifex](https://github.com/briandconnelly/pontifex),
+  the shared agent-bridge library, and declare this server's CLI contract in
+  its shared shape: `cli_contract.PONTIFEX_CONTRACT` (derivation-pinned
+  against the legacy constants) plus `cli_contract.FORBIDDEN_SURFACE_PHRASES`
+  with surface-honesty tests enforcing them against the built wire surface.
+- Add `backend.ClaudeBackend`, this bridge's adapter on the provisional
+  pontifex `AgentBackend` protocol, validated by a byte-for-byte argv
+  differential against `claude.build_command` and per-config-mode env
+  scrubbing tests. The kind-dispatch seam and tool re-plumbing land with the
+  protocol freeze. No agent-visible surface change (fingerprint digest
+  unchanged).
+
 ### Fixed
 
 - MCP initialization reported FastMCP's version as the server version, so
