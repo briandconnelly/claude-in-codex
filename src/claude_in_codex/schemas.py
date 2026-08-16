@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-35"
+FINGERPRINT = "claude-in-codex/0.1/schema-36"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -117,6 +117,10 @@ ErrorCode = Literal[
     "job_cancelled",
     "job_timeout",
     "job_failed",
+    # Keyed-launch coordination (the store's idempotency index; shared taxonomy):
+    "idempotency_conflict",
+    "idempotency_result_unavailable",
+    "idempotency_in_progress",
 ]
 
 
@@ -384,6 +388,11 @@ DEFAULT_NEXT_STEP: dict[str, RepairStep] = {
     "internal_error": "no_automatic_repair",
     "job_cancelled": "no_automatic_repair",
     "job_timeout": "no_automatic_repair",
+    # Keyed-launch coordination: a conflict or consumed result needs a changed
+    # call (new key); a coordination race clears itself on retry.
+    "idempotency_conflict": "retry_with_changes",
+    "idempotency_result_unavailable": "retry_with_changes",
+    "idempotency_in_progress": "retry_same_call",
 }
 
 

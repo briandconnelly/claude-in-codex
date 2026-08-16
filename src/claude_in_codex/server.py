@@ -9,7 +9,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import Annotated, Literal, cast, get_args
 from urllib.parse import unquote, urlparse
-from uuid import uuid4
 
 from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
@@ -1758,47 +1757,65 @@ async def claude_review_changes_async(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         idempotency_key=idempotency_key,
     )
-    reserved_job_id: str | None = None
-    if idempotency_key:
-        candidate = uuid4().hex
-        holder = await run_sync(
-            lambda: jobs.reserve_idempotency_key(cwd, idempotency_key, candidate)
-        )
-        if holder is not None:
-            data = await run_sync(lambda: jobs.status(cwd, holder))
-            if data is not None:
-                return _result(data)
-            # Holder vanished between reserve and status (crashed pre-spawn and
-            # reaped): fall through and launch fresh under a new reservation.
-            holder2 = await run_sync(
-                lambda: jobs.reserve_idempotency_key(cwd, idempotency_key, candidate)
+    try:
+        if idempotency_key:
+            outcome = await run_sync(
+                lambda: jobs.start_job_idempotent(cmd, cwd, cfg, prompt, key=idempotency_key)
             )
-            if holder2 is not None:
-                data = await run_sync(lambda: jobs.status(cwd, holder2))
+            outcome_kind = outcome["kind"]
+            if outcome_kind == "created":
+                job_id, started_at = outcome["job_id"], outcome["started_at"]
+            elif outcome_kind == "replay":
+                data = await run_sync(lambda: jobs.status(cwd, outcome["job_id"]))
                 if data is not None:
                     return _result(data)
                 return _result(
                     _err(
                         "internal_error",
-                        "idempotency_key reservation is held by a job that has no record.",
+                        "idempotency_key replay points at a job that has no record.",
                         "Retry, or omit idempotency_key to force a new launch.",
                         meta,
                         offending="idempotency_key",
                         retryable=True,
                     )
                 )
-            reserved_job_id = candidate
+            elif outcome_kind == "conflict":
+                return _result(
+                    _err(
+                        "idempotency_conflict",
+                        "This idempotency_key was already used with different effective arguments.",
+                        "Pass a new idempotency_key, or repeat the original arguments to "
+                        "replay the existing job.",
+                        meta,
+                        offending="idempotency_key",
+                    )
+                )
+            elif outcome_kind == "unavailable":
+                return _result(
+                    _err(
+                        "idempotency_result_unavailable",
+                        "A prior run for this idempotency_key completed, but its result "
+                        "is no longer retained (consumed or expired).",
+                        "Retry with a new idempotency_key to launch a fresh run.",
+                        meta,
+                        offending="idempotency_key",
+                    )
+                )
+            else:  # in_progress | io_error — both are retryable coordination states
+                return _result(
+                    _err(
+                        "idempotency_in_progress",
+                        "A concurrent launch for this idempotency_key is still being coordinated.",
+                        "Retry the same call after a short delay; the winner's job will "
+                        "be replayed.",
+                        meta,
+                        offending="idempotency_key",
+                        retryable=True,
+                    )
+                )
         else:
-            reserved_job_id = candidate
-    try:
-        job_id, started_at = await run_sync(
-            lambda: jobs.start_job(cmd, cwd, cfg, prompt, job_id=reserved_job_id)
-        )
+            job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
     except (FileNotFoundError, PermissionError):
-        if idempotency_key and reserved_job_id:
-            await run_sync(
-                lambda: jobs.release_idempotency_key(cwd, idempotency_key, reserved_job_id)
-            )
         return _result(
             _err(
                 "claude_not_found",
@@ -1808,10 +1825,6 @@ async def claude_review_changes_async(
             )
         )
     except OSError as e:
-        if idempotency_key and reserved_job_id:
-            await run_sync(
-                lambda: jobs.release_idempotency_key(cwd, idempotency_key, reserved_job_id)
-            )
         return _result(
             _err(
                 "internal_error",
@@ -2431,7 +2444,14 @@ _TOOL_ERROR_CODES: dict[str, list[str]] = {
     "claude_review_changes": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
     "claude_adversarial_review": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
     # Preflight only: a started job's own failures arrive via claude_job_result.
-    "claude_review_changes_async": [*_PAID_PREFLIGHT_ERRORS, *_GIT_ERRORS],
+    "claude_review_changes_async": [
+        *_PAID_PREFLIGHT_ERRORS,
+        *_GIT_ERRORS,
+        # Keyed-launch coordination outcomes from the idempotency index.
+        "idempotency_conflict",
+        "idempotency_result_unavailable",
+        "idempotency_in_progress",
+    ],
     "claude_job_status": _JOB_LIFECYCLE_ERRORS,
     "claude_job_cancel": _JOB_LIFECYCLE_ERRORS,
     # The fetched envelope is the original tool's, so its failure codes surface
@@ -2597,6 +2617,27 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
         "The job's process ended without writing a result envelope. Terminal: the "
         "same fetch returns job_failed forever, so diagnose and start a new job.",
         False,
+        ["field", "value"],
+    ),
+    (
+        "idempotency_conflict",
+        "The idempotency_key was already used with different effective arguments; "
+        "a replay must repeat the original arguments.",
+        False,
+        ["field", "value"],
+    ),
+    (
+        "idempotency_result_unavailable",
+        "A prior run for this idempotency_key completed but its result is no longer "
+        "retained (consumed or expired); use a new key for a fresh run.",
+        False,
+        ["field", "value"],
+    ),
+    (
+        "idempotency_in_progress",
+        "A concurrent launch for this idempotency_key is still being coordinated; "
+        "retry the same call shortly.",
+        True,
         ["field", "value"],
     ),
 ]

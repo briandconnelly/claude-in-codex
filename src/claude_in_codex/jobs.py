@@ -1,37 +1,47 @@
-"""Detached background jobs for long Claude reviews.
+"""Job layer: wire mapping and result synthesis over the pontifex job store.
 
-This server drives a one-shot ``claude -p --output-format json`` call, so a job's
-terminal output is a single JSON envelope written to ``result.json`` — completion
-is "the process exited and the envelope is present", with NO interactive-log or
-TUI scraping. That makes background mode far simpler and more robust here than in
-a harness that tails an interactive CLI.
+Lifecycle MECHANICS — detached spawn, worker-lock liveness, deadline reaping,
+TTL cleanup, count caps, cancellation, idempotent starts — live in
+``pontifex.core.jobs.JobStore``. This module is the consumer layer that
+remains deliberately local: the wire shapes (JobStatus/JobListResult dicts),
+result synthesis (re-rendering the stored claude envelope at fetch-time
+detail, drift upgrading, cost surfacing, repair actions), stderr-tail
+selection, and compatibility with records written by 0.7.x.
 
-State lives on disk (keyed by workspace), so status/result/cancel keep working
-across MCP server restarts. There is no daemon: single-job lifecycle calls refresh
-and TTL-clean the requested job, list calls clean the workspace, and the count cap
-is enforced when jobs start. ``--max-budget-usd`` still applies its best-effort
-spend stop threshold (not a hard cap) even for a job nobody polls.
+Layout compatibility: the 0.7 store and the pontifex store share the same
+state root, workspace-dir naming, and meta field names (same lineage), so
+legacy records are read, cancelled, and TTL-reaped by the same store. The
+differences are per record: legacy metas carry ``config``/``context_summary``
+at top level (new records carry them under ``extra``), legacy sanitized child
+stderr lives in ``stderr.log`` (new records use ``claude-stderr.log`` because
+the store's own ``stderr.log`` now captures worker self-diagnostics), and
+legacy keyed launches are replayed through their on-disk ``idem-*.json``
+markers, which are read and reaped — but no longer written; new keyed
+launches go through the store's idempotency index.
+
+The prompt is streamed to the worker over a pipe (`stdin_text`) and the
+worker's child inherits that pipe — the prompt never lands on disk or argv,
+same as 0.7.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
-import importlib
 import json
 import os
 import re
 import shutil
-import signal
-import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from uuid import uuid4
+
+from pontifex.core.jobs import DiscardOutcome, JobStore
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
@@ -51,11 +61,6 @@ from claude_in_codex.schemas import (
     workspace_warning_for,
 )
 
-try:
-    fcntl: Any = importlib.import_module("fcntl")
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None
-
 STATE_ENV = "CLAUDE_IN_CODEX_STATE_DIR"
 TTL_ENV = "CLAUDE_IN_CODEX_JOB_TTL"
 MAX_SECONDS_ENV = "CLAUDE_IN_CODEX_JOB_MAX_SECONDS"
@@ -67,11 +72,13 @@ DEFAULT_MAX_COUNT = 50  # retained jobs per workspace; evict oldest terminal
 
 _TERMINAL = {"done", "failed", "cancelled", "timeout"}
 _JOBS_LOCK = threading.RLock()
-_PROCESS_OWNER = uuid4().hex
-_OWNED_PIDS: set[int] = set()
 _JOB_ID_RE = re.compile(JOB_ID_PATTERN)
-_TERMINATE_GRACE_SECONDS = 5.0
 _LEGACY_STDERR_WITHHELD = "legacy job diagnostics withheld because they predate sanitization"
+# New records' sanitized child stderr. The store owns <job_dir>/stderr.log for
+# the worker's OWN diagnostics, so the redacted claude stream needs its own file.
+_CLAUDE_STDERR_FILE = "claude-stderr.log"
+# The store's idempotency index keys on (tool, key); one tool starts keyed jobs.
+_IDEMPOTENT_TOOL = "claude_review_changes_async"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -89,6 +96,10 @@ def ttl_seconds() -> int:
     return _int_env(TTL_ENV, DEFAULT_TTL)
 
 
+def max_count() -> int:
+    return _int_env(MAX_COUNT_ENV, DEFAULT_MAX_COUNT)
+
+
 def poll_after_ms() -> int:
     return 1000
 
@@ -98,6 +109,18 @@ def _state_root() -> Path:
     if root:
         return Path(root)
     return Path.home() / ".cache" / "claude-in-codex" / "jobs"
+
+
+def _store() -> JobStore:
+    """A store view over the current env knobs. Cheap to build per call, which
+    preserves 0.7's read-env-at-call-time behavior for the TTL/deadline/cap."""
+    return JobStore(
+        root=_state_root(),
+        ttl_seconds=ttl_seconds(),
+        max_seconds=max_seconds(),
+        max_count=max_count(),
+        poll_after_ms=poll_after_ms(),
+    )
 
 
 def _ws_dir(cwd: str) -> Path:
@@ -123,224 +146,6 @@ def _job_dir(cwd: str, job_id: str) -> Path:
     if target.is_symlink() or target.resolve(strict=False).parent != ws.resolve(strict=False):
         raise ValueError("job_id does not resolve to a confined job directory")
     return target
-
-
-def _job_dirs(ws: Path) -> list[Path]:
-    """Enumerate only canonical, non-symlink job directories."""
-    if not ws.is_dir():
-        return []
-    resolved_ws = ws.resolve(strict=False)
-    result: list[Path] = []
-    for entry in ws.iterdir():
-        if not _valid_job_id(entry.name) or entry.is_symlink() or not entry.is_dir():
-            continue
-        if entry.resolve(strict=False).parent == resolved_ws:
-            result.append(entry)
-    return result
-
-
-def _reservation_path(cwd: str, key: str) -> Path:
-    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
-    return _ws_dir(cwd) / f"idem-{digest}.json"
-
-
-def reserve_idempotency_key(cwd: str, key: str, job_id: str) -> str | None:
-    """Atomically reserve (workspace, key) for job_id.
-
-    Returns None if we won the reservation, else the job_id that holds it.
-    The marker is published via write-to-temp-then-os.link: the payload is
-    fully written to a private temp file first, then published with
-    os.link(tmp, path), which atomically fails with FileExistsError if the
-    marker already exists — on a local filesystem this is atomic across
-    processes, and unlike a bare O_CREAT|O_EXCL open it never exposes a
-    partially-written marker to a racing reader (link() only publishes a fully
-    written inode). A stale marker (its job record is gone AND the marker is
-    older than the job TTL) is replaced. Written before the job spawns; the
-    caller removes it via release_idempotency_key on spawn failure.
-
-    Replacing a judged-stale marker (unlink then link) has a narrow TOCTOU
-    window between two concurrent replacers; a stale marker only exists after
-    a crash or TTL expiry, so this is accepted rather than closed with
-    quarantine-rename."""
-    if not _valid_job_id(job_id):
-        raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
-    path = _reservation_path(cwd, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"job_id": job_id, "created_epoch": time.time()})
-    tag = f"{os.getpid()}.{threading.get_ident()}.{uuid4().hex}"
-    tmp_path = path.with_name(f".{path.name}.{tag}.tmp")
-    while True:
-        tmp_path.write_text(payload)
-        try:
-            try:
-                os.link(tmp_path, path)
-            except FileExistsError:
-                pass  # fall through to the staleness check below
-            except OSError:
-                # Filesystem without hardlink support (e.g. some SMB/FUSE
-                # mounts): degrade to a best-effort replace instead of failing
-                # the keyed launch outright. Not atomic-exclusive, but matches
-                # the previous best-effort (pre-hardlink) behavior.
-                tmp_path.replace(path)
-                return None
-            else:
-                return None
-        finally:
-            with contextlib.suppress(OSError):
-                tmp_path.unlink()
-        try:
-            holder = json.loads(path.read_text())
-        except FileNotFoundError:
-            # The marker vanished between our link-failure and this read —
-            # another caller released or replaced it in that gap. Retry
-            # without unlinking; blindly unlinking here could delete a marker
-            # published concurrently by that other caller.
-            continue
-        except (OSError, json.JSONDecodeError):
-            holder = None
-        if isinstance(holder, dict) and _valid_job_id(holder.get("job_id")):
-            held_id = str(holder["job_id"])
-            try:
-                record_alive = _read_meta(_job_dir(cwd, held_id)) is not None
-            except ValueError:
-                record_alive = False
-            created = holder.get("created_epoch") or 0
-            if record_alive or (time.time() - created) <= ttl_seconds():
-                return held_id
-        # Stale or unreadable marker: remove and retry the exclusive create.
-        with contextlib.suppress(OSError):
-            path.unlink()
-        continue
-
-
-def release_idempotency_key(cwd: str, key: str, job_id: str) -> None:
-    """Drop our reservation (spawn failed). Only removes our own marker."""
-    if not _valid_job_id(job_id):
-        return
-    path = _reservation_path(cwd, key)
-    try:
-        holder = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    if isinstance(holder, dict) and holder.get("job_id") == job_id:
-        with contextlib.suppress(OSError):
-            path.unlink()
-
-
-def _pid_alive(pid: int | None) -> bool:
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _is_running(pid: int | None) -> bool:
-    """Whether a process launched by this server is still running.
-
-    The job is launched detached but is still our child until it exits, so we
-    must reap it with waitpid — otherwise it lingers as a zombie that kill(0)
-    reports as 'alive' forever. waitpid(WNOHANG) returns (pid, _) once it exits
-    (reaping it) and (0, 0) while it runs. A PID tracked as ours that is no
-    longer waitable is discarded rather than trusted after possible reuse.
-    Untracked callers retain the historical kill(0) liveness probe; job
-    lifecycle code never uses that alone as an ownership proof."""
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    try:
-        reaped, _ = os.waitpid(pid, os.WNOHANG)
-        if reaped == pid:
-            _OWNED_PIDS.discard(pid)
-            return False
-        if reaped == 0:
-            return True
-    except ChildProcessError:
-        if pid in _OWNED_PIDS:
-            # A PID launched by this process that is no longer waitable has
-            # already been reaped. Never let a reused PID regain ownership.
-            _OWNED_PIDS.discard(pid)
-            return False
-    except OSError:
-        _OWNED_PIDS.discard(pid)
-        return False
-    return _pid_alive(pid)
-
-
-def _worker_lock_held(jd: Path) -> bool | None:
-    """Whether another process positively holds this job's worker lock.
-
-    ``None`` means ownership cannot be verified (missing/corrupt lock or a
-    platform without advisory flock support), which callers treat as not owned.
-    """
-    path = jd / "worker.lock"
-    if path.is_symlink() or not path.is_file():
-        return None
-    if fcntl is None:  # pragma: no cover - non-POSIX fallback
-        return None
-    try:
-        lock_file = path.open("r+b")
-    except OSError:
-        return None
-    try:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        except OSError:
-            return None
-        else:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            return False
-    finally:
-        lock_file.close()
-
-
-def _job_running(jd: Path, meta: dict) -> bool:
-    pid = meta.get("pid")
-    lock_held = _worker_lock_held(jd)
-    if lock_held is True:
-        return _pid_alive(pid)
-    # The parent may publish metadata before the new worker has acquired its
-    # lock. Trust only PIDs that this exact server process has not yet reaped.
-    if meta.get("owner") == _PROCESS_OWNER and pid in _OWNED_PIDS:
-        return _is_running(pid)
-    return False
-
-
-def _signal_job(pid: int, sig: signal.Signals) -> None:
-    """Signal only the verified worker session or, conservatively, its PID."""
-    try:
-        if hasattr(os, "killpg") and os.getpgid(pid) == pid:
-            os.killpg(pid, sig)
-        else:
-            os.kill(pid, sig)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
-def _terminate_verified(jd: Path, meta: dict) -> None:
-    """Terminate a job only while its worker ownership remains provable."""
-    pid = meta.get("pid")
-    if not pid:
-        return
-    if not _job_running(jd, meta):
-        return
-    _signal_job(pid, signal.SIGTERM)
-    deadline = time.monotonic() + _TERMINATE_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        if not _job_running(jd, meta):
-            return
-        time.sleep(0.02)
-    if _job_running(jd, meta):
-        _signal_job(pid, signal.SIGKILL)
-        with contextlib.suppress(ChildProcessError, OSError):
-            reaped, _ = os.waitpid(pid, os.WNOHANG)
-            if reaped == pid:
-                _OWNED_PIDS.discard(pid)
 
 
 def _read_meta(jd: Path) -> dict | None:
@@ -375,6 +180,44 @@ def _read_envelope(jd: Path) -> dict | None:
     return env if isinstance(env, dict) else None
 
 
+# --------------------------------------------------------------- record shapes
+# Legacy (0.7) records carry config/context_summary/idempotency_key at the meta
+# top level; pontifex-store records carry them under meta["extra"]. These
+# accessors are the single place that knows both shapes.
+
+
+def _record_extra(meta: dict) -> dict:
+    extra = meta.get("extra")
+    return extra if isinstance(extra, dict) else {}
+
+
+def _record_config(meta: dict) -> dict:
+    c = _record_extra(meta).get("config")
+    if isinstance(c, dict):
+        return c
+    c = meta.get("config")
+    return c if isinstance(c, dict) else {}
+
+
+def _record_context_summary(meta: dict) -> dict | None:
+    s = _record_extra(meta).get("context_summary")
+    if isinstance(s, dict):
+        return s
+    s = meta.get("context_summary")
+    return s if isinstance(s, dict) else None
+
+
+def _record_stderr_file(meta: dict) -> str:
+    name = _record_extra(meta).get("stderr_file")
+    return name if isinstance(name, str) and name else "stderr.log"
+
+
+def _record_stderr_sanitized(meta: dict) -> bool:
+    if _record_extra(meta).get("stderr_sanitized") is True:
+        return True
+    return meta.get("stderr_sanitized") is True
+
+
 @dataclass
 class JobConfig:
     kind: str
@@ -396,15 +239,50 @@ class JobConfig:
     idempotency_key: str | None = None
 
 
-def _write_stdin(proc: subprocess.Popen, stdin_text: str) -> None:
-    if proc.stdin is None:
-        return
-    try:
-        proc.stdin.write(stdin_text)
-        proc.stdin.close()
-    except (BrokenPipeError, OSError, ValueError):
-        with contextlib.suppress(OSError, ValueError):
-            proc.stdin.close()
+def _extra_for(cfg: JobConfig, cwd: str) -> dict:
+    summary = cfg.context_summary.model_dump() if cfg.context_summary else None
+    return {
+        "idempotency_key": cfg.idempotency_key,
+        "stderr_file": _CLAUDE_STDERR_FILE,
+        "stderr_sanitized": True,
+        "config": {
+            "config_mode": cfg.config_mode,
+            "access": cfg.access,
+            "scope": cfg.scope,
+            "base": cfg.base,
+            "head": cfg.head,
+            "detail": cfg.detail,
+            "timeout_seconds": cfg.timeout_seconds,
+            "workspace_source": cfg.workspace_source,
+            "cwd": cwd,
+            "requested_max_budget_usd": cfg.requested_max_budget_usd,
+            "configured_max_budget_usd": cfg.configured_max_budget_usd,
+            "effective_max_budget_usd": cfg.effective_max_budget_usd,
+            "paths": cfg.paths,
+            "redacted_paths": cfg.redacted_paths or [],
+            "security_warnings": cfg.security_warnings or [],
+        },
+        "context_summary": summary,
+    }
+
+
+def _worker_factory(cmd: list[str]):
+    def factory(jd: Path) -> list[str]:
+        return [
+            sys.executable,
+            "-m",
+            "claude_in_codex._job_worker",
+            "--lock-path",
+            str(jd / "worker.lock"),
+            "--stderr-path",
+            str(jd / _CLAUDE_STDERR_FILE),
+            "--result-path",
+            str(jd / "result.json"),
+            "--",
+            *cmd,
+        ]
+
+    return factory
 
 
 def _check_executable(cmd: list[str], cwd: str) -> None:
@@ -429,144 +307,137 @@ def start_job(
     cwd: str,
     cfg: JobConfig,
     stdin_text: str | None = None,
-    *,
-    job_id: str | None = None,
 ) -> tuple[str, str]:
-    """Spawn the claude command detached and persist its record.
-
-    job_id lets a caller pre-reserve the id (e.g. via reserve_idempotency_key)
-    before spawning; when omitted, one is generated here as before.
+    """Spawn the claude command detached via the store and persist its record.
 
     Returns (job_id, started_at_iso)."""
-    job_id = job_id or uuid4().hex
     _check_executable(cmd, cwd)
-    jd = _job_dir(cwd, job_id)
-    jd.mkdir(parents=True, exist_ok=False)
-    # Best-effort: results contain the diff; keep the workspace tree user-only.
-    with contextlib.suppress(OSError):
-        _ws_dir(cwd).chmod(0o700)
-    started = time.time()
-    result_path = jd / "result.json"
-    stderr_path = jd / "stderr.log"
-    lock_path = jd / "worker.lock"
-    worker_cmd = [
-        sys.executable,
-        "-m",
-        "claude_in_codex._job_worker",
-        "--lock-path",
-        str(lock_path),
-        "--stderr-path",
-        str(stderr_path),
-        "--",
-        *cmd,
-    ]
-    try:
-        with result_path.open("w") as rf:
-            proc = subprocess.Popen(
-                worker_cmd,
-                cwd=cwd,
-                stdin=subprocess.PIPE if stdin_text is not None else None,
-                stdout=rf,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                start_new_session=True,
-            )
-            _OWNED_PIDS.add(proc.pid)
-            if stdin_text is not None:
-                threading.Thread(target=_write_stdin, args=(proc, stdin_text), daemon=True).start()
-    except OSError:
-        shutil.rmtree(jd, ignore_errors=True)
-        raise
-    summary = cfg.context_summary.model_dump() if cfg.context_summary else None
-    meta = {
-        "job_id": job_id,
+    with _JOBS_LOCK:
+        return _store().start(
+            _worker_factory(cmd),
+            cwd,
+            kind=cfg.kind,
+            extra=_extra_for(cfg, cwd),
+            stdin_text=stdin_text,
+        )
+
+
+def arg_hash_for(cfg: JobConfig) -> str:
+    """The effective-argument digest a keyed launch is deduplicated under.
+
+    Two launches with the same idempotency_key but different effective arguments
+    are a conflict, not a replay. Volatile/derived fields (timeouts, workspace
+    provenance, redaction bookkeeping) are excluded — they do not change what
+    the paid run would produce."""
+    material = {
         "kind": cfg.kind,
-        "idempotency_key": cfg.idempotency_key,
-        "pid": proc.pid,
-        "owner": _PROCESS_OWNER,
-        "stderr_sanitized": True,
-        "started_epoch": started,
-        "started_at": datetime.now(UTC).isoformat(),
-        "deadline_epoch": started + max_seconds(),
-        "completed_epoch": None,
-        "terminal_status": None,  # set by cancel/deadline reap
-        "config": {
-            "config_mode": cfg.config_mode,
-            "access": cfg.access,
-            "scope": cfg.scope,
-            "base": cfg.base,
-            "head": cfg.head,
-            "detail": cfg.detail,
-            "timeout_seconds": cfg.timeout_seconds,
-            "workspace_source": cfg.workspace_source,
-            "cwd": cwd,
-            "requested_max_budget_usd": cfg.requested_max_budget_usd,
-            "configured_max_budget_usd": cfg.configured_max_budget_usd,
-            "effective_max_budget_usd": cfg.effective_max_budget_usd,
-            "paths": cfg.paths,
-            "redacted_paths": cfg.redacted_paths or [],
-            "security_warnings": cfg.security_warnings or [],
-        },
-        "context_summary": summary,
+        "config_mode": cfg.config_mode,
+        "access": cfg.access,
+        "scope": cfg.scope,
+        "base": cfg.base,
+        "head": cfg.head,
+        "detail": cfg.detail,
+        "paths": cfg.paths,
+        "effective_max_budget_usd": cfg.effective_max_budget_usd,
     }
-    _write_meta(jd, meta)
-    _enforce_count_cap(cwd)
-    return job_id, meta["started_at"]
+    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+
+def start_job_idempotent(
+    cmd: list[str],
+    cwd: str,
+    cfg: JobConfig,
+    stdin_text: str | None,
+    *,
+    key: str,
+) -> dict:
+    """Deduplicated start through the store's idempotency index.
+
+    Returns the store outcome dict: kind is one of created (with job_id and
+    started_at), replay (with job_id), conflict, unavailable, in_progress, or
+    io_error."""
+    _check_executable(cmd, cwd)
+    with _JOBS_LOCK:
+        return _store().start_idempotent(
+            _worker_factory(cmd),
+            cwd,
+            kind=cfg.kind,
+            tool=_IDEMPOTENT_TOOL,
+            key=key,
+            arg_hash=arg_hash_for(cfg),
+            extra=_extra_for(cfg, cwd),
+            stdin_text=stdin_text,
+        )
+
+
+# ------------------------------------------------------- legacy keyed launches
+# 0.7 keyed launches published idem-<sha16>.json markers in the workspace dir.
+# They are still read (replay) and reaped (staleness), but never written.
+
+
+def _reservation_path(cwd: str, key: str) -> Path:
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return _ws_dir(cwd) / f"idem-{digest}.json"
 
 
 def find_by_idempotency_key(cwd: str, key: str) -> str | None:
-    """Newest non-expired job started with this idempotency key, or None.
+    """The job_id a legacy (0.7) marker reserved for this key, or None.
 
-    Dedup window and scope: per workspace, for the lifetime of the job record
-    (its TTL) — the same window in which claude_job_list can see the job."""
-    with _JOBS_LOCK:
-        ws = _ws_dir(cwd)
-        if not ws.is_dir():
+    Only markers whose record still exists count — a marker for a reaped job
+    must not shadow a fresh launch."""
+    path = _reservation_path(cwd, key)
+    try:
+        holder = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(holder, dict):
+        return None
+    held = holder.get("job_id")
+    if not _valid_job_id(held):
+        return None
+    try:
+        if _read_meta(_job_dir(cwd, str(held))) is None:
             return None
-        matches: list[tuple[float, str]] = []
-        for jd in _job_dirs(ws):
-            meta = _read_meta(jd)
-            if meta is None or meta.get("idempotency_key") != key:
-                continue
-            state = _status_of(jd, meta)
-            if state in _TERMINAL and _expired(meta):
-                continue
-            matches.append((meta.get("started_epoch", 0.0), meta.get("job_id", jd.name)))
-        if not matches:
-            return None
-        return max(matches)[1]
+    except ValueError:
+        return None
+    return str(held)
 
 
-def _status_of(jd: Path, meta: dict) -> str:
-    """Compute the live status, killing + marking jobs that overran their deadline."""
-    terminal = meta.get("terminal_status")
-    if terminal:
-        return terminal
-    # A complete envelope wins races with worker exit, cancellation, and deadline
-    # enforcement. It is safe to normalize as soon as the one-shot JSON is whole.
-    if _read_envelope(jd) is not None:
-        if meta.get("completed_epoch") is None:
-            meta["completed_epoch"] = time.time()
-            _write_meta(jd, meta)
-        return "done"
-    if _job_running(jd, meta):
-        if time.time() > meta.get("deadline_epoch", float("inf")):
-            _terminate_verified(jd, meta)
-            if _read_envelope(jd) is not None:
-                meta["completed_epoch"] = meta.get("completed_epoch") or time.time()
-                _write_meta(jd, meta)
-                return "done"
-            meta["terminal_status"] = "timeout"
-            meta["completed_epoch"] = time.time()
-            _write_meta(jd, meta)
-            return "timeout"
-        return "running"
-    # Process gone: done if it left a parseable envelope, else it crashed.
-    if meta.get("completed_epoch") is None:
-        meta["completed_epoch"] = time.time()
-        _write_meta(jd, meta)
-    return "done" if _read_envelope(jd) is not None else "failed"
+def _reap_stale_markers(cwd: str) -> None:
+    """Delete legacy idempotency markers whose reserved job record no longer
+    exists AND whose creation predates the TTL."""
+    ws = _ws_dir(cwd)
+    if not ws.is_dir():
+        return
+    now = time.time()
+    ttl = ttl_seconds()
+    for marker in ws.iterdir():
+        if not (marker.name.startswith("idem-") and marker.name.endswith(".json")):
+            continue
+        try:
+            holder = json.loads(marker.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(holder, dict):
+            continue
+        held_id = holder.get("job_id")
+        if not _valid_job_id(held_id):
+            with contextlib.suppress(OSError):
+                marker.unlink()
+            continue
+        created = holder.get("created_epoch") or 0
+        if now - created <= ttl:
+            continue
+        try:
+            if _read_meta(_job_dir(cwd, str(held_id))) is not None:
+                continue
+        except ValueError:
+            pass
+        with contextlib.suppress(OSError):
+            marker.unlink()
+
+
+# ------------------------------------------------------------------ wire dicts
 
 
 def _elapsed_ms(meta: dict) -> int:
@@ -591,118 +462,8 @@ def _expires_at(meta: dict) -> str | None:
     return datetime.fromtimestamp(completed + ttl_seconds(), UTC).isoformat()
 
 
-def _reap_workspace(cwd: str) -> None:
-    """Lazy maintenance: refresh statuses and delete expired terminal records."""
-    ws = _ws_dir(cwd)
-    if not ws.is_dir():
-        return
-    ttl = ttl_seconds()
-    now = time.time()
-    for jd in ws.iterdir():
-        if not jd.is_dir():
-            if jd.name.startswith("idem-") and jd.name.endswith(".json"):
-                _reap_stale_marker(cwd, jd, now, ttl)
-            continue
-        if jd.is_symlink() or not _valid_job_id(jd.name):
-            continue
-        meta = _read_meta(jd)
-        if meta is None:
-            continue
-        status = _status_of(jd, meta)
-        if status in _TERMINAL:
-            end = meta.get("completed_epoch") or meta.get("started_epoch") or now
-            if now - end > ttl:
-                _rmtree(jd)
-
-
-def _reap_stale_marker(cwd: str, marker: Path, now: float, ttl: int) -> None:
-    """Delete an idempotency marker whose reserved job record no longer exists
-    AND whose creation predates the TTL — same staleness rule used by
-    reserve_idempotency_key."""
-    try:
-        holder = json.loads(marker.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(holder, dict):
-        return
-    held_id = holder.get("job_id")
-    if not _valid_job_id(held_id):
-        with contextlib.suppress(OSError):
-            marker.unlink()
-        return
-    created = holder.get("created_epoch") or 0
-    if now - created <= ttl:
-        return
-    try:
-        if _read_meta(_job_dir(cwd, str(held_id))) is not None:
-            return
-    except ValueError:
-        pass
-    with contextlib.suppress(OSError):
-        marker.unlink()
-
-
-def _expired(meta: dict) -> bool:
-    completed = meta.get("completed_epoch")
-    if completed is None:
-        return False
-    return time.time() - completed > ttl_seconds()
-
-
-def _read_live_job(cwd: str, job_id: str) -> tuple[Path, dict, str] | None:
-    """Read and refresh a single job record.
-
-    Status/result/cancel are commonly called in tight polling loops. Refreshing
-    only the requested record avoids unrelated jobs causing latency or waitpid
-    races while still preserving the TTL contract for that record.
-    """
-    if not _valid_job_id(job_id):
-        raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
-    try:
-        jd = _job_dir(cwd, job_id)
-    except ValueError:
-        # A valid-looking name that resolves through a symlink is corrupt state,
-        # not a job record the lifecycle API may follow.
-        return None
-    meta = _read_meta(jd)
-    if meta is None:
-        return None
-    state = _status_of(jd, meta)
-    if state in _TERMINAL and _expired(meta):
-        _rmtree(jd)
-        return None
-    return jd, meta, state
-
-
-def _enforce_count_cap(cwd: str) -> None:
-    ws = _ws_dir(cwd)
-    cap = _int_env(MAX_COUNT_ENV, DEFAULT_MAX_COUNT)
-    dirs = _job_dirs(ws)
-    if len(dirs) <= cap:
-        return
-    # Evict oldest terminal jobs first; never kill a still-running one to fit.
-    scored = []
-    for jd in dirs:
-        meta = _read_meta(jd) or {}
-        status = _status_of(jd, meta)
-        scored.append((status in _TERMINAL, meta.get("started_epoch", 0.0), jd))
-    scored.sort(key=lambda t: (not t[0], t[1]))  # terminal first, then oldest
-    for is_terminal, _epoch, jd in scored[: max(0, len(dirs) - cap)]:
-        if is_terminal:
-            _rmtree(jd)
-
-
-def _rmtree(jd: Path) -> None:
-    try:
-        for child in jd.iterdir():
-            child.unlink(missing_ok=True)
-        jd.rmdir()
-    except OSError:
-        pass
-
-
 def _build_meta(meta: dict) -> Meta:
-    c = meta.get("config", {})
+    c = _record_config(meta)
     cwd = c.get("cwd", "")
     source = c.get("workspace_source")
     scope = c.get("scope")
@@ -747,14 +508,15 @@ def _terminal_cost(jd: Path, state: str) -> float | None:
     return float(c) if isinstance(c, (int, float)) else None
 
 
-def status(cwd: str, job_id: str) -> dict | None:
-    """Return a JobStatus dict, or None if the job does not exist."""
-    with _JOBS_LOCK:
-        live = _read_live_job(cwd, job_id)
-        if live is None:
-            return None
-        jd, meta, state = live
-        return _status_dict(jd, meta, state)
+def _stderr_tail(jd: Path, meta: dict, limit: int = 200) -> str | None:
+    if not _record_stderr_sanitized(meta):
+        return _LEGACY_STDERR_WITHHELD
+    try:
+        text = (jd / _record_stderr_file(meta)).read_text().strip()
+    except OSError:
+        return None
+    # Defense in depth for records written by an interrupted or older worker.
+    return redact_text(text)[0][-limit:] or None
 
 
 def _status_dict(jd: Path, meta: dict, state: str) -> dict:
@@ -780,49 +542,85 @@ def _status_dict(jd: Path, meta: dict, state: str) -> dict:
     }
 
 
+def _refresh(cwd: str, job_id: str) -> tuple[Path, dict, str] | None:
+    """Delegate liveness/deadline/TTL refresh to the store, then reread the
+    (store-updated) meta for this layer's richer wire mapping."""
+    if not _valid_job_id(job_id):
+        raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
+    sd = _store().status(cwd, job_id)
+    if sd is None:
+        return None
+    try:
+        jd = _job_dir(cwd, job_id)
+    except ValueError:
+        return None
+    meta = _read_meta(jd)
+    if meta is None:
+        return None
+    return jd, meta, sd["status"]
+
+
+def status(cwd: str, job_id: str) -> dict | None:
+    """Return a JobStatus dict, or None if the job does not exist."""
+    with _JOBS_LOCK:
+        live = _refresh(cwd, job_id)
+        if live is None:
+            return None
+        jd, meta, state = live
+        return _status_dict(jd, meta, state)
+
+
 def list_jobs(cwd: str) -> dict:
     """Return a JobListResult dict of the workspace's known jobs, newest first.
 
     Reaps first (like the other lifecycle calls), so listing can refresh statuses
     and delete expired records — it is not strictly read-only."""
     with _JOBS_LOCK:
-        _reap_workspace(cwd)
-        ws = _ws_dir(cwd)
+        _reap_stale_markers(cwd)
         summaries = []
-        if ws.is_dir():
-            for jd in _job_dirs(ws):
-                meta = _read_meta(jd)
-                if meta is None:
-                    continue
-                state = _status_of(jd, meta)
-                summaries.append(
-                    {
-                        "_epoch": meta.get("started_epoch", 0.0),
-                        "job_id": meta.get("job_id", jd.name),
-                        "kind": meta.get("kind", ""),
-                        "status": state,
-                        "started_at": meta.get("started_at", ""),
-                        "elapsed_ms": _elapsed_ms(meta),
-                        "result_available": state == "done",
-                        "expires_at": _expires_at(meta),
-                        "cost_usd": _terminal_cost(jd, state),
-                    }
-                )
+        for sd in _store().list_jobs(cwd):
+            job_id = sd.get("job_id", "")
+            try:
+                jd = _job_dir(cwd, job_id)
+            except ValueError:
+                continue
+            meta = _read_meta(jd) or {}
+            state = sd["status"]
+            summaries.append(
+                {
+                    "_epoch": meta.get("started_epoch", 0.0),
+                    "job_id": job_id,
+                    "kind": meta.get("kind", ""),
+                    "status": state,
+                    "started_at": meta.get("started_at", ""),
+                    "elapsed_ms": _elapsed_ms(meta),
+                    "result_available": state == "done",
+                    "expires_at": _expires_at(meta),
+                    "cost_usd": _terminal_cost(jd, state),
+                }
+            )
         summaries.sort(key=lambda s: s["_epoch"], reverse=True)  # newest first
         for s in summaries:
             s.pop("_epoch", None)
         return {"ok": True, "jobs": summaries, "fingerprint": FINGERPRINT}
 
 
-def _stderr_tail(jd: Path, meta: dict, limit: int = 200) -> str | None:
-    if meta.get("stderr_sanitized") is not True:
-        return _LEGACY_STDERR_WITHHELD
-    try:
-        text = (jd / "stderr.log").read_text().strip()
-    except OSError:
-        return None
-    # Defense in depth for records written by an interrupted or older worker.
-    return redact_text(text)[0][-limit:] or None
+def cancel(cwd: str, job_id: str) -> dict | None:
+    """Kill a running job and mark it cancelled. Returns a JobStatus dict or None."""
+    with _JOBS_LOCK:
+        if not _valid_job_id(job_id):
+            raise ValueError("job_id must be exactly 32 lowercase hexadecimal characters")
+        sd = _store().cancel(cwd, job_id)
+        if sd is None:
+            return None
+        try:
+            jd = _job_dir(cwd, job_id)
+        except ValueError:
+            return None
+        meta = _read_meta(jd)
+        if meta is None:
+            return None
+        return _status_dict(jd, meta, sd["status"])
 
 
 def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = None):
@@ -839,15 +637,15 @@ def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = No
     read; the truncation block on that result then points at a paid re-run, never at
     the record this call is deleting."""
     with _JOBS_LOCK:
-        live = _read_live_job(cwd, job_id)
+        live = _refresh(cwd, job_id)
         if live is None:
             return None, False
         jd, meta, state = live
         if state == "done":
             env_text = (jd / "result.json").read_text()
-            summary = meta.get("context_summary")
+            summary = _record_context_summary(meta)
             ctx_summary = ContextSummary(**summary) if summary else None
-            configured = meta.get("config", {}).get("detail", "summary")
+            configured = _record_config(meta).get("detail", "summary")
             payload = normalize_envelope(
                 meta.get("kind", "claude_review_changes"),
                 env_text,
@@ -857,7 +655,10 @@ def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = No
                 record_survives=not consume,
             )
             if consume:
-                _rmtree(jd)
+                outcome = _store().discard(cwd, job_id)
+                # DELETE_FAILED leaves a fully readable record for the TTL
+                # reaper — same degradation as 0.7's best-effort removal.
+                _ = outcome is DiscardOutcome.REMOVED
             return payload, True
         # Non-done states map to an error envelope so the contract stays ok-discriminated.
         payload = _job_error(meta, state, jd)
@@ -948,22 +749,7 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
     ).model_dump(mode="json", exclude_none=True)
 
 
-def cancel(cwd: str, job_id: str) -> dict | None:
-    """Kill a running job and mark it cancelled. Returns a JobStatus dict or None."""
-    with _JOBS_LOCK:
-        live = _read_live_job(cwd, job_id)
-        if live is None:
-            return None
-        jd, meta, state = live
-        if state not in _TERMINAL:
-            _terminate_verified(jd, meta)
-            if _read_envelope(jd) is not None:
-                meta["completed_epoch"] = meta.get("completed_epoch") or time.time()
-                _write_meta(jd, meta)
-                state = "done"
-            else:
-                meta["terminal_status"] = "cancelled"
-                meta["completed_epoch"] = time.time()
-                _write_meta(jd, meta)
-                state = "cancelled"
-        return _status_dict(jd, meta, state)
+# Retained for tests and any external callers that pre-generate ids the 0.7 way;
+# no longer used by the server.
+def new_job_id() -> str:
+    return uuid4().hex

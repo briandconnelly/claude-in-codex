@@ -1,8 +1,16 @@
 """Private background-job worker.
 
-The worker owns the lifetime lock for a detached job and is the only process that
-observes the child command's stderr. It sanitizes complete lines before writing
-them to disk, so the job store never persists raw diagnostics.
+The worker owns the lifetime lock for a detached job and is the only process
+that observes the child command's streams. It writes the child's stdout to
+``--result-path`` ATOMICALLY (tmp + rename after the child exits), so the job
+store's "done when result.json parses" contract can never observe a partial
+envelope, and it sanitizes complete stderr lines before writing them to
+``--stderr-path``, so the job store never persists raw diagnostics.
+
+Invoked by the pontifex JobStore as ``cmd_factory(job_dir)`` output; the
+store redirects THIS process's own stdout/stderr to the record's
+``stderr.log`` (worker self-diagnostics only) and streams the prompt to our
+stdin, which the child inherits — the prompt never lands on disk or argv.
 """
 
 from __future__ import annotations
@@ -30,8 +38,8 @@ _TRUNCATED_LINE = "[stderr line truncated]"
 def _lock_worker(path: Path):
     """Open and exclusively lock ``path`` for the caller's lifetime.
 
-    POSIX provides the cross-process ownership proof consumed by jobs.py. On
-    platforms without fcntl, the file remains open but restart recovery fails
+    POSIX provides the cross-process ownership proof consumed by the job store.
+    On platforms without fcntl, the file remains open but restart recovery fails
     closed because the parent cannot positively verify the lock.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +93,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--lock-path", required=True)
     parser.add_argument("--stderr-path", required=True)
+    parser.add_argument("--result-path", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -106,20 +115,37 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
+    result_path = Path(args.result_path)
+    tmp_path = result_path.with_name(result_path.name + ".tmp")
     try:
-        proc = subprocess.Popen(
-            command,
-            stdin=None,
-            stdout=None,
-            stderr=subprocess.PIPE,
-        )
-    except OSError:
-        Path(args.stderr_path).write_text("job command could not be started", encoding="utf-8")
-        return 127
+        with tmp_path.open("wb") as rf:
+            with contextlib.suppress(OSError):
+                tmp_path.chmod(0o600)
+            try:
+                proc = subprocess.Popen(
+                    command,
+                    stdin=None,  # inherit: the store streams the prompt to OUR stdin
+                    stdout=rf,
+                    stderr=subprocess.PIPE,
+                )
+            except OSError:
+                Path(args.stderr_path).write_text(
+                    "job command could not be started", encoding="utf-8"
+                )
+                return 127
 
-    assert proc.stderr is not None
-    _write_redacted_stderr(proc.stderr, Path(args.stderr_path))
-    return proc.wait()
+            assert proc.stderr is not None
+            _write_redacted_stderr(proc.stderr, Path(args.stderr_path))
+            code = proc.wait()
+    except OSError:
+        return 127
+    # Publish atomically only now: the store treats a parseable result.json as
+    # "done", so a partially-streamed envelope must never be visible under the
+    # final name. An empty/garbage stdout is still published — the store then
+    # finalizes the record as "failed" (unparseable), same as before.
+    with contextlib.suppress(OSError):
+        tmp_path.replace(result_path)
+    return code
 
 
 if __name__ == "__main__":  # pragma: no branch

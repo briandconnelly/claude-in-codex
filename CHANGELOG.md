@@ -7,7 +7,21 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-- Canonical tool verbs (fingerprint `claude-in-codex/0.1/schema-35`):
+- Background jobs now run on the shared pontifex job store (fingerprint
+  `claude-in-codex/0.1/schema-36`): lifecycle mechanics — detached spawn,
+  worker-lock liveness, deadline reaping, TTL cleanup, count caps,
+  cancellation — are pontifex's, while the wire shapes, envelope synthesis,
+  prompt-off-disk streaming, and sanitized stderr remain this server's. Legacy
+  0.7 records stay readable, cancellable, and TTL-reaped in place (same store
+  layout lineage), and legacy `idem-*.json` markers are still replayed and
+  reaped, but no longer written. Keyed launches go through the store's
+  idempotency index, which dedupes on (key, effective arguments): identical
+  retries replay the existing job; the same key with different arguments is
+  now an `idempotency_conflict` instead of 0.7's key-only silent replay, and
+  two more coordination codes (`idempotency_result_unavailable`,
+  `idempotency_in_progress`) are published for `claude_review_changes_async`.
+- Canonical tool verbs (fingerprint `claude-in-codex/0.1/schema-35`; superseded
+  by schema-36 above in the same unreleased train):
   `claude_ask` is renamed `claude_consult` and `claude_review_dry_run` is
   renamed `claude_dry_run`, matching the verb set shared across the agent
   bridges. The old names remain registered as deprecated aliases — identical
