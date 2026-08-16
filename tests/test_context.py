@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from claude_in_codex import context
 from claude_in_codex.context import (
     ContextResult,
     DiffOptions,
@@ -679,3 +680,58 @@ def test_redact_tree_redacts_string_leaves_in_nested_structures():
     blob = repr(out)
     assert token not in blob
     assert "[redacted: secret value]" in blob
+
+
+def test_redact_preserves_the_trailing_newline():
+    diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n a\n+b\n"
+    out, _ = context._redact(diff)
+    assert out.endswith("\n")
+
+
+def test_redact_does_not_invent_a_trailing_newline():
+    # A diff that genuinely lacks one must not gain one: that would change the patch.
+    diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n a\n+b"
+    out, _ = context._redact(diff)
+    assert not out.endswith("\n")
+
+
+def test_redact_of_empty_input_stays_empty():
+    assert context._redact("") == ("", [])
+
+
+def test_a_redacted_diff_still_applies(tmp_path):
+    """End-to-end: build a real repo, produce a real diff, redact it, and apply it."""
+    import os
+    import subprocess
+
+    # Isolate from the developer's global/system git config: an external diff
+    # driver (delta, difftastic) would replace the unified diff this test feeds
+    # back through `git apply`.
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    def git(*args, cwd=tmp_path):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=env
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "t@t.t")
+    git("config", "user.name", "T")
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    (tmp_path / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"
+    )
+    raw = git("diff").stdout
+    redacted, _ = context._redact(raw)
+
+    git("checkout", "--", "calc.py")
+    patch = tmp_path / "p.diff"
+    patch.write_text(redacted)
+    git("apply", str(patch))
+    assert "def mul" in (tmp_path / "calc.py").read_text()

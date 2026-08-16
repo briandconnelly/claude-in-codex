@@ -7,6 +7,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Diff redaction preserves the input's trailing newline, so returned diffs are
+  `git apply`-able (ports the sibling bridges' fix; end-to-end
+  redact-then-apply regression test included). Planned engine unification with
+  `pontifex.core.redaction` is deferred: this server's redactor handles
+  multi-line PEM/OpenSSH/PGP key blocks in both diffs and prose, which the
+  shared engine does not yet — a swap today would weaken redaction, so the
+  block-handling flows upstream first.
+
 - Add a dependency on [pontifex](https://github.com/briandconnelly/pontifex),
   the shared agent-bridge library, and declare this server's CLI contract in
   its shared shape: `cli_contract.PONTIFEX_CONTRACT` (derivation-pinned

@@ -415,7 +415,14 @@ def _redact(diff: str) -> tuple[str, list[str]]:
         if changed:
             note_redacted()
         out_lines.append(f"{prefix}{emit_content}")
-    return "\n".join(out_lines), redacted
+    # The trailing newline is preserved. `splitlines()` + `"\n".join()` silently drops it,
+    # and for a unified diff that is not cosmetic: `git apply` rejects a patch whose last
+    # line is unterminated with "corrupt patch at line N". Same fix as the sibling
+    # bridges (moonbridge origin, ported to codex-in-claude and pontifex.core).
+    text = "\n".join(out_lines)
+    if diff.endswith(("\n", "\r")) and text:
+        text += "\n"
+    return text, redacted
 
 
 def gather_context(
