@@ -3,11 +3,11 @@
 A faithful thin layer over the proven functions in `claude.py` — command
 construction, environment scrubbing, and classification delegate to the same
 code the tool paths run, so the adapter cannot drift from production behavior.
-Its job today is real-adapter validation of the PROVISIONAL protocol (pontonier
-freezes only after all three bridges' adapters fit); introducing the
-kind-dispatch seam and re-plumbing the tools through it lands with the freeze.
+The protocol it fits is frozen (contract_api_version = 1), and the tools are
+re-plumbed through it: every model-bearing run stages via `prepare()`, so the
+adapter cannot drift from production behavior — it is production behavior.
 
-Protocol-fit findings for pontonier 0.3.0, discovered here:
+Protocol-fit notes, discovered here and carried into the frozen line:
 
 * Classification is config_mode-aware end to end (`classify_failure(run,
   config_mode=...)` picks auth repairs per mode, and env scrubbing branches on

@@ -62,12 +62,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   its shared shape: `cli_contract.PONTONIER_CONTRACT` (derivation-pinned
   against the legacy constants) plus `cli_contract.FORBIDDEN_SURFACE_PHRASES`
   with surface-honesty tests enforcing them against the built wire surface.
-- Add `backend.ClaudeBackend`, this bridge's adapter on the provisional
-  pontonier `AgentBackend` protocol, validated by a byte-for-byte argv
-  differential against `claude.build_command` and per-config-mode env
-  scrubbing tests. The kind-dispatch seam and tool re-plumbing land with the
-  protocol freeze. No agent-visible surface change (fingerprint digest
-  unchanged).
+- Add `backend.ClaudeBackend`, this bridge's adapter on the frozen pontonier
+  `AgentBackend` protocol (`contract_api_version = 1`), validated by a
+  byte-for-byte argv differential against `claude.build_command` and
+  per-config-mode env scrubbing tests. Every model-bearing run is staged through
+  it. No agent-visible surface change (fingerprint digest unchanged).
 
 ### Fixed
 

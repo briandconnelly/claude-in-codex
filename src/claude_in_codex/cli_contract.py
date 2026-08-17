@@ -167,9 +167,9 @@ FORBIDDEN_SURFACE_PHRASES = (
 # The declarative half of this contract, in the shared shape the pontonier
 # conformance/honesty kits consume. Values are DERIVED from the constants above —
 # tests/test_surface_honesty.py pins the derivations so the two can never drift.
-# Behavior (command build, classification) still lives in claude.py; migrating it
-# onto the pontonier AgentBackend lifecycle is the planned next step while the
-# protocol is provisional.
+# Behavior (command build, classification) lives in claude.py and is reached
+# through `backend.ClaudeBackend` on the pontonier AgentBackend lifecycle, frozen
+# at contract_api_version = 1.
 PONTONIER_CONTRACT = _pontonier_contract.BackendContract(
     backend_id="claude",
     display_name="Claude",

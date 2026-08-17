@@ -1,4 +1,4 @@
-"""ClaudeBackend: real-adapter validation of the provisional pontonier protocol.
+"""ClaudeBackend: real-adapter validation of the frozen pontonier protocol.
 
 The load-bearing test is the argv differential: the adapter's PreparedRun must
 build the SAME command `claude.build_command` builds for the tool paths. If the
