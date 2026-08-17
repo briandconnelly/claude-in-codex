@@ -7,7 +7,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-- Every model-bearing run now goes through the pontifex `AgentBackend` adapter:
+- Every model-bearing run now goes through the pontonier `AgentBackend` adapter:
   the sync tools stage via `ClaudeBackend.prepare()` (shared command builder,
   prompt over stdin, help-gate drops on `PreparedRun.dropped_flags`) and keep
   execution local (`run_claude_async` still owns the kill-tree, cancellation,
@@ -16,7 +16,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   the detached worker (safe because this backend stages no file artifacts).
   Wire shapes and argv are unchanged.
 
-- The redaction engine is now pontifex's (`pontifex.core.redaction`), retiring
+- The redaction engine is now pontonier's (`pontonier.core.redaction`), retiring
   this bridge's local engine after upstream reached parity-or-better on every
   local behavior (stateful private-key-block handling, the full vendor-pattern
   set — the five shapes this bridge contributed are covered upstream — and a
@@ -27,10 +27,10 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   so ordinary code like `token = helper(x)` in a `.py` diff is no longer
   masked (data/config files keep unconditional redaction). No schema change;
   each divergence is pinned by a differential test at this bridge's seam.
-- Background jobs now run on the shared pontifex job store (fingerprint
+- Background jobs now run on the shared pontonier job store (fingerprint
   `claude-in-codex/0.1/schema-36`): lifecycle mechanics — detached spawn,
   worker-lock liveness, deadline reaping, TTL cleanup, count caps,
-  cancellation — are pontifex's, while the wire shapes, envelope synthesis,
+  cancellation — are pontonier's, while the wire shapes, envelope synthesis,
   prompt-off-disk streaming, and sanitized stderr remain this server's. Legacy
   0.7 records stay readable, cancellable, and TTL-reaped in place (same store
   layout lineage), and legacy `idem-*.json` markers are still replayed and
@@ -52,18 +52,18 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 - Diff redaction preserves the input's trailing newline, so returned diffs are
   `git apply`-able (ports the sibling bridges' fix; end-to-end
   redact-then-apply regression test included). Planned engine unification with
-  `pontifex.core.redaction` is deferred: this server's redactor handles
+  `pontonier.core.redaction` is deferred: this server's redactor handles
   multi-line PEM/OpenSSH/PGP key blocks in both diffs and prose, which the
   shared engine does not yet — a swap today would weaken redaction, so the
   block-handling flows upstream first.
 
-- Add a dependency on [pontifex](https://github.com/briandconnelly/pontifex),
+- Add a dependency on [pontonier](https://github.com/briandconnelly/pontonier),
   the shared agent-bridge library, and declare this server's CLI contract in
-  its shared shape: `cli_contract.PONTIFEX_CONTRACT` (derivation-pinned
+  its shared shape: `cli_contract.PONTONIER_CONTRACT` (derivation-pinned
   against the legacy constants) plus `cli_contract.FORBIDDEN_SURFACE_PHRASES`
   with surface-honesty tests enforcing them against the built wire surface.
 - Add `backend.ClaudeBackend`, this bridge's adapter on the provisional
-  pontifex `AgentBackend` protocol, validated by a byte-for-byte argv
+  pontonier `AgentBackend` protocol, validated by a byte-for-byte argv
   differential against `claude.build_command` and per-config-mode env
   scrubbing tests. The kind-dispatch seam and tool re-plumbing land with the
   protocol freeze. No agent-visible surface change (fingerprint digest

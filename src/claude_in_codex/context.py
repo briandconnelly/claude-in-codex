@@ -7,7 +7,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
-from pontifex.core import redaction as _redaction
+from pontonier.core import redaction as _redaction
 
 from claude_in_codex.config import git_timeout_seconds
 from claude_in_codex.schemas import ContextSummary
@@ -47,7 +47,7 @@ def _valid_ref(ref: str) -> bool:
     return bool(ref) and not ref.startswith("-") and bool(_REF_RE.match(ref))
 
 
-# The redaction ENGINE is pontifex's (`pontifex.core.redaction`) — this bridge's
+# The redaction ENGINE is pontonier's (`pontonier.core.redaction`) — this bridge's
 # local engine was retired once upstream reached parity-or-better on every local
 # behavior: stateful key-block handling, the full vendor-pattern set (including
 # github_pat_/glpat_/sk-ant-/npm_/pypi-, upstreamed from here), and a streaming
@@ -213,7 +213,7 @@ def _summary(cwd: str, diff_args: list[str]) -> ContextSummary:
 def redact_text(text: str) -> tuple[str, bool]:
     """Best-effort secret redaction for free-form model output (prose).
 
-    Thin wrapper over the shared engine (`pontifex.core.redaction.redact_text`),
+    Thin wrapper over the shared engine (`pontonier.core.redaction.redact_text`),
     keeping this bridge's historical `(scrubbed, changed)` tuple shape. The engine
     applies the inline value patterns AND the stateful key-block pass, failing
     closed on an unterminated block. `changed` reports whether the text was
@@ -231,7 +231,7 @@ def redact_tree(value: object) -> object:
 
     Used to scrub untrusted, model/CLI-derived structured payloads (e.g.
     ``permission_denials``) while preserving shape. Dict KEYS are redacted as well
-    as values — a DELIBERATE divergence from pontifex's own ``redact_tree``: this
+    as values — a DELIBERATE divergence from pontonier's own ``redact_tree``: this
     data is relayed verbatim into ``meta`` (which is not str()-coerced like the
     structured findings path), so a secret-shaped key would otherwise survive.
     Non-string leaves (ints, None, bools) are returned untouched."""
@@ -247,7 +247,7 @@ def redact_tree(value: object) -> object:
 def _redact(diff: str) -> tuple[str, list[str]]:
     """Redact secret-looking files and inline values in a unified diff.
 
-    Delegates to the shared engine (`pontifex.core.redaction.redact`), which keeps
+    Delegates to the shared engine (`pontonier.core.redaction.redact`), which keeps
     every property the local engine had — withheld secret-path hunks behind their
     visible headers, stateful key-block handling that never bleeds across file or
     hunk boundaries, `Authorization:` header scanning, and trailing-newline

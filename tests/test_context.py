@@ -741,7 +741,7 @@ def test_a_redacted_diff_still_applies(tmp_path):
 
 
 # --- shared-engine adoption differentials ------------------------------------
-# The pontifex engine swap changed three content-level behaviors on purpose.
+# The pontonier engine swap changed three content-level behaviors on purpose.
 # Each is pinned HERE, at this bridge's own seam, so the suite exercises the
 # divergence rather than passing because nothing ever reached it.
 

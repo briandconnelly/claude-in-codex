@@ -684,7 +684,7 @@ def test_start_job_survives_chmod_failure(tmp_path, monkeypatch):
 
 
 def test_start_job_wrapper_spawn_failure_cleans_partial_record(tmp_path, monkeypatch):
-    import pontifex.core.jobs as core_jobs
+    import pontonier.core.jobs as core_jobs
 
     monkeypatch.setattr(
         core_jobs.subprocess,

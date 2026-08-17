@@ -1,4 +1,4 @@
-"""ClaudeBackend: real-adapter validation of the provisional pontifex protocol.
+"""ClaudeBackend: real-adapter validation of the provisional pontonier protocol.
 
 The load-bearing test is the argv differential: the adapter's PreparedRun must
 build the SAME command `claude.build_command` builds for the tool paths. If the
@@ -10,13 +10,13 @@ from __future__ import annotations
 import json
 
 import pytest
-from pontifex.backend.protocol import AgentBackend, RunOutcome, RunRequest
-from pontifex.core.runtime import CommandRun
-from pontifex.testing import conformance
+from pontonier.backend.protocol import AgentBackend, RunOutcome, RunRequest
+from pontonier.core.runtime import CommandRun
+from pontonier.testing import conformance
 
 from claude_in_codex import backend as backend_mod
 from claude_in_codex import claude, cli_contract, preflight
-from claude_in_codex.cli_contract import PONTIFEX_CONTRACT
+from claude_in_codex.cli_contract import PONTONIER_CONTRACT
 from claude_in_codex.preflight import FlagSupport
 
 BACKEND = backend_mod.ClaudeBackend()
@@ -46,9 +46,9 @@ def test_backend_is_structurally_conformant():
     assert isinstance(BACKEND, AgentBackend)
 
 
-def test_backend_passes_pontifex_conformance():
-    assert conformance.check_contract(PONTIFEX_CONTRACT) == []
-    assert conformance.check_backend(PONTIFEX_CONTRACT, BACKEND) == []
+def test_backend_passes_pontonier_conformance():
+    assert conformance.check_contract(PONTONIER_CONTRACT) == []
+    assert conformance.check_backend(PONTONIER_CONTRACT, BACKEND) == []
 
 
 async def test_prepared_argv_matches_production_builder(tmp_path, clean_env):

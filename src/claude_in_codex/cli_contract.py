@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from pontifex.backend import contract as _pontifex_contract
+from pontonier.backend import contract as _pontonier_contract
 
 CLAUDE_BIN = "claude"
 
@@ -149,7 +149,7 @@ KNOWN_MODELS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-# --- Shared-library contract (pontifex) -------------------------------------------
+# --- Shared-library contract (pontonier) -------------------------------------------
 # Wire prose that would contradict this contract: cross-bridge contamination
 # canaries (this code now shares a library with the Codex and Kimi bridges, so
 # wrong-direction vocabulary can ride a backport — exactly how moonbridge shipped
@@ -164,13 +164,13 @@ FORBIDDEN_SURFACE_PHRASES = (
     "applies the diff",
 )
 
-# The declarative half of this contract, in the shared shape the pontifex
+# The declarative half of this contract, in the shared shape the pontonier
 # conformance/honesty kits consume. Values are DERIVED from the constants above —
 # tests/test_surface_honesty.py pins the derivations so the two can never drift.
 # Behavior (command build, classification) still lives in claude.py; migrating it
-# onto the pontifex AgentBackend lifecycle is the planned next step while the
+# onto the pontonier AgentBackend lifecycle is the planned next step while the
 # protocol is provisional.
-PONTIFEX_CONTRACT = _pontifex_contract.BackendContract(
+PONTONIER_CONTRACT = _pontonier_contract.BackendContract(
     backend_id="claude",
     display_name="Claude",
     bin_name=CLAUDE_BIN,
@@ -198,19 +198,19 @@ PONTIFEX_CONTRACT = _pontifex_contract.BackendContract(
     ),
     # The schema instruction rides the prompt; parsing is tolerant (see normalize).
     structured_output="prompt_append",
-    model_catalog=_pontifex_contract.ModelCatalog(
+    model_catalog=_pontonier_contract.ModelCatalog(
         strategy="static",
         model_identifier_authority="advisory",
         effort_metadata_authority="advisory",
     ),
-    isolation_policy=_pontifex_contract.IsolationPolicy.TOOL_ALLOWLIST,
+    isolation_policy=_pontonier_contract.IsolationPolicy.TOOL_ALLOWLIST,
     needs_orphan_sweep=False,
     # claude rejects a bad --effort at arg-parse (VALID_EFFORTS is also enforced
     # at this server's boundary), so upstream is loud, not silent.
     effort_silently_ignored_upstream=False,
     effort_validation="enumerated",  # VALID_EFFORTS is checked at this server's boundary
     usage_event_markers=tuple(sorted(USAGE_KEYS)),
-    failure_signatures=_pontifex_contract.FailureSignatures(
+    failure_signatures=_pontonier_contract.FailureSignatures(
         # Narrow on purpose: a bare "/login" can appear in reviewed content or
         # URLs; these phrasings are the CLI's own (see claude.py::_is_auth_blob).
         auth=(r"(?i)not logged in", r"(?i)please run /login"),

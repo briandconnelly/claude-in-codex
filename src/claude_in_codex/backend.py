@@ -1,13 +1,13 @@
-"""ClaudeBackend: this bridge's adapter on the pontifex AgentBackend protocol.
+"""ClaudeBackend: this bridge's adapter on the pontonier AgentBackend protocol.
 
 A faithful thin layer over the proven functions in `claude.py` — command
 construction, environment scrubbing, and classification delegate to the same
 code the tool paths run, so the adapter cannot drift from production behavior.
-Its job today is real-adapter validation of the PROVISIONAL protocol (pontifex
+Its job today is real-adapter validation of the PROVISIONAL protocol (pontonier
 freezes only after all three bridges' adapters fit); introducing the
 kind-dispatch seam and re-plumbing the tools through it lands with the freeze.
 
-Protocol-fit findings for pontifex 0.3.0, discovered here:
+Protocol-fit findings for pontonier 0.3.0, discovered here:
 
 * Classification is config_mode-aware end to end (`classify_failure(run,
   config_mode=...)` picks auth repairs per mode, and env scrubbing branches on
@@ -28,23 +28,23 @@ import json
 import os
 from typing import TYPE_CHECKING
 
-from pontifex.backend.protocol import ClassifiedFailure, ExecResult, PreparedRun, Usage
+from pontonier.backend.protocol import ClassifiedFailure, ExecResult, PreparedRun, Usage
 
 from claude_in_codex import claude, cli_contract, config, normalize, preflight
-from claude_in_codex.cli_contract import PONTIFEX_CONTRACT
+from claude_in_codex.cli_contract import PONTONIER_CONTRACT
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from pontifex.backend.protocol import RunOutcome, RunRequest
+    from pontonier.backend.protocol import RunOutcome, RunRequest
 
-CONTRACT = PONTIFEX_CONTRACT
+CONTRACT = PONTONIER_CONTRACT
 
 _KIND_DEFAULT_ACCESS = "toolless"
 
 
 class ClaudeBackend:
-    """The behavior half of the Claude contract (facts live on PONTIFEX_CONTRACT)."""
+    """The behavior half of the Claude contract (facts live on PONTONIER_CONTRACT)."""
 
     def validate_request(self, request: RunRequest) -> ClassifiedFailure | None:
         # Upstream rejects a bad --effort at arg-parse (loud, zero spend), and this

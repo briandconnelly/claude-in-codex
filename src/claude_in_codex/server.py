@@ -14,7 +14,7 @@ from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
-from pontifex.backend.protocol import RunRequest
+from pontonier.backend.protocol import RunRequest
 from pydantic import Field, ValidationError
 
 from claude_in_codex import __version__, cli_contract, jobs, preflight

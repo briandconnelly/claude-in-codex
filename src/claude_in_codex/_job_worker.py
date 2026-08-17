@@ -7,7 +7,7 @@ store's "done when result.json parses" contract can never observe a partial
 envelope, and it sanitizes complete stderr lines before writing them to
 ``--stderr-path``, so the job store never persists raw diagnostics.
 
-Invoked by the pontifex JobStore as ``cmd_factory(job_dir)`` output; the
+Invoked by the pontonier JobStore as ``cmd_factory(job_dir)`` output; the
 store redirects THIS process's own stdout/stderr to the record's
 ``stderr.log`` (worker self-diagnostics only) and streams the prompt to our
 stdin, which the child inherits — the prompt never lands on disk or argv.

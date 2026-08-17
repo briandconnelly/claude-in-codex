@@ -1,14 +1,14 @@
-"""Job layer: wire mapping and result synthesis over the pontifex job store.
+"""Job layer: wire mapping and result synthesis over the pontonier job store.
 
 Lifecycle MECHANICS — detached spawn, worker-lock liveness, deadline reaping,
 TTL cleanup, count caps, cancellation, idempotent starts — live in
-``pontifex.core.jobs.JobStore``. This module is the consumer layer that
+``pontonier.core.jobs.JobStore``. This module is the consumer layer that
 remains deliberately local: the wire shapes (JobStatus/JobListResult dicts),
 result synthesis (re-rendering the stored claude envelope at fetch-time
 detail, drift upgrading, cost surfacing, repair actions), stderr-tail
 selection, and compatibility with records written by 0.7.x.
 
-Layout compatibility: the 0.7 store and the pontifex store share the same
+Layout compatibility: the 0.7 store and the pontonier store share the same
 state root, workspace-dir naming, and meta field names (same lineage), so
 legacy records are read, cancelled, and TTL-reaped by the same store. The
 differences are per record: legacy metas carry ``config``/``context_summary``
@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from pontifex.core.jobs import DiscardOutcome, JobStore
+from pontonier.core.jobs import DiscardOutcome, JobStore
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
@@ -182,7 +182,7 @@ def _read_envelope(jd: Path) -> dict | None:
 
 # --------------------------------------------------------------- record shapes
 # Legacy (0.7) records carry config/context_summary/idempotency_key at the meta
-# top level; pontifex-store records carry them under meta["extra"]. These
+# top level; pontonier-store records carry them under meta["extra"]. These
 # accessors are the single place that knows both shapes.
 
 
