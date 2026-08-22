@@ -104,9 +104,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stderr-path", required=True)
     parser.add_argument("--result-path", required=True)
     parser.add_argument("--workspace", required=True)
-    # Optional so a worker spawned by an older build stays launchable: absent
-    # means "inherit unchanged", which is exactly what those builds did.
-    parser.add_argument("--config-mode", default=None)
+    # Required, and deliberately so: a worker with no declared config mode would
+    # have to guess a credential policy, and the safe guess is the strict one.
+    # There is no legacy-argv case to keep launchable — the store spawns each
+    # worker once from argv this process just built (it never persists or
+    # re-execs a command), so worker and factory are always the same build.
+    parser.add_argument("--config-mode", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -132,11 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     # ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN in the server's environment cannot
     # be allowed to ride into the detached child; bare mode needs it and keeps
     # it. Same policy object the synchronous path is pinned against.
-    child_env = (
-        BACKEND.scrub_env(dict(os.environ), args.config_mode)
-        if args.config_mode is not None
-        else None
-    )
+    child_env = BACKEND.scrub_env(dict(os.environ), args.config_mode)
 
     result_path = Path(args.result_path)
     tmp_path = result_path.with_name(result_path.name + ".tmp")

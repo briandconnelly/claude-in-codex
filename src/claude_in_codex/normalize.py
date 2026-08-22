@@ -7,7 +7,7 @@ from typing import Any, Literal, cast
 
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
-from claude_in_codex.context import redact_text, redact_tree, sanitize_echo_prose
+from claude_in_codex.context import redact_text, sanitize_echo_prose
 from claude_in_codex.schemas import (
     OUTPUT_BOUNDS,
     TRUNCATION_MARKER,
@@ -64,24 +64,27 @@ def _str_list(value: Any) -> list[str]:
     return [_redact_out(str(x)) for x in value if x] if isinstance(value, list) else []
 
 
-def _sanitize_tree_for_message(value: object) -> object:
-    """Deep-apply ``sanitize_echo_prose`` to every string leaf, BEFORE the tree is
-    coerced to text for agent-visible error prose.
+def _sanitize_denials_tree(value: object) -> object:
+    """Deep-apply ``sanitize_echo_prose`` to every string leaf of a denials tree.
 
-    ``str()`` on a list/dict reprs its string leaves, which escapes a real control
-    character into the four printable characters ``\\x08``. Sanitizing after that
-    coercion (e.g. ``sanitize_echo_prose(str(tree))``) therefore never sees the
-    control character it needs to strip, and a secret wedged around one survives.
-    Sanitizing each leaf first, while it is still a real string, avoids that.
-    Only used to build the ``claude_permission_error`` message; the separate
-    ``redact_tree`` call that feeds ``meta.permission_denials`` is untouched."""
+    ``sanitize_echo_prose`` deletes Unicode ``Cc`` code points before redacting,
+    which plain ``redact_text``/``redact_tree`` cannot do: a control character
+    wedged into a secret splits it, the patterns miss, and the credential
+    survives. Both agent-visible destinations for this tree need that —
+    ``meta.permission_denials`` and the ``claude_permission_error`` message.
+
+    Leaf-first is required for the message. ``str()`` on a list/dict reprs its
+    string leaves, escaping a real control character into the four printable
+    characters ``\\x08``; sanitizing after that coercion (e.g.
+    ``sanitize_echo_prose(str(tree))``) never sees the control character it
+    needs to strip."""
     if isinstance(value, str):
         return sanitize_echo_prose(value)
     if isinstance(value, list):
-        return [_sanitize_tree_for_message(item) for item in value]
+        return [_sanitize_denials_tree(item) for item in value]
     if isinstance(value, dict):
         return {
-            sanitize_echo_prose(str(key)): _sanitize_tree_for_message(item)
+            sanitize_echo_prose(str(key)): _sanitize_denials_tree(item)
             for key, item in value.items()
         }
     return value
@@ -447,15 +450,15 @@ def normalize_envelope(
     # If Claude was blocked by denied tools AND produced nothing usable, surface it.
     # Denied tool calls are model-derived and may carry secrets in their inputs, so
     # scrub them before they reach the error message or meta (#66).
-    denials = cast("list", redact_tree(env.get("permission_denials") or []))
+    # One sanitized tree serves both destinations. redact_tree alone is not
+    # enough for either: it cannot see a secret a control character has split,
+    # and BOTH the message and meta.permission_denials are agent-visible
+    # (#66 follow-up).
+    denials = cast("list", _sanitize_denials_tree(env.get("permission_denials") or []))
     if denials and (inner is None and not text.strip()):
-        # This message is agent-visible error prose, so it goes through
-        # sanitize_echo_prose (not just _redact_out) to also strip control
-        # characters a secret could be wedged around (#66 follow-up). Sanitize
-        # the RAW denials tree, leaf-first, then str() it — see
-        # _sanitize_tree_for_message for why str()-then-sanitize does not work.
-        raw_denials = env.get("permission_denials") or []
-        denial_text = str(_sanitize_tree_for_message(raw_denials))[:160]
+        # str() the already-sanitized tree — see _sanitize_denials_tree for why
+        # str()-then-sanitize does not work.
+        denial_text = str(denials)[:160]
         return _error(
             ErrorInfo(
                 code="claude_permission_error",

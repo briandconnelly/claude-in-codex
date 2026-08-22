@@ -878,3 +878,42 @@ def test_unstructured_reply_is_capped_with_a_signal_not_silently_clipped():
     short = normalize_envelope("claude_ask", _env("just a sentence"), _meta(), detail="summary")
     assert short["summary"] == "just a sentence"
     assert "truncation" not in short
+
+
+def test_permission_denials_in_meta_strip_a_wedged_control_character():
+    """meta.permission_denials is agent-visible, so it needs the same
+    control-character stripping the error message got (#66 follow-up).
+
+    redact_text's patterns fail when a Cc code point splits a secret, so the
+    tree that reaches meta must be sanitized, not merely redacted. The plain
+    secret is the positive control: it proves this path redacts at all, so a
+    pass on the wedged run is not a broken instrument.
+
+    Both runs carry usable output, which is the branch that populates
+    meta.permission_denials — the no-output branch returns an error envelope
+    instead and never reaches it.
+    """
+    secret = "sk-ant-api03-" + "A" * 40
+
+    def _out(command: str) -> dict:
+        env = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "here is an answer",
+                "session_id": "s",
+                "permission_denials": [{"tool": "Bash", "input": {"command": command}}],
+            }
+        )
+        return normalize_envelope("claude_consult", env, _meta(), detail="summary")
+
+    plain = _out(f"tool input {secret}")
+    assert plain["ok"] is True
+    assert secret not in json.dumps(plain)
+
+    wedged = _out(f"tool input {secret[:10]}{chr(8)}{secret[10:]}")
+    blob = json.dumps(wedged)
+    assert wedged["ok"] is True
+    assert "AAAAAAAAAA" not in blob
+    assert chr(8) not in blob

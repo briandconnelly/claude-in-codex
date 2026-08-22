@@ -606,6 +606,8 @@ def test_worker_main_sanitizes_stderr_and_returns_child_status(tmp_path, monkeyp
             str(tmp_path / "result.json"),
             "--workspace",
             str(tmp_path),
+            "--config-mode",
+            "inherit",
             "--",
             "fake-claude",
         ]
@@ -630,6 +632,8 @@ def test_worker_main_rejects_empty_command(tmp_path):
                 str(tmp_path / "result.json"),
                 "--workspace",
                 str(tmp_path),
+                "--config-mode",
+                "inherit",
             ]
         )
         == 127
@@ -654,6 +658,8 @@ def test_worker_main_records_generic_spawn_failure(tmp_path, monkeypatch):
             str(tmp_path / "result.json"),
             "--workspace",
             str(tmp_path),
+            "--config-mode",
+            "inherit",
             "fake-claude",
         ]
     )
@@ -1072,8 +1078,12 @@ def test_detached_child_runs_in_the_workspace(tmp_path, monkeypatch):
 def test_arg_hash_separates_runs_that_differ_only_by_focus():
     """focus reaches the run through the PROMPT, not through JobConfig.
 
-    The equal-inputs case is the positive control: identical argv and prompt
-    must still collide, or the test would pass for a trivially broken hash.
+    The equal-inputs assertion is a determinism guard, NOT a positive control:
+    SHA-256 over equal material is equal by construction, so it cannot show
+    that the digest discriminates. What it can catch is material that stopped
+    being a pure function of (argv, prompt) — a nonce, a timestamp, an object
+    id — which would replace every replay with a spurious idempotency_conflict.
+    The inequality assertions below are what prove discrimination.
     """
     argv = ["claude", "-p", "--model", "sonnet"]
     assert jobs.arg_hash_for(argv, "review this") == jobs.arg_hash_for(argv, "review this")

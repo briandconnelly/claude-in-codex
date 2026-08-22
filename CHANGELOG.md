@@ -7,6 +7,21 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- `meta.permission_denials` gets the same control-character stripping the
+  `claude_permission_error` message got. The message was sanitized with
+  `sanitize_echo_prose` while the tree published to metadata was only passed
+  through `redact_tree`, so a credential split by a Unicode `Cc` code point
+  defeated the patterns and rode out of the agent-visible envelope essentially
+  whole — along with the raw control character. One sanitized tree now serves
+  both destinations. Reaches the branch where Claude returns usable output AND
+  denied tools; the no-output branch returns an error envelope and never
+  populated metadata. No schema change.
+- The job worker requires an explicit `--config-mode`. It was optional on the
+  theory that an older build's argv had to stay launchable, which is not a real
+  case: the store spawns each worker once from argv the same process just built
+  and never persists or re-execs a command. Optional meant a missing flag would
+  silently fall back to inheriting the environment unchanged — the failure-open
+  direction on a credential policy.
 - Detached jobs get the same credential environment as synchronous ones. The
   shared job store has no environment channel, so the worker inherited the
   server's environment and passed it to `claude` unchanged: a stale
