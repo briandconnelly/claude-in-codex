@@ -432,13 +432,7 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_emit_after_cmd(), cwd, _cfg())
 
-    # Polls race the job's completion against the outer anyio.fail_after(2)
-    # deadline below, not a fixed iteration count: a count tuned for a quiet
-    # machine (e.g. 20 * 0.02s = 0.4s) can undershoot the job's actual
-    # completion time under CI load and fail before the real timeout fires.
-    deadline = anyio.current_time() + 1.8
-
-    async def poll_status():
+    async def poll_status(deadline):
         seen = []
         while anyio.current_time() < deadline:
             st = await anyio.to_thread.run_sync(lambda: jobs.status(cwd, job_id))
@@ -449,7 +443,7 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
             await anyio.sleep(0.02)
         return seen
 
-    async def poll_result():
+    async def poll_result(deadline):
         last = None
         while anyio.current_time() < deadline:
             payload, found = await anyio.to_thread.run_sync(lambda: jobs.result(cwd, job_id))
@@ -461,7 +455,7 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
             await anyio.sleep(0.02)
         return last
 
-    async def poll_list():
+    async def poll_list(deadline):
         last = None
         while anyio.current_time() < deadline:
             last = await anyio.to_thread.run_sync(lambda: jobs.list_jobs(cwd))
@@ -473,14 +467,22 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
 
     outputs = {}
 
-    async def store(key, fn):
-        outputs[key] = await fn()
+    async def store(key, fn, deadline):
+        outputs[key] = await fn(deadline)
 
-    with anyio.fail_after(2):
+    with anyio.fail_after(2) as scope:
+        # Polls race the job's completion against this scope's own deadline,
+        # not a fixed iteration count: a count tuned for a quiet machine
+        # (e.g. 20 * 0.02s = 0.4s) can undershoot the job's actual completion
+        # time under CI load and fail before the real timeout fires. Deriving
+        # the poll deadline from scope.deadline keeps the two from drifting
+        # apart; the margin lets a lost race surface as a legible assertion
+        # over what the polls collected rather than an opaque TimeoutError.
+        deadline = scope.deadline - 0.2
         async with anyio.create_task_group() as tg:
-            tg.start_soon(store, "statuses", poll_status)
-            tg.start_soon(store, "result", poll_result)
-            tg.start_soon(store, "listing", poll_list)
+            tg.start_soon(store, "statuses", poll_status, deadline)
+            tg.start_soon(store, "result", poll_result, deadline)
+            tg.start_soon(store, "listing", poll_list, deadline)
 
     assert "done" in outputs["statuses"]
     assert outputs["result"]["ok"] is True
