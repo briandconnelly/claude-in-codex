@@ -1,19 +1,42 @@
 version: 2
 
 updates:
+  # Python dependencies managed by uv (reads pyproject.toml + uv.lock).
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+    # Group identifiers appear in the PR title, which squash-merges into the
+    # commit subject — keep them lowercase/hyphenated so the result stays a
+    # valid Conventional Commit.
+    groups:
+      python-dev:
+        dependency-type: "development"
+      python-runtime:
+        dependency-type: "production"
+
+  # GitHub Actions used in workflows (keeps SHA pins current).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    # A dependency joins the first group it matches, so codeql-action must come
+    # first: it needs every update type, including majors, which the catch-all
+    # group below deliberately excludes.
     groups:
-      # codeql-action/init and codeql-action/analyze must run the same
-      # version: analyze fails with "Loaded a configuration file for version
-      # X, but running version Y" when only one of them moves. Split into
-      # separate PRs, neither can pass CI, so keep them in one PR.
+      # codeql-action/init and codeql-action/analyze are separate dependencies,
+      # but the two steps must run the same version — analyze fails with
+      # "Loaded a configuration file for version X, but running version Y" when
+      # only one moves. Split across PRs, neither can pass the required CodeQL
+      # check, so they deadlock. No update-types filter: a major has to move
+      # both pins together too.
       codeql-action:
         patterns:
           - "github/codeql-action*"
+      # Majors are deliberately outside this group: excluding them here sends
+      # each one as its own PR, so a breaking Action major can be evaluated
+      # (and held) without blocking the safe minor/patch bumps batched
+      # alongside it.
+      github-actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
