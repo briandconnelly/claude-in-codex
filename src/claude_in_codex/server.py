@@ -1002,8 +1002,10 @@ async def _execute(
     # Staged through the ClaudeBackend adapter (the freeze-window re-plumb): argv,
     # prompt-over-stdin, and help-gate drops all come from prepare(). Execution
     # stays this server's — run_claude_async owns the kill-tree, cancellation, and
-    # per-mode env (identical to prepared.env by construction: scrub_env delegates
-    # to the same _claude_subprocess_env).
+    # per-mode env (equivalent to prepared.env: scrub_env re-implements the same
+    # policy over its argument rather than adopting _claude_subprocess_env's
+    # return value; the equivalence is pinned by a test, not by construction —
+    # see tests/test_backend.py).
     request = _run_request(kind_for_tool(tool), prompt, cwd, r)
     async with BACKEND.prepare(request) as prepared:
         run = await run_claude_async(
