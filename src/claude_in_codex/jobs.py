@@ -164,20 +164,32 @@ def _write_meta(jd: Path, meta: dict) -> None:
     (jd / "meta.json").write_text(json.dumps(meta))
 
 
-def _read_envelope(jd: Path) -> dict | None:
-    """Parse the claude JSON envelope from result.json, or None if absent/partial."""
-    try:
-        text = (jd / "result.json").read_text()
-    except OSError:
-        return None
-    text = text.strip()
-    if not text:
-        return None
-    try:
-        env = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return env if isinstance(env, dict) else None
+def _read_envelope(jd: Path, *, include_pending: bool = False) -> dict | None:
+    """Parse the claude JSON envelope from result.json, or None if absent/partial.
+
+    With ``include_pending``, fall back to the worker's unrenamed
+    ``result.json.tmp``. The worker publishes atomically (tmp + rename after the
+    child exits), so a worker killed in the terminate grace window leaves a
+    COMPLETE envelope under the temporary name and the record reports no spend
+    for a run that was already paid for. The JSON parse below is the safety
+    gate: a torn write cannot parse as an object, so a partial envelope is never
+    surfaced. Callers pass include_pending only for terminal states, where the
+    store has already decided the outcome and cannot be misled by what we read.
+    """
+    for name in ("result.json", "result.json.tmp") if include_pending else ("result.json",):
+        try:
+            text = (jd / name).read_text().strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        try:
+            env = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(env, dict):
+            return env
+    return None
 
 
 # --------------------------------------------------------------- record shapes
@@ -506,7 +518,7 @@ def _terminal_cost(jd: Path, state: str) -> float | None:
     that spent'), not just done."""
     if state not in _TERMINAL:
         return None
-    env = _read_envelope(jd) or {}
+    env = _read_envelope(jd, include_pending=True) or {}
     c = env.get("total_cost_usd")
     return float(c) if isinstance(c, (int, float)) else None
 

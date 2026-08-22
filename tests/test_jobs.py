@@ -290,6 +290,38 @@ def test_terminal_nondone_job_surfaces_cost(tmp_path):
     assert job["cost_usd"] == 0.0123
 
 
+def test_terminal_cost_recovers_spend_from_an_unpublished_result(tmp_path):
+    """A child that finished but whose worker died before the rename still spent.
+
+    The published-result case is the positive control: it proves _terminal_cost
+    reads cost at all.
+    """
+    jd = tmp_path / "job"
+    jd.mkdir()
+    (jd / "result.json").write_text('{"total_cost_usd": 0.25, "subtype": "success"}')
+    assert jobs._terminal_cost(jd, "timeout") == 0.25
+
+    (jd / "result.json").unlink()
+    (jd / "result.json.tmp").write_text('{"total_cost_usd": 0.25, "subtype": "success"}')
+    assert jobs._terminal_cost(jd, "timeout") == 0.25
+
+
+def test_pending_result_is_ignored_while_the_job_still_runs(tmp_path):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    (jd / "result.json.tmp").write_text('{"total_cost_usd": 0.25}')
+    assert jobs._terminal_cost(jd, "running") is None
+    assert jobs._read_envelope(jd) is None
+
+
+def test_a_torn_pending_result_is_never_surfaced(tmp_path):
+    jd = tmp_path / "job"
+    jd.mkdir()
+    (jd / "result.json.tmp").write_text('{"total_cost_usd": 0.2')  # truncated mid-write
+    assert jobs._read_envelope(jd, include_pending=True) is None
+    assert jobs._terminal_cost(jd, "timeout") is None
+
+
 def test_job_running_then_result_says_job_running(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
