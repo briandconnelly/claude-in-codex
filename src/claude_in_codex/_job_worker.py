@@ -11,6 +11,10 @@ Invoked by the pontonier JobStore as ``cmd_factory(job_dir)`` output; the
 store redirects THIS process's own stdout/stderr to the record's
 ``stderr.log`` (worker self-diagnostics only) and streams the prompt to our
 stdin, which the child inherits — the prompt never lands on disk or argv.
+
+The store runs THIS process with ``cwd=<job_dir>``. The child is spawned with
+``cwd=--workspace`` instead, so a detached run sees the same working directory
+as the equivalent synchronous run.
 """
 
 from __future__ import annotations
@@ -94,6 +98,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--lock-path", required=True)
     parser.add_argument("--stderr-path", required=True)
     parser.add_argument("--result-path", required=True)
+    parser.add_argument("--workspace", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -124,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 proc = subprocess.Popen(
                     command,
+                    cwd=args.workspace,
                     stdin=None,  # inherit: the store streams the prompt to OUR stdin
                     stdout=rf,
                     stderr=subprocess.PIPE,

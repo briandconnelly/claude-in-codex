@@ -266,7 +266,7 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
     }
 
 
-def _worker_factory(cmd: list[str]):
+def _worker_factory(cmd: list[str], workspace: str):
     def factory(jd: Path) -> list[str]:
         return [
             sys.executable,
@@ -278,6 +278,12 @@ def _worker_factory(cmd: list[str]):
             str(jd / _CLAUDE_STDERR_FILE),
             "--result-path",
             str(jd / "result.json"),
+            # The store spawns the WORKER with cwd=<job_dir> so a relative
+            # result.json lands in the record. The CHILD must still run in the
+            # workspace, or inherit/scoped stop loading the workspace CLAUDE.md
+            # and .claude/settings*.json and relative reads resolve in the cache.
+            "--workspace",
+            workspace,
             "--",
             *cmd,
         ]
@@ -314,7 +320,7 @@ def start_job(
     _check_executable(cmd, cwd)
     with _JOBS_LOCK:
         return _store().start(
-            _worker_factory(cmd),
+            _worker_factory(cmd, cwd),
             cwd,
             kind=cfg.kind,
             extra=_extra_for(cfg, cwd),
@@ -359,7 +365,7 @@ def start_job_idempotent(
     _check_executable(cmd, cwd)
     with _JOBS_LOCK:
         return _store().start_idempotent(
-            _worker_factory(cmd),
+            _worker_factory(cmd, cwd),
             cwd,
             kind=cfg.kind,
             tool=_IDEMPOTENT_TOOL,

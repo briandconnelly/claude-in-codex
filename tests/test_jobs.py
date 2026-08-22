@@ -9,6 +9,7 @@ import io
 import json
 import os
 import time
+from pathlib import Path
 
 import anyio
 import pytest
@@ -536,6 +537,8 @@ def test_worker_main_sanitizes_stderr_and_returns_child_status(tmp_path, monkeyp
             str(stderr_path),
             "--result-path",
             str(tmp_path / "result.json"),
+            "--workspace",
+            str(tmp_path),
             "--",
             "fake-claude",
         ]
@@ -558,6 +561,8 @@ def test_worker_main_rejects_empty_command(tmp_path):
                 str(tmp_path / "stderr.log"),
                 "--result-path",
                 str(tmp_path / "result.json"),
+                "--workspace",
+                str(tmp_path),
             ]
         )
         == 127
@@ -580,6 +585,8 @@ def test_worker_main_records_generic_spawn_failure(tmp_path, monkeypatch):
             str(stderr_path),
             "--result-path",
             str(tmp_path / "result.json"),
+            "--workspace",
+            str(tmp_path),
             "fake-claude",
         ]
     )
@@ -985,3 +992,41 @@ def test_new_record_prompt_never_lands_on_disk(tmp_path, monkeypatch):
     for f in ws.rglob("*"):
         if f.is_file():
             assert secret not in f.read_text(errors="replace"), f
+
+
+def test_detached_child_runs_in_the_workspace(tmp_path, monkeypatch):
+    """The child must inherit the workspace, not the job-record dir.
+
+    pontonier's JobStore spawns the WORKER with cwd=<job_dir> by design; the
+    worker is responsible for putting the CHILD back in the workspace. Without
+    that, inherit/scoped config modes silently stop seeing the workspace
+    CLAUDE.md and .claude/settings*.json.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    probe = tmp_path / "probe.sh"
+    probe.write_text('#!/bin/sh\nprintf \'{"result":"%s","subtype":"success"}\' "$PWD"\n')
+    probe.chmod(0o755)
+
+    cfg = jobs.JobConfig(
+        kind="claude_review_changes",
+        config_mode="safe",
+        access="toolless",
+        scope="working_tree",
+        base=None,
+        head=None,
+        detail="full",
+        timeout_seconds=60,
+        workspace_source="explicit",
+        context_summary=None,
+    )
+    job_id, _ = jobs.start_job([str(probe)], str(ws), cfg, stdin_text="hi")
+    jd = Path(jobs._ws_dir(str(ws))) / job_id
+    for _ in range(200):
+        env = jobs._read_envelope(jd)
+        if env:
+            break
+        time.sleep(0.05)
+    assert env is not None, "child never published a result"
+    assert env["result"] == str(ws)
