@@ -1172,8 +1172,18 @@ def test_worker_keeps_direct_credentials_in_bare_mode(tmp_path, monkeypatch):
 
 
 def test_worker_factory_threads_the_config_mode(tmp_path):
-    """start_job must tell the worker which credential policy applies."""
-    cmd = jobs._worker_factory(["claude", "-p"], str(tmp_path), config_mode="scoped")(tmp_path)
+    """start_job must tell the worker which credential policy applies.
+
+    The command is a real temp executable, not the bare name "claude": the
+    factory validates the executable when the store invokes it, so a bare name
+    resolves against the runner's PATH and this argv-shape assertion would
+    otherwise pass or fail on whether the CLI happens to be installed.
+    """
+    script = tmp_path / "fake-claude"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+
+    cmd = jobs._worker_factory([str(script), "-p"], str(tmp_path), config_mode="scoped")(tmp_path)
     assert "--config-mode" in cmd
     assert cmd[cmd.index("--config-mode") + 1] == "scoped"
 
