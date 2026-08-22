@@ -1250,3 +1250,93 @@ def test_keyed_create_still_reports_a_missing_executable(tmp_path):
         jobs.start_job_idempotent(missing, cwd, _cfg(), None, key="missing-key")
 
     assert jobs.list_jobs(cwd) == before
+
+
+def _complete_envelope(answer="THE PAID ANSWER", cost=0.42):
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": answer,
+            "session_id": "s",
+            "total_cost_usd": cost,
+        }
+    )
+
+
+def test_cancel_race_surfaces_an_unpublished_complete_envelope(tmp_path):
+    """A complete envelope wins a race with cancellation.
+
+    The worker publishes atomically (tmp + rename after the child exits), so a
+    worker killed inside the terminate grace window can leave a COMPLETE
+    envelope under result.json.tmp for a run that was already PAID for.
+    Reporting that job as `cancelled` billed the caller (cost_usd is recovered
+    from the same file) while making the answer unreachable.
+    """
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
+    jd = jobs._job_dir(cwd, job_id)
+    (jd / "result.json.tmp").write_text(_complete_envelope())
+
+    st = jobs.cancel(cwd, job_id)
+    assert st["status"] == "done"
+    assert st["result_available"] is True
+    assert st["cost_usd"] == 0.42
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found
+    assert payload["ok"] is True
+    assert "THE PAID ANSWER" in json.dumps(payload)
+
+
+def test_deadline_race_surfaces_an_unpublished_complete_envelope(tmp_path, monkeypatch):
+    """Same race, reached through deadline reaping rather than cancellation."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_MAX_SECONDS", "0")  # deadline = start time
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
+    jd = jobs._job_dir(cwd, job_id)
+    (jd / "result.json.tmp").write_text(_complete_envelope())
+
+    st = jobs.status(cwd, job_id)  # first poll past the deadline reaps it
+    assert st["status"] == "done"
+    assert st["result_available"] is True
+
+    payload, _ = jobs.result(cwd, job_id)
+    assert payload["ok"] is True
+
+
+def test_a_torn_unpublished_envelope_is_never_promoted(tmp_path):
+    """The positive control for the two tests above: the JSON parse is the gate.
+
+    A half-written result.json.tmp must leave the job cancelled, or the
+    promotion would be surfacing a partial envelope as a paid answer.
+    """
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
+    jd = jobs._job_dir(cwd, job_id)
+    (jd / "result.json.tmp").write_text('{"type": "result", "resu')
+
+    st = jobs.cancel(cwd, job_id)
+    assert st["status"] == "cancelled"
+    assert st["result_available"] is False
+
+    payload, _ = jobs.result(cwd, job_id)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "job_cancelled"
+
+
+def test_list_jobs_agrees_with_status_on_a_promoted_record(tmp_path):
+    """claude_job_list must not disagree with claude_job_status about whether a
+    result can be fetched — the two surfaces read the same record."""
+    cwd = str(tmp_path)
+    job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
+    jd = jobs._job_dir(cwd, job_id)
+    (jd / "result.json.tmp").write_text(_complete_envelope())
+    jobs.cancel(cwd, job_id)
+
+    listed = next(j for j in jobs.list_jobs(cwd)["jobs"] if j["job_id"] == job_id)
+    st = jobs.status(cwd, job_id)
+    assert listed["status"] == st["status"] == "done"
+    assert listed["result_available"] is st["result_available"] is True
+    assert listed["cost_usd"] == st["cost_usd"] == 0.42

@@ -7,6 +7,23 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- A paid answer is no longer stranded when the worker is killed between writing
+  its result and publishing it. The worker publishes atomically (tmp + rename
+  after the child exits), so a worker killed inside the terminate grace window
+  leaves a COMPLETE envelope under `result.json.tmp`. The record stayed
+  `cancelled`/`timeout` with `result_available: false`, while `cost_usd`
+  recovered the spend from that very file — the caller was billed for an answer
+  the API would not hand back. A terminal record whose envelope exists ONLY
+  under the unpublished name is now promoted to `done` across
+  `claude_job_status`, `claude_job_list`, and `claude_job_result`. The JSON
+  parse remains the gate, so a torn write is never promoted, and a record
+  carrying a published `result.json` keeps the terminal status the store chose
+  for it deliberately. Restores 0.7's "a complete envelope wins races" for the
+  one case atomic publishing introduced.
+- `ClaudeBackend.finalize` coerces a non-string `result` instead of raising. CLI
+  drift putting an object, list, or number there reached `extract_json`'s string
+  methods when a schema was set, and otherwise escaped into `ExecResult.answer`,
+  which is declared `str`.
 - Persisted job stderr is sanitized before it reaches disk. The worker redacted
   each streamed line but did not strip Unicode `Cc` code points first, so a
   credential split by one defeated the patterns and sat in `claude-stderr.log`

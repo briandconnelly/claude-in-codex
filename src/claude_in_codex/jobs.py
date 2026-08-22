@@ -176,6 +176,17 @@ def _read_envelope(jd: Path, *, include_pending: bool = False) -> dict | None:
     surfaced. Callers pass include_pending only for terminal states, where the
     store has already decided the outcome and cannot be misled by what we read.
     """
+    found = _read_envelope_text(jd, include_pending=include_pending)
+    return None if found is None else found[0]
+
+
+def _read_envelope_text(jd: Path, *, include_pending: bool = False) -> tuple[dict, str] | None:
+    """As ``_read_envelope``, but also return the TEXT that parsed.
+
+    ``result()`` re-renders the stored envelope rather than a cached payload, so
+    it needs the source text of whichever name actually parsed — which is not
+    always ``result.json`` once a terminal record can be promoted off its
+    unpublished ``result.json.tmp``."""
     for name in ("result.json", "result.json.tmp") if include_pending else ("result.json",):
         try:
             text = (jd / name).read_text().strip()
@@ -188,7 +199,7 @@ def _read_envelope(jd: Path, *, include_pending: bool = False) -> dict | None:
         except json.JSONDecodeError:
             continue
         if isinstance(env, dict):
-            return env
+            return env, text
     return None
 
 
@@ -524,6 +535,40 @@ def _build_meta(meta: dict) -> Meta:
     )
 
 
+_PROMOTABLE = {"cancelled", "timeout", "failed"}
+
+
+def _promoted_state(jd: Path, state: str) -> str:
+    """A complete envelope wins races with cancellation and deadline reaping.
+
+    The worker publishes atomically (tmp + rename after the child exits), so a
+    worker killed inside the terminate grace window leaves a COMPLETE envelope
+    under ``result.json.tmp`` for a run that was already PAID for. Left as
+    cancelled/timeout, that job bills the caller — ``_terminal_cost`` recovers
+    the spend from the very same file — while making the answer unreachable.
+
+    This restores 0.7's ``_status_of`` behavior ("a complete envelope wins races
+    with worker exit, cancellation, and deadline enforcement") for the one case
+    the atomic-publish worker introduced. The JSON parse is the gate, exactly as
+    it is for cost: a torn write cannot parse as an object, so a partial envelope
+    is never promoted. Only terminal states are considered, so a running job's
+    live ``.tmp`` is never read.
+
+    Deliberately narrow: this promotes ONLY when the envelope exists solely
+    under the unpublished name, which is precisely when the store never had a
+    publishable result to decide on. A record that IS carrying a published
+    ``result.json`` and is still marked cancelled was decided that way on
+    purpose — the store saw the result and the cancellation won — and keeps its
+    terminal status with its spend surfaced (see
+    ``test_terminal_nondone_job_surfaces_cost``).
+    """
+    if state not in _PROMOTABLE:
+        return state
+    if _read_envelope(jd) is not None:  # published: the store already decided
+        return state
+    return "done" if _read_envelope(jd, include_pending=True) is not None else state
+
+
 def _terminal_cost(jd: Path, state: str) -> float | None:
     """Spend recorded by a terminal job, or None.
 
@@ -588,7 +633,7 @@ def _refresh(cwd: str, job_id: str) -> tuple[Path, dict, str] | None:
     meta = _read_meta(jd)
     if meta is None:
         return None
-    return jd, meta, sd["status"]
+    return jd, meta, _promoted_state(jd, sd["status"])
 
 
 def status(cwd: str, job_id: str) -> dict | None:
@@ -616,7 +661,9 @@ def list_jobs(cwd: str) -> dict:
             except ValueError:
                 continue
             meta = _read_meta(jd) or {}
-            state = sd["status"]
+            # Promote here too: claude_job_list must not disagree with
+            # claude_job_status about whether a result can be fetched.
+            state = _promoted_state(jd, sd["status"])
             summaries.append(
                 {
                     "_epoch": meta.get("started_epoch", 0.0),
@@ -651,7 +698,7 @@ def cancel(cwd: str, job_id: str) -> dict | None:
         meta = _read_meta(jd)
         if meta is None:
             return None
-        return _status_dict(jd, meta, sd["status"])
+        return _status_dict(jd, meta, _promoted_state(jd, sd["status"]))
 
 
 def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = None):
@@ -673,7 +720,13 @@ def result(cwd: str, job_id: str, consume: bool = False, detail: str | None = No
             return None, False
         jd, meta, state = live
         if state == "done":
-            env_text = (jd / "result.json").read_text()
+            # Not necessarily result.json: a promoted terminal record renders
+            # from the unpublished result.json.tmp the worker never got to
+            # rename. _promoted_state has already proved this parses.
+            found = _read_envelope_text(jd, include_pending=True)
+            if found is None:
+                return _job_error(meta, "failed", jd), True
+            env_text = found[1]
             summary = _record_context_summary(meta)
             ctx_summary = ContextSummary(**summary) if summary else None
             configured = _record_config(meta).get("detail", "summary")

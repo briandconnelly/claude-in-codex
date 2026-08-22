@@ -98,7 +98,13 @@ class ClaudeBackend:
             envelope = {}
         if not isinstance(envelope, dict):
             envelope = {}
-        answer = envelope.get("result") or ""
+        # `result` is declared a string, but this is the TOLERANT read and CLI
+        # drift can put an object, a list, or a number here. Coerce before use:
+        # extract_json runs string methods on it, and ExecResult.answer is typed
+        # `str`, so a raw non-string would either raise or escape into the
+        # protocol result.
+        raw_answer = envelope.get("result")
+        answer = raw_answer if isinstance(raw_answer, str) else ""
         structured = (
             normalize.extract_json(answer) if request.schema is not None and answer else None
         )

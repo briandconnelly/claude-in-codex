@@ -233,3 +233,29 @@ def test_finalize_keeps_cost_when_usage_is_malformed():
     assert result.usage is not None
     assert result.usage.cost_usd == 0.07
     assert result.usage.input_tokens is None
+
+
+@pytest.mark.parametrize("bad_result", [{"a": 1}, [1, 2], 7, True])
+def test_finalize_coerces_a_non_string_result(bad_result):
+    """`answer` is declared `str`, and finalize() is the tolerant read.
+
+    A non-string `result` from CLI drift used to reach extract_json (which calls
+    .find() and raised) when a schema was set, and to escape as a dict/list/int
+    in ExecResult.answer when one was not. test_finalize_reads_the_stdout_envelope
+    is the positive control that a well-formed string result still parses.
+    """
+    request = RunRequest(
+        kind="consult", prompt="q", cwd=".", timeout_seconds=10, schema={"type": "object"}
+    )
+    envelope = json.dumps({"result": bad_result})
+    result = BACKEND.finalize(_outcome(stdout=envelope), request)
+    assert isinstance(result.answer, str)
+
+
+def test_finalize_still_extracts_structured_json_from_a_string_result():
+    """The control for the coercion above: a real string result still parses."""
+    request = RunRequest(
+        kind="consult", prompt="q", cwd=".", timeout_seconds=10, schema={"type": "object"}
+    )
+    result = BACKEND.finalize(_outcome(stdout=json.dumps({"result": '{"a": 1}'})), request)
+    assert result.structured == {"a": 1}
