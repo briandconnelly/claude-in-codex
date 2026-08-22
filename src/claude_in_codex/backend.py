@@ -158,9 +158,19 @@ class ClaudeBackend:
 BACKEND = ClaudeBackend()
 
 
+# Explicit, not substring matching: `"review" in tool` split claude_dry_run from
+# its own deprecated alias claude_review_dry_run. request.kind is inert today,
+# but an alias must never disagree with its canonical name.
+_TOOL_KINDS = {
+    "claude_review_changes": "review_changes",
+    "claude_review_changes_async": "review_changes",
+    "claude_adversarial_review": "review_changes",
+}
+
+
 def kind_for_tool(tool: str) -> str:
     """Map this bridge's tool names onto the protocol's canonical verbs.
 
     `claude_adversarial_review` is a backend-specific extension, but it is still
     a review of gathered changes — same access posture, same envelope."""
-    return "review_changes" if "review" in tool else "consult"
+    return _TOOL_KINDS.get(tool, "consult")

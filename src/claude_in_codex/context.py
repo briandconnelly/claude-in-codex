@@ -306,7 +306,7 @@ def gather_context(
         truncated = True
         hint = (
             f"diff exceeded {MAX_DIFF_BYTES} bytes; retry with paths=[...], use "
-            "scope=staged, choose a closer branch base, or call claude_ask with "
+            "scope=staged, choose a closer branch base, or call claude_consult with "
             "selected context"
         )
     return ContextResult(

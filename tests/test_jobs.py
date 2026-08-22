@@ -7,7 +7,6 @@ exercised deterministically and for free.
 
 import io
 import json
-import os
 import time
 from pathlib import Path
 
@@ -796,36 +795,6 @@ def test_find_by_idempotency_key_ignores_keyless_jobs(tmp_path, monkeypatch):
     job_id, _ = jobs.start_job(_sleep_cmd(), str(tmp_path), _cfg())
     assert jobs.find_by_idempotency_key(str(tmp_path), "key-1") is None
     jobs.cancel(str(tmp_path), job_id)
-
-
-def _xproc_attempt(args):
-    workspace, state_dir, candidate = args
-
-    os.environ["CLAUDE_IN_CODEX_STATE_DIR"] = state_dir
-    from claude_in_codex import jobs as j
-
-    holder = j.reserve_idempotency_key(workspace, "xproc-key", candidate)
-    if holder is None:
-        job_id, _ = j.start_job(
-            ["sh", "-c", "sleep 30"],
-            workspace,
-            JobConfig(
-                kind="claude_review_changes",
-                config_mode="inherit",
-                access="toolless",
-                scope="working_tree",
-                base="main",
-                head=None,
-                detail="summary",
-                timeout_seconds=1800,
-                workspace_source="cwd",
-                context_summary=None,
-                idempotency_key="xproc-key",
-            ),
-            job_id=candidate,
-        )
-        return ("won", job_id)
-    return ("lost", holder)
 
 
 def test_reap_workspace_removes_stale_marker_with_dead_job(tmp_path, monkeypatch):

@@ -1570,11 +1570,11 @@ async def claude_adversarial_review(
 async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | None:
     """Launch dedupe: JobStatus of a live/unexpired job started with this key, or
     None. This fast path runs once at entry as a cheap early return. The
-    pre-spawn leg (in claude_review_changes_async, just before jobs.start_job) is
-    now an atomic on-disk reservation via jobs.reserve_idempotency_key, which
-    publishes a fully-written marker via an atomic os.link, so same-key launches
-    cannot double-spawn on one local filesystem — this fast path is advisory
-    only. NFS-style filesystems without atomic hardlinks remain a caveat."""
+    pre-spawn leg (in claude_review_changes_async, just before
+    jobs.start_job_idempotent) is the store's idempotency index, which dedupes
+    on (key, arg_hash) and returns created/replay/conflict/unavailable/
+    in_progress. jobs.find_by_idempotency_key now only replays legacy 0.7
+    idem-*.json markers, which are still read and reaped but never written."""
     if not idempotency_key:
         return None
     existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))

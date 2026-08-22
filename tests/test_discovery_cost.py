@@ -44,7 +44,7 @@ WIRE_BUDGET_BYTES = 66_000
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(56,300/4)).
+# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(66,000/4)).
 TOKEN_PROXY_BUDGET = 16_500  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
 
 

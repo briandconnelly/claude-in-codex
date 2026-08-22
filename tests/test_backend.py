@@ -17,6 +17,7 @@ from pontonier.testing import conformance
 
 from claude_in_codex import backend as backend_mod
 from claude_in_codex import claude, cli_contract, preflight
+from claude_in_codex.backend import kind_for_tool
 from claude_in_codex.cli_contract import PONTONIER_CONTRACT
 from claude_in_codex.preflight import FlagSupport
 
@@ -199,3 +200,9 @@ def test_list_models_is_the_advisory_catalog():
     models = BACKEND.list_models()
     assert "opus" in models
     assert len(models) == len(cli_contract.KNOWN_MODELS)
+
+
+def test_alias_and_canonical_names_agree_on_kind():
+    assert kind_for_tool("claude_dry_run") == kind_for_tool("claude_review_dry_run")
+    assert kind_for_tool("claude_consult") == kind_for_tool("claude_ask")
+    assert kind_for_tool("claude_review_changes") == "review_changes"
