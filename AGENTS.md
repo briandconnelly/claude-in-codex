@@ -79,8 +79,14 @@ uv run pytest tests/test_jobs.py --no-cov
 - Claude CLI compatibility assumptions belong in
   `src/claude_in_codex/cli_contract.py`. Keep guarantee-bearing flags fail-closed
   rather than silently weakening cost, access, isolation, or behavior guarantees.
-- `.agents/skills` is the canonical repo-owned skill location. Edit skill files
-  there, not through tool-specific adapters.
+- Two skill trees exist and must not be confused. `.agents/skills` holds the
+  development skills agents use while working ON this repo; it is the canonical
+  location for those, so edit them there and not through tool-specific adapters
+  such as `.claude/skills`. `skills/` holds the skill this project SHIPS to its
+  users; `.codex-plugin/plugin.json` declares it as the plugin's skill directory,
+  and `plugins/claude-in-codex/skills/` is its hand-maintained marketplace
+  mirror. Edit a shipped skill in `skills/` and mirror it; a lockstep test
+  enforces byte equality.
 
 ## Tool-Specific Notes
 
