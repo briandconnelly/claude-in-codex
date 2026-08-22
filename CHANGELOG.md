@@ -7,6 +7,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Detached jobs get the same credential environment as synchronous ones. The
+  shared job store has no environment channel, so the worker inherited the
+  server's environment and passed it to `claude` unchanged: a stale
+  `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in the server process could
+  override Claude Code's OAuth/session path on an async run under
+  `config_mode=inherit`/`scoped`/`safe`, which is exactly what those modes exist
+  to prevent — and what the synchronous path already prevented. The job worker
+  now applies `ClaudeBackend.scrub_env` for the launching config mode. `bare`
+  still keeps the direct credentials it authenticates with. No schema change.
 - Detached jobs run `claude` in the workspace again. The shared job store spawns
   the worker with `cwd=<job record dir>` by design, and the worker did not put
   the child back in the workspace, so `config_mode=inherit`/`scoped` stopped

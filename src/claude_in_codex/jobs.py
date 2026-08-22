@@ -278,7 +278,7 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
     }
 
 
-def _worker_factory(cmd: list[str], workspace: str):
+def _worker_factory(cmd: list[str], workspace: str, *, config_mode: str):
     def factory(jd: Path) -> list[str]:
         return [
             sys.executable,
@@ -296,6 +296,12 @@ def _worker_factory(cmd: list[str], workspace: str):
             # and .claude/settings*.json and relative reads resolve in the cache.
             "--workspace",
             workspace,
+            # The store has no environment channel, so the worker applies the
+            # per-mode credential policy itself. Without this a detached
+            # inherit/scoped/safe run inherits a stale ANTHROPIC_API_KEY the
+            # equivalent synchronous run strips.
+            "--config-mode",
+            config_mode,
             "--",
             *cmd,
         ]
@@ -332,7 +338,7 @@ def start_job(
     _check_executable(cmd, cwd)
     with _JOBS_LOCK:
         return _store().start(
-            _worker_factory(cmd, cwd),
+            _worker_factory(cmd, cwd, config_mode=cfg.config_mode),
             cwd,
             kind=cfg.kind,
             extra=_extra_for(cfg, cwd),
@@ -374,7 +380,7 @@ def start_job_idempotent(
     _check_executable(cmd, cwd)
     with _JOBS_LOCK:
         return _store().start_idempotent(
-            _worker_factory(cmd, cwd),
+            _worker_factory(cmd, cwd, config_mode=cfg.config_mode),
             cwd,
             kind=cfg.kind,
             tool=_IDEMPOTENT_TOOL,

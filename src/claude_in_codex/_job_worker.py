@@ -14,7 +14,10 @@ stdin, which the child inherits — the prompt never lands on disk or argv.
 
 The store runs THIS process with ``cwd=<job_dir>``. The child is spawned with
 ``cwd=--workspace`` instead, so a detached run sees the same working directory
-as the equivalent synchronous run.
+as the equivalent synchronous run, and with the environment
+``ClaudeBackend.scrub_env`` returns for ``--config-mode``, so it sees the same
+credentials too. The store has no environment channel, so the policy is applied
+here rather than threaded through it.
 """
 
 from __future__ import annotations
@@ -22,12 +25,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib
+import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+from claude_in_codex.backend import BACKEND
 from claude_in_codex.context import SecretRedactor
 
 try:
@@ -99,6 +104,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stderr-path", required=True)
     parser.add_argument("--result-path", required=True)
     parser.add_argument("--workspace", required=True)
+    # Optional so a worker spawned by an older build stays launchable: absent
+    # means "inherit unchanged", which is exactly what those builds did.
+    parser.add_argument("--config-mode", default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -120,6 +128,16 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
+    # Login-backed modes must reach Claude Code's OAuth/session path, so a stale
+    # ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN in the server's environment cannot
+    # be allowed to ride into the detached child; bare mode needs it and keeps
+    # it. Same policy object the synchronous path is pinned against.
+    child_env = (
+        BACKEND.scrub_env(dict(os.environ), args.config_mode)
+        if args.config_mode is not None
+        else None
+    )
+
     result_path = Path(args.result_path)
     tmp_path = result_path.with_name(result_path.name + ".tmp")
     try:
@@ -130,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 proc = subprocess.Popen(
                     command,
                     cwd=args.workspace,
+                    env=child_env,
                     stdin=None,  # inherit: the store streams the prompt to OUR stdin
                     stdout=rf,
                     stderr=subprocess.PIPE,

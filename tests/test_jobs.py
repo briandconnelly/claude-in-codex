@@ -7,6 +7,7 @@ exercised deterministically and for free.
 
 import io
 import json
+import os
 import time
 from pathlib import Path
 
@@ -1086,3 +1087,75 @@ def test_arg_hash_separates_runs_that_differ_only_by_model():
     assert jobs.arg_hash_for(["claude", "-p", "--model", "sonnet"], prompt) != jobs.arg_hash_for(
         ["claude", "-p", "--model", "opus"], prompt
     )
+
+
+def _run_worker_capturing_popen(tmp_path, monkeypatch, extra_args):
+    """Drive _job_worker.main against a stub Popen and return its kwargs."""
+    observed = {}
+
+    class Proc:
+        stderr = io.BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return Proc()
+
+    monkeypatch.setattr(_job_worker.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(_job_worker.signal, "signal", lambda *_args: None)
+    _job_worker.main(
+        [
+            "--lock-path",
+            str(tmp_path / "worker.lock"),
+            "--stderr-path",
+            str(tmp_path / "stderr.log"),
+            "--result-path",
+            str(tmp_path / "result.json"),
+            "--workspace",
+            str(tmp_path),
+            *extra_args,
+            "--",
+            "fake-claude",
+        ]
+    )
+    return observed["kwargs"]
+
+
+@pytest.mark.parametrize("mode", ["inherit", "scoped", "safe"])
+def test_worker_strips_direct_credentials_in_login_modes(tmp_path, monkeypatch, mode):
+    """A detached login-backed run must not inherit stale direct credentials.
+
+    The synchronous path strips them via claude._claude_subprocess_env; the
+    async path has to reach the same environment or the two diverge on the
+    guarantee the config mode is chosen for.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-token")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+
+    kwargs = _run_worker_capturing_popen(tmp_path, monkeypatch, ["--config-mode", mode])
+
+    env = kwargs["env"]
+    assert env is not None
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert env.get("PATH") == os.environ["PATH"]
+
+
+def test_worker_keeps_direct_credentials_in_bare_mode(tmp_path, monkeypatch):
+    """Bare mode deliberately authenticates with the direct credentials."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-live")
+
+    kwargs = _run_worker_capturing_popen(tmp_path, monkeypatch, ["--config-mode", "bare"])
+
+    assert kwargs["env"]["ANTHROPIC_API_KEY"] == "sk-ant-live"
+
+
+def test_worker_factory_threads_the_config_mode(tmp_path):
+    """start_job must tell the worker which credential policy applies."""
+    cmd = jobs._worker_factory(["claude", "-p"], str(tmp_path), config_mode="scoped")(tmp_path)
+    assert "--config-mode" in cmd
+    assert cmd[cmd.index("--config-mode") + 1] == "scoped"
