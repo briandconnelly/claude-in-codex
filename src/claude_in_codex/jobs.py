@@ -731,8 +731,12 @@ def _job_error(meta: dict, state: str, jd: Path) -> dict:
         )
         retryable = state == "running"
     bmeta = _build_meta(meta)
-    # Surface any spend the (possibly partial) envelope recorded.
-    env = _read_envelope(jd)
+    # Surface any spend the (possibly partial) envelope recorded. Match
+    # _terminal_cost's discipline: include_pending only for a terminal state,
+    # where the store has already decided the outcome and the .tmp cannot be a
+    # live stream still being written (jobs.py review, PR #106) — a running
+    # job's .tmp is live and must not be read here.
+    env = _read_envelope(jd, include_pending=state in _TERMINAL)
     if env:
         apply_cost_usage(bmeta, env)
     action = None

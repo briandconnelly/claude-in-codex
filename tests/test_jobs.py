@@ -321,6 +321,41 @@ def test_a_torn_pending_result_is_never_surfaced(tmp_path):
     assert jobs._terminal_cost(jd, "timeout") is None
 
 
+def test_status_and_result_agree_on_cost_for_a_reaped_terminal_job(tmp_path):
+    """claude_job_status and claude_job_result/consume_result must report the
+    SAME spend for the same job (review of PR #106).
+
+    A job reaped in the terminate grace window can leave its only artifact as an
+    unrenamed, but complete, result.json.tmp. _status_dict (via _terminal_cost)
+    already reads that pending file for a terminal state; _job_error (the
+    claude_job_result path) must do the same, or the two surfaces disagree about
+    money for the identical record.
+    """
+    jd = tmp_path / "job"
+    jd.mkdir()
+    (jd / "result.json.tmp").write_text('{"total_cost_usd": 0.25, "subtype": "success"}')
+    meta = {"job_id": "a" * 32, "kind": "claude_review_changes", "extra": {"config": {}}}
+
+    status_cost = jobs._status_dict(jd, meta, "timeout")["cost_usd"]
+    result_payload = jobs._job_error(meta, "timeout", jd)
+
+    assert status_cost == 0.25
+    assert result_payload["meta"]["cost_usd"] == status_cost
+
+
+def test_running_job_result_does_not_read_the_pending_tmp(tmp_path):
+    """The .tmp file is a live stream while the job is still running, so
+    _job_error must not read it for a running job (unlike a terminal one)."""
+    jd = tmp_path / "job"
+    jd.mkdir()
+    (jd / "result.json.tmp").write_text('{"total_cost_usd": 0.25, "subtype": "success"}')
+    meta = {"job_id": "a" * 32, "kind": "claude_review_changes", "extra": {"config": {}}}
+
+    result_payload = jobs._job_error(meta, "running", jd)
+
+    assert result_payload["meta"].get("cost_usd") is None
+
+
 def test_job_running_then_result_says_job_running(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
