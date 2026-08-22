@@ -2412,11 +2412,10 @@ def claude_status() -> ToolResult:
         timeout_seconds=d.timeout_seconds,
     )
     resolved = ResolvedDefaults(
-        config_mode=cast(
-            "ConfigMode",
-            d.config_mode if d.config_mode in ("inherit", "scoped", "safe", "bare") else "inherit",
+        config_mode=(
+            d.config_mode if d.config_mode in ("inherit", "scoped", "safe", "bare") else "inherit"
         ),
-        access=cast("Access", d.access if d.access in ("toolless", "readonly") else "toolless"),
+        access=d.access if d.access in ("toolless", "readonly") else "toolless",
         model=d.model,
         effort=cast("Effort", sanitize_effort(d.effort)),
         max_budget_usd=clamp_budget(d.max_budget_usd),
