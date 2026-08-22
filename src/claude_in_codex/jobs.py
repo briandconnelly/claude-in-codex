@@ -656,7 +656,9 @@ def list_jobs(cwd: str) -> dict:
     and delete expired records — it is not strictly read-only."""
     with _JOBS_LOCK:
         _reap_stale_markers(cwd)
-        summaries = []
+        # (started_epoch, summary): the sort key rides alongside the payload
+        # rather than inside it, so it cannot leak into the wire schema.
+        summaries: list[tuple[float, dict]] = []
         for sd in _store().list_jobs(cwd):
             job_id = sd.get("job_id", "")
             try:
@@ -668,22 +670,26 @@ def list_jobs(cwd: str) -> dict:
             # claude_job_status about whether a result can be fetched.
             state = _promoted_state(jd, sd["status"])
             summaries.append(
-                {
-                    "_epoch": meta.get("started_epoch", 0.0),
-                    "job_id": job_id,
-                    "kind": meta.get("kind", ""),
-                    "status": state,
-                    "started_at": meta.get("started_at", ""),
-                    "elapsed_ms": _elapsed_ms(meta),
-                    "result_available": state == "done",
-                    "expires_at": _expires_at(meta),
-                    "cost_usd": _terminal_cost(jd, state),
-                }
+                (
+                    meta.get("started_epoch", 0.0),
+                    {
+                        "job_id": job_id,
+                        "kind": meta.get("kind", ""),
+                        "status": state,
+                        "started_at": meta.get("started_at", ""),
+                        "elapsed_ms": _elapsed_ms(meta),
+                        "result_available": state == "done",
+                        "expires_at": _expires_at(meta),
+                        "cost_usd": _terminal_cost(jd, state),
+                    },
+                )
             )
-        summaries.sort(key=lambda s: s["_epoch"], reverse=True)  # newest first
-        for s in summaries:
-            s.pop("_epoch", None)
-        return {"ok": True, "jobs": summaries, "fingerprint": FINGERPRINT}
+        summaries.sort(key=lambda pair: pair[0], reverse=True)  # newest first
+        return {
+            "ok": True,
+            "jobs": [summary for _, summary in summaries],
+            "fingerprint": FINGERPRINT,
+        }
 
 
 def cancel(cwd: str, job_id: str) -> dict | None:

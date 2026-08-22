@@ -765,6 +765,23 @@ def test_count_cap_evicts_oldest_terminal(tmp_path, monkeypatch):
     assert first not in ids
 
 
+def test_list_jobs_orders_newest_first_without_leaking_the_sort_key(tmp_path):
+    """list_jobs promises newest first, and the epoch it sorts on is internal.
+
+    The ordering is load-bearing for agents that read the first entry, and the
+    sort key must not reach the wire: `jobs` entries are schema-checked, so an
+    extra `_epoch` field would be a contract violation."""
+    cwd = str(tmp_path)
+    first, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
+    _await_done(cwd, first)
+    second, _ = jobs.start_job(_emit_cmd(), cwd, _cfg())
+    _await_done(cwd, second)
+
+    listing = jobs.list_jobs(cwd)["jobs"]
+    assert [j["job_id"] for j in listing] == [second, first]
+    assert all("_epoch" not in j for j in listing)
+
+
 def test_start_job_survives_chmod_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs.os, "chmod", lambda *a, **k: (_ for _ in ()).throw(OSError))
     cwd = str(tmp_path)
