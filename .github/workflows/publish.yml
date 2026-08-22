@@ -124,7 +124,13 @@ jobs:
           path: dist/
 
       - name: Publish distributions
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+        # Must be the COMMIT sha, not the sha of an annotated tag object: this
+        # is a Docker action whose image is published to ghcr.io under the
+        # commit sha, so a tag-object sha checks out fine and then dies with
+        # `manifest unknown` when Docker pulls the image. Also keep it at a
+        # revision bundling twine >= 7.0.0 / packaging >= 26.2 — earlier
+        # versions reject the Metadata-Version 2.5 that hatchling now emits.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   github-release:
     name: Create GitHub Release
