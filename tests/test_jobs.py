@@ -466,6 +466,8 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
         while anyio.current_time() < deadline:
             last = await anyio.to_thread.run_sync(lambda: jobs.list_jobs(cwd))
             assert last["ok"] is True
+            if any(j["job_id"] == job_id and j["status"] == "done" for j in last["jobs"]):
+                return last
             await anyio.sleep(0.02)
         return last
 
