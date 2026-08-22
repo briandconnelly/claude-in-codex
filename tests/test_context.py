@@ -829,3 +829,52 @@ def test_classify_failure_does_not_echo_a_wedged_secret():
     message = classify_failure(run).message
     assert "AAAAAAAAAA" not in message
     assert "\x08" not in message
+
+
+def test_classify_failure_does_not_echo_a_wedged_secret_in_structured_result():
+    """End-to-end through the structured-envelope path (env['result']), not stderr.
+
+    The positive control (clean secret) proves the redactor is wired up on this
+    path at all, so a pass on the wedged case is not a broken instrument.
+    """
+    import json
+
+    from claude_in_codex.claude import ClaudeRun, classify_failure
+
+    secret = "sk-ant-api03-" + "A" * 40
+
+    clean_run = ClaudeRun(
+        stdout=json.dumps(
+            {"is_error": True, "subtype": "error", "result": f"failed using {secret}"}
+        ),
+        stderr="",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    clean_message = classify_failure(clean_run).message
+    assert secret not in clean_message
+
+    wedged_result = f"failed using {secret[:10]}{chr(8)}{secret[10:]}"
+    ansi_result = f"boom{chr(27)}[2J{chr(27)}[31m*** all clear ***"
+    wedged_run = ClaudeRun(
+        stdout=json.dumps({"is_error": True, "subtype": "error", "result": wedged_result}),
+        stderr="",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    ansi_run = ClaudeRun(
+        stdout=json.dumps({"is_error": True, "subtype": "error", "result": ansi_result}),
+        stderr="",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+
+    wedged_message = classify_failure(wedged_run).message
+    assert "AAAAAAAAAA" not in wedged_message
+    assert chr(8) not in wedged_message
+
+    ansi_message = classify_failure(ansi_run).message
+    assert chr(27) not in ansi_message
