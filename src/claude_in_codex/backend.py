@@ -143,16 +143,15 @@ class ClaudeBackend:
         return authenticated
 
     def scrub_env(self, env: dict[str, str], config_mode: str | None) -> dict[str, str]:
-        # Delegates to the production per-mode scrubber: inherit/scoped/safe strip
-        # ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN so a stale key cannot override the
-        # OAuth login; bare keeps them (it NEEDS the key). A None return means
-        # "inherit unchanged" in claude.py's vocabulary.
-        scrubbed = claude._claude_subprocess_env(config_mode)
-        if scrubbed is None:
-            return env
-        merged = {k: v for k, v in env.items() if k not in claude._LOGIN_CREDENTIAL_ENV_VARS}
-        merged.update(scrubbed)
-        return merged
+        # Scrub the env we were GIVEN. Login-backed modes (inherit/scoped/safe)
+        # must use Claude Code's OAuth/session path, so a stale
+        # ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN cannot be allowed to override
+        # it; bare mode NEEDS the key and keeps it. This mirrors
+        # claude._claude_subprocess_env's policy without adopting its return
+        # value, which is a full os.environ copy and would discard the argument.
+        if config_mode not in claude._LOGIN_MODES:
+            return dict(env)
+        return {k: v for k, v in env.items() if k not in claude._LOGIN_CREDENTIAL_ENV_VARS}
 
 
 # The adapter is stateless; every production path shares this instance.

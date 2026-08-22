@@ -8,6 +8,7 @@ two diverge, the adapter validates a protocol against behavior nobody runs.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from pontonier.backend.protocol import AgentBackend, RunOutcome, RunRequest
@@ -34,7 +35,6 @@ def _stable_flag_support(monkeypatch):
 @pytest.fixture
 def clean_env(monkeypatch):
     """Strip CLAUDE_IN_CODEX_* env so the adapter sees built-in defaults."""
-    import os
 
     for key in list(os.environ):
         if key.startswith("CLAUDE_IN_CODEX_"):
@@ -92,6 +92,37 @@ async def test_bare_mode_keeps_credentials(tmp_path, clean_env, monkeypatch):
     )
     async with BACKEND.prepare(request) as prepared:
         assert prepared.env.get("ANTHROPIC_API_KEY") == "needed-key"
+
+
+def test_scrub_env_scrubs_the_given_env_not_the_process_env(monkeypatch):
+    """The protocol method must transform its ARGUMENT.
+
+    The bare-mode case below is the positive control: it proves the method is
+    reached and returns something, so the login-mode assertions are not passing
+    against a no-op.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "from-process")
+    monkeypatch.setenv("PROCESS_ONLY", "leaked")
+    given = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "from-caller", "CALLER_ONLY": "kept"}
+
+    out = BACKEND.scrub_env(dict(given), "safe")
+    assert "ANTHROPIC_API_KEY" not in out
+    assert out["CALLER_ONLY"] == "kept"
+    assert "PROCESS_ONLY" not in out
+
+    bare = BACKEND.scrub_env(dict(given), "bare")
+    assert bare["ANTHROPIC_API_KEY"] == "from-caller"
+
+
+@pytest.mark.parametrize("mode", ["inherit", "scoped", "safe", "bare"])
+def test_scrub_env_matches_the_production_subprocess_env(mode, monkeypatch):
+    """scrub_env no longer CALLS _claude_subprocess_env, so pin that it agrees
+    with it for the input production actually passes: dict(os.environ)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "t")
+    production = claude._claude_subprocess_env(mode)
+    expected = dict(os.environ) if production is None else production
+    assert BACKEND.scrub_env(dict(os.environ), mode) == expected
 
 
 def test_validate_request_enforces_valid_efforts():
