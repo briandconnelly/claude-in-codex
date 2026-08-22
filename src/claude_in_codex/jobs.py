@@ -280,6 +280,17 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
 
 def _worker_factory(cmd: list[str], workspace: str, *, config_mode: str):
     def factory(jd: Path) -> list[str]:
+        # The executable is checked HERE rather than before the store call. The
+        # store invokes this factory only when it is about to spawn, so a keyed
+        # replay/conflict/in_progress outcome no longer depends on `claude`
+        # still being on PATH — recovery must not need a resource it never uses.
+        # The store creates jd before calling us and only cleans up around its
+        # own Popen, so drop the directory we were handed before re-raising.
+        try:
+            _check_executable(cmd, workspace)
+        except OSError:
+            shutil.rmtree(jd, ignore_errors=True)
+            raise
         return [
             sys.executable,
             "-m",
@@ -335,7 +346,6 @@ def start_job(
     """Spawn the claude command detached via the store and persist its record.
 
     Returns (job_id, started_at_iso)."""
-    _check_executable(cmd, cwd)
     with _JOBS_LOCK:
         return _store().start(
             _worker_factory(cmd, cwd, config_mode=cfg.config_mode),
@@ -377,7 +387,6 @@ def start_job_idempotent(
     Returns the store outcome dict: kind is one of created (with job_id and
     started_at), replay (with job_id), conflict, unavailable, in_progress, or
     io_error."""
-    _check_executable(cmd, cwd)
     with _JOBS_LOCK:
         return _store().start_idempotent(
             _worker_factory(cmd, cwd, config_mode=cfg.config_mode),

@@ -206,3 +206,30 @@ def test_alias_and_canonical_names_agree_on_kind():
     assert kind_for_tool("claude_dry_run") == kind_for_tool("claude_review_dry_run")
     assert kind_for_tool("claude_consult") == kind_for_tool("claude_ask")
     assert kind_for_tool("claude_review_changes") == "review_changes"
+
+
+@pytest.mark.parametrize("bad_usage", [[1, 2], "usage", 7, True])
+def test_finalize_tolerates_a_non_dict_usage_block(bad_usage):
+    """finalize() is the TOLERANT envelope read, so CLI drift must not raise.
+
+    normalize.normalize_envelope already guards this with isinstance(..., dict);
+    the adapter reads the same envelope one level down and needs the same guard.
+    A well-formed usage block is covered by
+    test_finalize_reads_the_stdout_envelope, which is the positive control that
+    this path parses usage at all.
+    """
+    request = RunRequest(kind="consult", prompt="q", cwd=".", timeout_seconds=10)
+    envelope = json.dumps({"result": "the answer", "usage": bad_usage})
+    result = BACKEND.finalize(_outcome(stdout=envelope), request)
+    assert result.answer == "the answer"
+    assert result.usage is None
+
+
+def test_finalize_keeps_cost_when_usage_is_malformed():
+    """A malformed usage block must not discard a cost the envelope did report."""
+    request = RunRequest(kind="consult", prompt="q", cwd=".", timeout_seconds=10)
+    envelope = json.dumps({"result": "a", "usage": [1, 2], "total_cost_usd": 0.07})
+    result = BACKEND.finalize(_outcome(stdout=envelope), request)
+    assert result.usage is not None
+    assert result.usage.cost_usd == 0.07
+    assert result.usage.input_tokens is None

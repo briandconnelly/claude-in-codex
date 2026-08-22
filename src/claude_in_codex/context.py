@@ -60,6 +60,24 @@ SECRET_PATH_RE = _redaction.SECRET_PATH_RE
 SECRET_VALUE_PATTERNS = _redaction.SECRET_VALUE_PATTERNS
 SecretRedactor = _redaction.StreamRedactor
 
+# Every Unicode Cc code point. `sanitize_echo_prose` applies the same strip before
+# redacting, but only to a whole finished string; the streaming stderr path needs
+# it per line, BEFORE the stateful line redactor sees the line, so a key block
+# spanning several lines still redacts. Mirrors the shared policy rather than
+# importing its private regex.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def strip_control_chars(line: str) -> str:
+    """Delete Cc code points from ONE line, before it is redacted.
+
+    A control character wedged into a credential splits it, so the redaction
+    patterns miss and the secret survives. Stripping first makes the run
+    contiguous again. Stripping AFTER redaction would be worse than useless: it
+    would reassemble a secret the redactor had already declined to mask.
+    """
+    return _CONTROL_CHARS_RE.sub("", line)
+
 
 @dataclass
 class ContextResult:

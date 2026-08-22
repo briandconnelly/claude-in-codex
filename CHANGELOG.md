@@ -7,6 +7,31 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Persisted job stderr is sanitized before it reaches disk. The worker redacted
+  each streamed line but did not strip Unicode `Cc` code points first, so a
+  credential split by one defeated the patterns and sat in `claude-stderr.log`
+  in plaintext while the record's own `stderr_sanitized` said it was clean. The
+  agent-visible surface was already safe — `_stderr_tail` sanitizes at read
+  time — but the record was not. The strip is per line and runs before
+  redaction, so the stateful multi-line private-key pass still masks key blocks.
+- A keyed launch resolves the idempotency index before it checks that `claude`
+  is executable. The check ran first, so if the CLI left PATH between a launch
+  and its retry (an MCP restart with a different environment, an upgrade in
+  flight), the retry reported `claude_not_found` instead of replaying the
+  running job — recovery failing on a resource replay never uses. Creating a
+  job still fails fast, and no longer leaves a job record behind when it does.
+- The `idempotency_key` description matches what the key now does. It still told
+  agents that the key alone determines the match and that changed arguments
+  replay the old job — the 0.7 behavior — while the store returns
+  `idempotency_conflict`. Since `tools/list` publishes that text, agents were
+  being guided into the error. It now documents `(key, effective arguments)`
+  matching and names the conflict and coordination codes. Amends the unreleased
+  `claude-in-codex/0.1/schema-36`: the contract digest moves, and the published
+  `FINGERPRINT` string is unchanged.
+- `ClaudeBackend.finalize` tolerates a non-object `usage` block instead of
+  raising `AttributeError`. It is the deliberately tolerant envelope read, and
+  `normalize.normalize_envelope` already guarded the same field one level up. A
+  cost the envelope reported survives a malformed `usage` alongside it.
 - `meta.permission_denials` gets the same control-character stripping the
   `claude_permission_error` message got. The message was sanitized with
   `sanitize_echo_prose` while the tree published to metadata was only passed

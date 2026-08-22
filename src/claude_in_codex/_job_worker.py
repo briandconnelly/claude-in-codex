@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_in_codex.backend import BACKEND
-from claude_in_codex.context import SecretRedactor
+from claude_in_codex.context import SecretRedactor, strip_control_chars
 
 try:
     fcntl: Any = importlib.import_module("fcntl")
@@ -62,6 +62,14 @@ def _lock_worker(path: Path):
 
 
 def _write_redacted_stderr(stream, path: Path) -> None:
+    """Redact `claude`'s stderr line by line as it streams, and persist it.
+
+    Each decoded line has its Cc code points stripped BEFORE redaction: a
+    control character wedged into a credential splits it, the patterns miss,
+    and the secret would land in the record in plaintext while the record's own
+    `stderr_sanitized` said otherwise. The redactor stays stateful across lines
+    so a multi-line private-key block is still masked.
+    """
     redactor = SecretRedactor()
     pending = bytearray()
     overlong = False
@@ -78,7 +86,7 @@ def _write_redacted_stderr(stream, path: Path) -> None:
                     if overlong:
                         output.write(f"{_TRUNCATED_LINE}\n")
                     else:
-                        line = pending.decode("utf-8", errors="replace")
+                        line = strip_control_chars(pending.decode("utf-8", errors="replace"))
                         output.write(f"{redactor.redact_line(line)[0]}\n")
                     pending.clear()
                     overlong = False
@@ -94,7 +102,7 @@ def _write_redacted_stderr(stream, path: Path) -> None:
         if overlong:
             output.write(_TRUNCATED_LINE)
         elif pending:
-            line = pending.decode("utf-8", errors="replace")
+            line = strip_control_chars(pending.decode("utf-8", errors="replace"))
             output.write(redactor.redact_line(line)[0])
 
 

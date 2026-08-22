@@ -1169,3 +1169,84 @@ def test_worker_factory_threads_the_config_mode(tmp_path):
     cmd = jobs._worker_factory(["claude", "-p"], str(tmp_path), config_mode="scoped")(tmp_path)
     assert "--config-mode" in cmd
     assert cmd[cmd.index("--config-mode") + 1] == "scoped"
+
+
+def test_worker_stderr_on_disk_strips_a_wedged_control_character(tmp_path):
+    """The persisted stderr log must not hold a plaintext credential.
+
+    `_stderr_tail` sanitizes at READ time, so the agent-visible surface was
+    already safe. The record itself was not: `meta.stderr_sanitized` is True,
+    so the on-disk file has to actually be sanitized. A Cc code point wedged
+    into a secret splits it and the redaction patterns miss, so the strip has
+    to happen before redaction, per line, while the stateful key-block pass is
+    preserved.
+
+    The plain secret is the positive control: it proves this path redacts at
+    all, so a pass on the wedged run is not a broken instrument.
+    """
+    secret = "sk-ant-api03-" + "A" * 40
+
+    plain_path = tmp_path / "plain.log"
+    _job_worker._write_redacted_stderr(io.BytesIO(f"failed using {secret}\n".encode()), plain_path)
+    assert secret not in plain_path.read_text()
+
+    wedged_path = tmp_path / "wedged.log"
+    _job_worker._write_redacted_stderr(
+        io.BytesIO(f"failed using {secret[:10]}{chr(8)}{secret[10:]}\n".encode()), wedged_path
+    )
+    on_disk = wedged_path.read_text()
+    assert "AAAAAAAAAA" not in on_disk
+    assert chr(8) not in on_disk
+
+
+def test_worker_stderr_still_redacts_a_key_block_across_lines(tmp_path):
+    """The Cc strip must not break the stateful multi-line key-block pass."""
+    body = "MIIEowIBAAKCAQEA" + "B" * 40
+    stream = io.BytesIO(
+        (f"-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----\n").encode()
+    )
+    path = tmp_path / "key.log"
+    _job_worker._write_redacted_stderr(stream, path)
+    assert body not in path.read_text()
+
+
+def test_keyed_replay_survives_the_executable_disappearing(tmp_path, monkeypatch):
+    """Recovery must not depend on a resource replay never uses.
+
+    A keyed retry after a dropped connection is the case idempotency_key exists
+    for. If `claude` is gone from PATH by then (an MCP restart with a different
+    environment, an upgrade in flight), the caller should still recover the
+    running job — replay spawns nothing, so it needs no executable. Checking the
+    command before the index is consulted turned that recovery into
+    claude_not_found.
+    """
+    script = tmp_path / "fake-claude"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    cmd = [str(script)]
+    cwd = str(tmp_path)
+
+    first = jobs.start_job_idempotent(cmd, cwd, _cfg(), None, key="vanish-key")
+    assert first["kind"] == "created"
+
+    # The executable disappears between the launch and the retry.
+    script.unlink()
+
+    replay = jobs.start_job_idempotent(cmd, cwd, _cfg(), None, key="vanish-key")
+    assert replay["kind"] == "replay"
+    assert replay["job_id"] == first["job_id"]
+
+    jobs.cancel(cwd, first["job_id"])
+
+
+def test_keyed_create_still_reports_a_missing_executable(tmp_path):
+    """The positive control for the test above: on the CREATE path the missing
+    executable must still fail fast, and must not leave a job record behind."""
+    cwd = str(tmp_path)
+    missing = [str(tmp_path / "not-here")]
+    before = jobs.list_jobs(cwd)
+
+    with pytest.raises(FileNotFoundError):
+        jobs.start_job_idempotent(missing, cwd, _cfg(), None, key="missing-key")
+
+    assert jobs.list_jobs(cwd) == before

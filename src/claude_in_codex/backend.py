@@ -102,7 +102,12 @@ class ClaudeBackend:
         structured = (
             normalize.extract_json(answer) if request.schema is not None and answer else None
         )
-        usage_blob = envelope.get("usage") or {}
+        # CLI drift can put anything here. This is the TOLERANT read, so a
+        # non-object usage block is ignored rather than raised on — the same
+        # guard normalize.normalize_envelope applies one level up. A reported
+        # cost still survives a malformed usage block.
+        raw_usage = envelope.get("usage")
+        usage_blob = raw_usage if isinstance(raw_usage, dict) else {}
         cost = envelope.get("total_cost_usd")
         usage = None
         if usage_blob or cost is not None:

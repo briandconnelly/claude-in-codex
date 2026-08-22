@@ -1629,13 +1629,16 @@ async def claude_review_changes_async(
         str | None,
         Field(
             description="Optional client-chosen key making launch retry-safe "
-            "(atomic per workspace via an on-disk reservation): if a "
-            "job with this key already exists in this workspace (within the job "
-            "TTL), its status is returned instead of starting a duplicate paid "
-            "job. After a dropped connection, retry with the same key or check "
-            "claude_job_list before re-launching. The key alone determines the "
-            "match; do not reuse a key with different arguments — the existing "
-            "job's status is returned unchanged."
+            "(atomic per workspace via an on-disk reservation): a job matching "
+            "this key AND the same effective arguments (within the job TTL) has "
+            "its status returned instead of starting a duplicate paid job. "
+            "After a dropped connection, retry with the SAME arguments, or "
+            "check claude_job_list before re-launching. Reusing the key with "
+            "different arguments is idempotency_conflict, not a replay; two "
+            "further codes report coordination states you retry through — "
+            "idempotency_in_progress (a concurrent launch is still being "
+            "coordinated) and idempotency_result_unavailable (the prior run "
+            "completed but its result is gone)."
         ),
     ] = None,
     ctx: Context | None = None,

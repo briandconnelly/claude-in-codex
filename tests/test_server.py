@@ -12,6 +12,7 @@ from tests.conftest import structured
 
 from claude_in_codex import __version__
 from claude_in_codex import claude as claude_mod
+from claude_in_codex import jobs as jobs_mod
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
@@ -3292,3 +3293,74 @@ async def test_deprecated_aliases_return_identical_envelopes(fake_claude):
     assert tools["claude_ask"].outputSchema == tools["claude_consult"].outputSchema
     assert tools["claude_review_dry_run"].inputSchema == tools["claude_dry_run"].inputSchema
     assert tools["claude_review_dry_run"].outputSchema == tools["claude_dry_run"].outputSchema
+
+
+@pytest.mark.parametrize(
+    ("outcome_kind", "expected_code", "expected_retryable"),
+    [
+        ("unavailable", "idempotency_result_unavailable", False),
+        ("in_progress", "idempotency_in_progress", True),
+        ("io_error", "idempotency_in_progress", True),
+    ],
+)
+async def test_async_idempotency_coordination_outcomes_map_to_published_codes(
+    git_repo, monkeypatch, outcome_kind, expected_code, expected_retryable
+):
+    """The store's non-create, non-replay, non-conflict outcomes are agent-facing.
+
+    `unavailable`, `in_progress`, and `io_error` each reach the caller as a
+    published error code with a repair, and only the coordination states are
+    retryable. Nothing else exercised these branches, so a remapping could
+    change the wire silently. `io_error` deliberately shares the
+    in_progress code: both are transient coordination failures the caller
+    retries through.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(jobs_mod, "start_job_idempotent", lambda *a, **k: {"kind": outcome_kind})
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": f"coord-{outcome_kind}",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == expected_code
+    assert out["error"]["retryable"] is expected_retryable
+    assert out["error"]["repair"]
+    assert out["error"]["details"]["field"] == "idempotency_key"
+
+
+async def test_async_idempotency_replay_without_a_record_is_an_internal_error(
+    git_repo, monkeypatch
+):
+    """A published replay whose job record is gone must not be reported as a
+    successful launch. This branch had no coverage either."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(
+        jobs_mod,
+        "start_job_idempotent",
+        lambda *a, **k: {"kind": "replay", "job_id": "0" * 32},
+    )
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "replay-no-record",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "internal_error"
+    assert out["error"]["retryable"] is True
