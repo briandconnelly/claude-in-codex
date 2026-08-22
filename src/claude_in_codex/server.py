@@ -1593,7 +1593,17 @@ async def _legacy_keyed_job(cwd: str, idempotency_key: str | None) -> str | None
     """
     if not idempotency_key:
         return None
-    return await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
+    held = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
+    if held is None:
+        return None
+    # Refresh before refusing. The store reaps TTL-expired records LAZILY, on a
+    # store call, and this check returns before start_job_idempotent would make
+    # one — so without this, an expired record blocks its key forever and the
+    # 24h window never closes. jobs.status() is that store call; None means the
+    # record was reaped, and the key is free to launch again.
+    if await run_sync(lambda: jobs.status(cwd, held)) is None:
+        return None
+    return held
 
 
 @mcp.tool(
@@ -2898,8 +2908,9 @@ def _capabilities_payload() -> dict:
                 "claude_review_dry_run",
                 "free",
                 "[DEPRECATED alias of claude_dry_run; removal planned for 0.9.0.] "
-                "Identical schema and envelope.",
-                "same as claude_dry_run",
+                "Identical schema; the envelope's `tool` field echoes the name "
+                "you called.",
+                "same as claude_dry_run, except `tool`",
                 required=["scope"],
                 optional=["base", "head", "paths", "config_mode", "workspace_root"],
             ),

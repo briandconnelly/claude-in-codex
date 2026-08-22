@@ -7,6 +7,22 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- An expired legacy record stops blocking its idempotency key. Refusing an
+  unverifiable 0.7 key is only defensible because the window closes, but the
+  store reaps TTL-expired records lazily, on a store call, and the legacy check
+  returns before `start_job_idempotent` would make one. Resolving the marker
+  without refreshing the record left an expired job blocking its key
+  indefinitely — a permanent refusal wearing the 24h window's justification.
+  The check now refreshes the referenced job first, and a reaped record frees
+  the key. (The replaced replay path got this for free by calling
+  `jobs.status`; the fail-closed rewrite dropped it.)
+- The `claude_review_dry_run` capability entry and the migration changelog entry
+  no longer claim the deprecated aliases have identical envelopes without
+  qualification. A dry-run envelope echoes the invoked name in `tool`, which is
+  deliberate and documented above; `claude_ask` genuinely is envelope-identical
+  to `claude_consult`. Amends the unreleased `claude-in-codex/0.1/schema-36`:
+  the contract digest moves, and the published `FINGERPRINT` string is
+  unchanged.
 - A keyed launch whose idempotency index could not be read or written reports
   `internal_error`, not `idempotency_in_progress`. The store's `io_error`
   outcome shared the in-progress branch, so the caller was told a concurrent
@@ -177,7 +193,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `claude_ask` is renamed `claude_consult` and `claude_review_dry_run` is
   renamed `claude_dry_run`, matching the verb set shared across the agent
   bridges. The old names remain registered as deprecated aliases — identical
-  parameters, schemas, and envelopes, with the deprecation surfaced in tool
+  parameters and schemas — and identical envelopes too, except that a dry-run
+  envelope echoes the invoked name in `tool` (see the entry above) — with the
+  deprecation surfaced in tool
   descriptions and `claude_capabilities` — and are planned for removal in
   0.9.0. The `tools/list` discovery budget is temporarily raised for the
   duplicated alias schemas and reverts with the removal.

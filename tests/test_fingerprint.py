@@ -25,7 +25,7 @@ from fastmcp import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "e57e7dfbe2598addd13dc46e2e01097a7d00bcdc1fe34e33021eff5970404418"
+EXPECTED_CONTRACT_DIGEST = "a0585f69c98bb7232e54cd00547ad8a23ef6b2972475819db6288cd03b478e2e"
 
 
 async def _contract_surface() -> dict:

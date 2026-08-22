@@ -3451,3 +3451,62 @@ async def test_a_key_with_no_legacy_marker_still_launches(git_repo, monkeypatch)
             "claude_job_cancel",
             {"job_id": out["job_id"], "workspace_root": str(git_repo)},
         )
+
+
+async def test_an_expired_legacy_marker_stops_blocking_the_key(git_repo, monkeypatch):
+    """The 24h compatibility window has to actually close.
+
+    The refusal is only defensible because it expires: markers are never
+    written and terminal records are reaped at the TTL. But the store reaps
+    LAZILY, on a store call, and the legacy check is a fast return that happens
+    before `start_job_idempotent` would trigger one. Resolving the marker
+    without refreshing the record left an expired job blocking its key forever
+    — a permanent refusal wearing a temporary one's justification.
+
+    The live-record refusal
+    (test_legacy_idempotency_marker_fails_closed_instead_of_replaying) is the
+    positive control: it proves this path refuses at all, so a launch here is
+    not a broken check passing everything through.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+
+    cwd = str(git_repo)
+    cfg = jobs_mod.JobConfig(
+        kind="claude_review_changes",
+        config_mode="inherit",
+        access="toolless",
+        scope="working_tree",
+        base="main",
+        head=None,
+        detail="summary",
+        timeout_seconds=1800,
+        workspace_source="cwd",
+        context_summary=None,
+    )
+    job_id, _ = jobs_mod.start_job(["sh", "-c", "exit 0"], cwd, cfg)
+    for _ in range(50):
+        if jobs_mod.status(cwd, job_id)["status"] != "running":
+            break
+        time.sleep(0.05)
+    marker = jobs_mod._reservation_path(cwd, "expired-key")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"job_id": job_id, "created_epoch": time.time()}))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")  # every terminal record is expired
+
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": cwd,
+                    "idempotency_key": "expired-key",
+                },
+                raise_on_error=False,
+            )
+        )
+        assert out["ok"] is True, out
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": out["job_id"], "workspace_root": cwd}
+        )
