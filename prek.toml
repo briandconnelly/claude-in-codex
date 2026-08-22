@@ -19,8 +19,9 @@ hooks = [
   { id = "check-yaml" },
   { id = "check-toml" },
   { id = "check-json" },
-  # test_context.py carries a fake private-key fixture to test diff redaction.
-  { id = "detect-private-key", exclude = '^tests/test_context\.py$' },
+  # test_context.py and test_jobs.py carry fake private-key fixtures to test
+  # diff/output redaction.
+  { id = "detect-private-key", exclude = '^tests/test_(context|jobs)\.py$' },
 ]
 
 # --------------------------------------------------------------------------

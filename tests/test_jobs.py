@@ -432,9 +432,15 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_emit_after_cmd(), cwd, _cfg())
 
+    # Polls race the job's completion against the outer anyio.fail_after(2)
+    # deadline below, not a fixed iteration count: a count tuned for a quiet
+    # machine (e.g. 20 * 0.02s = 0.4s) can undershoot the job's actual
+    # completion time under CI load and fail before the real timeout fires.
+    deadline = anyio.current_time() + 1.8
+
     async def poll_status():
         seen = []
-        for _ in range(20):
+        while anyio.current_time() < deadline:
             st = await anyio.to_thread.run_sync(lambda: jobs.status(cwd, job_id))
             if st:
                 seen.append(st["status"])
@@ -445,7 +451,7 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
 
     async def poll_result():
         last = None
-        for _ in range(20):
+        while anyio.current_time() < deadline:
             payload, found = await anyio.to_thread.run_sync(lambda: jobs.result(cwd, job_id))
             assert found is True
             last = payload
@@ -457,7 +463,7 @@ async def test_concurrent_lifecycle_calls_do_not_hang(tmp_path):
 
     async def poll_list():
         last = None
-        for _ in range(20):
+        while anyio.current_time() < deadline:
             last = await anyio.to_thread.run_sync(lambda: jobs.list_jobs(cwd))
             assert last["ok"] is True
             await anyio.sleep(0.02)
