@@ -5,7 +5,7 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
-## Unreleased
+## 0.8.0 - 2026-08-22
 
 - An expired legacy record stops blocking its idempotency key. Refusing an
   unverifiable 0.7 key is only defensible because the window closes, but the
