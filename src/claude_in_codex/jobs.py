@@ -413,7 +413,10 @@ def start_job_idempotent(
 
 # ------------------------------------------------------- legacy keyed launches
 # 0.7 keyed launches published idem-<sha16>.json markers in the workspace dir.
-# They are still read (replay) and reaped (staleness), but never written.
+# They are still read and reaped (staleness), but never written — and reading one
+# no longer replays it. A 0.7 marker carries no argument digest, so it cannot
+# prove a retry matches the job it names; the server detects it and refuses with
+# idempotency_conflict. See server._legacy_keyed_job.
 
 
 def _reservation_path(cwd: str, key: str) -> Path:

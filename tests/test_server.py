@@ -3275,9 +3275,16 @@ async def test_initialize_reports_application_version_and_name():
     assert instructions == CAPABILITY_SUMMARY
 
 
-async def test_deprecated_aliases_return_identical_envelopes(fake_claude):
-    """claude_ask and claude_review_dry_run are pure aliases: same arguments in,
-    same envelope out as their primaries. Removal planned for 0.9.0."""
+async def test_deprecated_aliases_match_their_primaries(fake_claude):
+    """Both deprecated aliases take the same arguments and publish the same
+    schemas as their primaries. Removal planned for 0.9.0.
+
+    The envelope claim holds for claude_ask only, and that is deliberate: a
+    dry-run envelope echoes the NAME the caller invoked, so claude_review_dry_run
+    and claude_dry_run differ in exactly that one field. This test asserts full
+    envelope equality for the consult pair and schema equality for both pairs;
+    test_dry_run_envelopes_echo_the_invoked_name owns the difference.
+    """
     async with Client(mcp) as client:
         primary = structured(await client.call_tool("claude_consult", {"prompt": "is this safe?"}))
         alias = structured(await client.call_tool("claude_ask", {"prompt": "is this safe?"}))
@@ -3300,7 +3307,10 @@ async def test_deprecated_aliases_return_identical_envelopes(fake_claude):
     [
         ("unavailable", "idempotency_result_unavailable", False),
         ("in_progress", "idempotency_in_progress", True),
-        ("io_error", "idempotency_in_progress", True),
+        # NOT idempotency_in_progress: an I/O failure in the index does not
+        # establish that any concurrent launch exists, so telling the caller a
+        # winner will be replayed would be a fabricated cause.
+        ("io_error", "internal_error", True),
     ],
 )
 async def test_async_idempotency_coordination_outcomes_map_to_published_codes(
@@ -3309,11 +3319,13 @@ async def test_async_idempotency_coordination_outcomes_map_to_published_codes(
     """The store's non-create, non-replay, non-conflict outcomes are agent-facing.
 
     `unavailable`, `in_progress`, and `io_error` each reach the caller as a
-    published error code with a repair, and only the coordination states are
+    published error code with a repair, and only the recoverable ones are
     retryable. Nothing else exercised these branches, so a remapping could
-    change the wire silently. `io_error` deliberately shares the
-    in_progress code: both are transient coordination failures the caller
-    retries through.
+    change the wire silently.
+
+    `io_error` maps to internal_error rather than idempotency_in_progress: the
+    index failed to read or write, which says nothing about a concurrent
+    launch, so reporting one would state a cause that was never established.
     """
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
     monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))

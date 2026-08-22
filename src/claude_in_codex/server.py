@@ -1645,11 +1645,11 @@ async def claude_review_changes_async(
             "its status returned instead of starting a duplicate paid job. "
             "After a dropped connection, retry with the SAME arguments, or "
             "check claude_job_list before re-launching. Reusing the key with "
-            "different arguments is idempotency_conflict, not a replay; two "
-            "further codes report coordination states you retry through — "
-            "idempotency_in_progress (a concurrent launch is still being "
-            "coordinated) and idempotency_result_unavailable (the prior run "
-            "completed but its result is gone)."
+            "different arguments is idempotency_conflict, not a replay. "
+            "idempotency_in_progress means a concurrent launch is still being "
+            "coordinated: retry the SAME call. idempotency_result_unavailable "
+            "means the prior run completed but its result is gone: retrying the "
+            "same call cannot help, so launch again with a NEW key."
         ),
     ] = None,
     ctx: Context | None = None,
@@ -1863,13 +1863,31 @@ async def claude_review_changes_async(
                         offending="idempotency_key",
                     )
                 )
-            else:  # in_progress | io_error — both are retryable coordination states
+            elif outcome_kind == "in_progress":
                 return _result(
                     _err(
                         "idempotency_in_progress",
                         "A concurrent launch for this idempotency_key is still being coordinated.",
                         "Retry the same call after a short delay; the winner's job will "
                         "be replayed.",
+                        meta,
+                        offending="idempotency_key",
+                        retryable=True,
+                    )
+                )
+            else:  # io_error, and any outcome a future store adds
+                # NOT idempotency_in_progress: the index failed to read or write,
+                # which establishes nothing about a concurrent launch. Promising
+                # that "the winner's job will be replayed" would invent a cause
+                # and can loop a caller against a persistently unwritable state
+                # directory.
+                return _result(
+                    _err(
+                        "internal_error",
+                        "The keyed launch could not be coordinated: the idempotency index "
+                        "could not be read or written.",
+                        "Retry the same call; if it persists, check that the job state "
+                        "directory (CLAUDE_IN_CODEX_STATE_DIR) exists and is writable.",
                         meta,
                         offending="idempotency_key",
                         retryable=True,

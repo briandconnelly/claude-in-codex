@@ -7,6 +7,22 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- A keyed launch whose idempotency index could not be read or written reports
+  `internal_error`, not `idempotency_in_progress`. The store's `io_error`
+  outcome shared the in-progress branch, so the caller was told a concurrent
+  launch was being coordinated and that "the winner's job will be replayed" —
+  a cause the failure never established, and one that loops a caller against a
+  persistently unwritable state directory. The repair now points at the state
+  directory instead. `idempotency_in_progress` keeps its retry-the-same-call
+  meaning. No schema change: `internal_error` was already published for this
+  tool.
+- The `idempotency_key` description separates the two recovery paths it had
+  grouped as "coordination states you retry through":
+  `idempotency_in_progress` is retried with the SAME call, while
+  `idempotency_result_unavailable` is non-retryable and needs a NEW key.
+  An agent following the old wording could retry the same call forever. Amends
+  the unreleased `claude-in-codex/0.1/schema-36`: the contract digest moves, and
+  the published `FINGERPRINT` string is unchanged.
 - A legacy 0.7 keyed launch is refused rather than replayed unverified. 0.7
   deduped on the key alone, so its `idem-*.json` markers carry no argument
   digest and cannot prove that a retry matches the job the marker names.
@@ -149,8 +165,8 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   cancellation — are pontonier's, while the wire shapes, envelope synthesis,
   prompt-off-disk streaming, and sanitized stderr remain this server's. Legacy
   0.7 records stay readable, cancellable, and TTL-reaped in place (same store
-  layout lineage), and legacy `idem-*.json` markers are still replayed and
-  reaped, but no longer written. Keyed launches go through the store's
+  layout lineage), and legacy `idem-*.json` markers are still read and
+  reaped, but no longer written or replayed (see the fail-closed entry above). Keyed launches go through the store's
   idempotency index, which dedupes on (key, effective arguments): identical
   retries replay the existing job; the same key with different arguments is
   now an `idempotency_conflict` instead of 0.7's key-only silent replay, and

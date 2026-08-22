@@ -818,9 +818,16 @@ def test_job_running_result_error_carries_repair_call(tmp_path, monkeypatch):
     jobs.cancel(str(tmp_path), job_id)
 
 
-def test_find_by_idempotency_key_replays_legacy_marker(tmp_path, monkeypatch):
-    """0.7 keyed launches published idem-*.json markers; 0.8 still replays them
-    (read-only) while new keyed launches go through the store index."""
+def test_find_by_idempotency_key_resolves_a_legacy_marker(tmp_path, monkeypatch):
+    """0.7 keyed launches published idem-*.json markers; this lookup still
+    RESOLVES them (read-only) while new keyed launches go through the store index.
+
+    Resolving is not replaying. The only production caller refuses the key with
+    idempotency_conflict, because a 0.7 marker carries no argument digest — see
+    test_legacy_idempotency_marker_fails_closed_instead_of_replaying in
+    tests/test_server.py. This test covers the lookup itself, which the refusal
+    depends on to identify the job it points the caller at.
+    """
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     cwd = str(tmp_path)
     job_id, _ = jobs.start_job(_sleep_cmd(), cwd, _cfg())
