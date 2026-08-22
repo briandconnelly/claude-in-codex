@@ -25,12 +25,12 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 
 ## Choosing the tool
 
-- `claude_ask` — a free-form second opinion or recommendation.
+- `claude_consult` — a free-form second opinion or recommendation. (`claude_ask` remains as a deprecated alias until 0.9.0.)
 - `claude_review_changes` — Claude reviews your git diff (`scope` = working_tree | staged | branch).
 - `claude_review_changes_async` — same review as a background job for large diffs or when you want to keep working; returns a `job_id`. Poll `claude_job_status`, then `claude_job_result` (same envelope as the sync tool). Use `claude_job_consume_result` only when you want to fetch and delete the stored record; use `claude_job_cancel` to stop it.
 - `claude_adversarial_review` — Claude attacks a plan/claim and lists the strongest counterarguments.
 - `claude_status` — free readiness check: reports whether `claude` is installed, authenticated (`claude_authenticated`), version-compatible (`version_supported`), and overall `ready`, plus the resolved defaults a no-arg call would use. Run it first if a call fails, or to confirm readiness before spending.
-- `claude_review_dry_run` — free preview of what a diff review would send: resolved workspace, diff byte size, whether it would be truncated, and which paths would be redacted. No paid call. Run it before a large review to confirm scope and workspace.
+- `claude_dry_run` — free preview of what a diff review would send: resolved workspace, diff byte size, whether it would be truncated, and which paths would be redacted. No paid call. Run it before a large review to confirm scope and workspace. (`claude_review_dry_run` remains as a deprecated alias until 0.9.0.)
 - `claude_job_list` — free list of this workspace's background jobs (id, status, cost), newest first. Use it to recover a `job_id` lost across context compaction or interruption.
 - `claude_capabilities` — free capability contract: tool inventory, compact per-tool routing metadata, scope, prerequisites, and the fingerprint to pin.
 

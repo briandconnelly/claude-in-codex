@@ -7,6 +7,214 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- An expired legacy record stops blocking its idempotency key. Refusing an
+  unverifiable 0.7 key is only defensible because the window closes, but the
+  store reaps TTL-expired records lazily, on a store call, and the legacy check
+  returns before `start_job_idempotent` would make one. Resolving the marker
+  without refreshing the record left an expired job blocking its key
+  indefinitely — a permanent refusal wearing the 24h window's justification.
+  The check now refreshes the referenced job first, and a reaped record frees
+  the key. (The replaced replay path got this for free by calling
+  `jobs.status`; the fail-closed rewrite dropped it.)
+- The `claude_review_dry_run` capability entry and the migration changelog entry
+  no longer claim the deprecated aliases have identical envelopes without
+  qualification. A dry-run envelope echoes the invoked name in `tool`, which is
+  deliberate and documented above; `claude_ask` genuinely is envelope-identical
+  to `claude_consult`. Amends the unreleased `claude-in-codex/0.1/schema-36`:
+  the contract digest moves, and the published `FINGERPRINT` string is
+  unchanged.
+- A keyed launch whose idempotency index could not be read or written reports
+  `internal_error`, not `idempotency_in_progress`. The store's `io_error`
+  outcome shared the in-progress branch, so the caller was told a concurrent
+  launch was being coordinated and that "the winner's job will be replayed" —
+  a cause the failure never established, and one that loops a caller against a
+  persistently unwritable state directory. The repair now points at the state
+  directory instead. `idempotency_in_progress` keeps its retry-the-same-call
+  meaning. No schema change: `internal_error` was already published for this
+  tool.
+- The `idempotency_key` description separates the two recovery paths it had
+  grouped as "coordination states you retry through":
+  `idempotency_in_progress` is retried with the SAME call, while
+  `idempotency_result_unavailable` is non-retryable and needs a NEW key.
+  An agent following the old wording could retry the same call forever. Amends
+  the unreleased `claude-in-codex/0.1/schema-36`: the contract digest moves, and
+  the published `FINGERPRINT` string is unchanged.
+- A legacy 0.7 keyed launch is refused rather than replayed unverified. 0.7
+  deduped on the key alone, so its `idem-*.json` markers carry no argument
+  digest and cannot prove that a retry matches the job the marker names.
+  Replaying one contradicted the `(key, effective arguments)` guarantee this
+  release publishes: a caller who changed scope, paths, model, effort, or focus
+  would silently receive the earlier job's answer, and pay for a review of
+  something else. The key now returns `idempotency_conflict` carrying a
+  `claude_job_status` repair action for the job the marker names, so the
+  existing run stays readable without a second paid launch. Markers are still
+  read and reaped but never written, and the record TTL is 24h, so this window
+  closes on its own after an upgrade from 0.7. No schema change: the code was
+  already published for this tool.
+- A paid answer is no longer stranded when the worker is killed between writing
+  its result and publishing it. The worker publishes atomically (tmp + rename
+  after the child exits), so a worker killed inside the terminate grace window
+  leaves a COMPLETE envelope under `result.json.tmp`. The record stayed
+  `cancelled`/`timeout` with `result_available: false`, while `cost_usd`
+  recovered the spend from that very file — the caller was billed for an answer
+  the API would not hand back. A terminal record whose envelope exists ONLY
+  under the unpublished name is now promoted to `done` across
+  `claude_job_status`, `claude_job_list`, and `claude_job_result`. The JSON
+  parse remains the gate, so a torn write is never promoted, and a record
+  carrying a published `result.json` keeps the terminal status the store chose
+  for it deliberately. Restores 0.7's "a complete envelope wins races" for the
+  one case atomic publishing introduced.
+- `ClaudeBackend.finalize` coerces a non-string `result` instead of raising. CLI
+  drift putting an object, list, or number there reached `extract_json`'s string
+  methods when a schema was set, and otherwise escaped into `ExecResult.answer`,
+  which is declared `str`.
+- Persisted job stderr is sanitized before it reaches disk. The worker redacted
+  each streamed line but did not strip Unicode `Cc` code points first, so a
+  credential split by one defeated the patterns and sat in `claude-stderr.log`
+  in plaintext while the record's own `stderr_sanitized` said it was clean. The
+  agent-visible surface was already safe — `_stderr_tail` sanitizes at read
+  time — but the record was not. The strip is per line and runs before
+  redaction, so the stateful multi-line private-key pass still masks key blocks.
+- A keyed launch resolves the idempotency index before it checks that `claude`
+  is executable. The check ran first, so if the CLI left PATH between a launch
+  and its retry (an MCP restart with a different environment, an upgrade in
+  flight), the retry reported `claude_not_found` instead of replaying the
+  running job — recovery failing on a resource replay never uses. Creating a
+  job still fails fast, and no longer leaves a job record behind when it does.
+- The `idempotency_key` description matches what the key now does. It still told
+  agents that the key alone determines the match and that changed arguments
+  replay the old job — the 0.7 behavior — while the store returns
+  `idempotency_conflict`. Since `tools/list` publishes that text, agents were
+  being guided into the error. It now documents `(key, effective arguments)`
+  matching and names the conflict and coordination codes. Amends the unreleased
+  `claude-in-codex/0.1/schema-36`: the contract digest moves, and the published
+  `FINGERPRINT` string is unchanged.
+- `ClaudeBackend.finalize` tolerates a non-object `usage` block instead of
+  raising `AttributeError`. It is the deliberately tolerant envelope read, and
+  `normalize.normalize_envelope` already guarded the same field one level up. A
+  cost the envelope reported survives a malformed `usage` alongside it.
+- `meta.permission_denials` gets the same control-character stripping the
+  `claude_permission_error` message got. The message was sanitized with
+  `sanitize_echo_prose` while the tree published to metadata was only passed
+  through `redact_tree`, so a credential split by a Unicode `Cc` code point
+  defeated the patterns and rode out of the agent-visible envelope essentially
+  whole — along with the raw control character. One sanitized tree now serves
+  both destinations. Reaches the branch where Claude returns usable output AND
+  denied tools; the no-output branch returns an error envelope and never
+  populated metadata. No schema change.
+- The job worker requires an explicit `--config-mode`. It was optional on the
+  theory that an older build's argv had to stay launchable, which is not a real
+  case: the store spawns each worker once from argv the same process just built
+  and never persists or re-execs a command. Optional meant a missing flag would
+  silently fall back to inheriting the environment unchanged — the failure-open
+  direction on a credential policy.
+- Detached jobs get the same credential environment as synchronous ones. The
+  shared job store has no environment channel, so the worker inherited the
+  server's environment and passed it to `claude` unchanged: a stale
+  `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in the server process could
+  override Claude Code's OAuth/session path on an async run under
+  `config_mode=inherit`/`scoped`/`safe`, which is exactly what those modes exist
+  to prevent — and what the synchronous path already prevented. The job worker
+  now applies `ClaudeBackend.scrub_env` for the launching config mode. `bare`
+  still keeps the direct credentials it authenticates with. No schema change.
+- Detached jobs run `claude` in the workspace again. The shared job store spawns
+  the worker with `cwd=<job record dir>` by design, and the worker did not put
+  the child back in the workspace, so `config_mode=inherit`/`scoped` stopped
+  loading the workspace `CLAUDE.md` and `.claude/settings*.json`, and
+  `access=readonly` relative reads resolved inside the cache directory. The
+  synchronous tools were never affected, so the two paths had diverged silently.
+- Foreign text echoed into an agent-visible error is sanitized with pontonier
+  0.6.0's `sanitize_echo_prose`, which deletes Unicode `Cc` code points before
+  redacting. A control character wedged into a secret defeated the redactor's
+  patterns, so a credential in `claude`'s stderr or in a structured error's
+  `result` text could ride out as plaintext in an error message; terminal
+  escapes in the same text reached the agent unaltered. Applies to the
+  synchronous failure classifier (`stderr` and the structured `result` field),
+  job stderr tails, and the `claude_permission_error` message built from denied
+  tool calls. No schema change.
+- Keyed launches deduplicate on the real effective arguments — the built argv
+  and the prompt — instead of an enumerated subset of the job config. `focus`,
+  `model`, and `reasoning_effort` were all outside the digest, so the same key
+  with a different focus replayed the earlier answer instead of reporting
+  `idempotency_conflict`.
+- A terminal job recovers recorded spend from a result the worker had written
+  but not yet published, so a run reaped in the terminate grace window no longer
+  reports `cost_usd: null` for money already spent. `claude_job_status` and
+  `claude_job_result`/`claude_job_consume_result` now agree on this figure — an
+  earlier fix landed on the status path only, so the two tools reported
+  different costs for the same job. A torn write still cannot be surfaced: the
+  JSON parse is the gate.
+- `claude_dry_run` reports its own name. Its envelope's `tool` field was fixed to
+  the deprecated alias `claude_review_dry_run`; each name now echoes the name the
+  caller invoked. Amends the unreleased `claude-in-codex/0.1/schema-36`: the
+  contract digest moves, and the published `FINGERPRINT` string is unchanged.
+- `backend.ClaudeBackend.scrub_env` scrubs the environment it is given rather
+  than returning the process environment. Production behavior is unchanged — the
+  only caller passed `os.environ` — but the protocol method no longer ignores
+  its argument.
+
+- Every model-bearing run now goes through the pontonier `AgentBackend` adapter:
+  the sync tools stage via `ClaudeBackend.prepare()` (shared command builder,
+  prompt over stdin, help-gate drops on `PreparedRun.dropped_flags`) and keep
+  execution local (`run_claude_async` still owns the kill-tree, cancellation,
+  and per-mode environment — equivalent to the adapter's `scrub_env`, which
+  re-implements the same policy over its argument rather than delegating to it;
+  the equivalence is pinned by `tests/test_backend.py`, not by construction),
+  while the async job path uses `prepare()` to obtain argv for the detached
+  worker (safe because this backend stages no file artifacts). Wire shapes and
+  argv are unchanged.
+
+- The redaction engine is now pontonier's (`pontonier.core.redaction`), retiring
+  this bridge's local engine after upstream reached parity-or-better on every
+  local behavior (stateful private-key-block handling, the full vendor-pattern
+  set — the five shapes this bridge contributed are covered upstream — and a
+  streaming line redactor for the job worker). Content-level improvements the
+  shared engine brings: `[redacted: possibly partial secret value]` honesty
+  markers when a match may have stopped short, quoted/bracketed labelled keys,
+  richer connection-string coverage, and a source-file code-reference exemption
+  so ordinary code like `token = helper(x)` in a `.py` diff is no longer
+  masked (data/config files keep unconditional redaction). No schema change;
+  each divergence is pinned by a differential test at this bridge's seam.
+- Background jobs now run on the shared pontonier job store (fingerprint
+  `claude-in-codex/0.1/schema-36`): lifecycle mechanics — detached spawn,
+  worker-lock liveness, deadline reaping, TTL cleanup, count caps,
+  cancellation — are pontonier's, while the wire shapes, envelope synthesis,
+  prompt-off-disk streaming, and sanitized stderr remain this server's. Legacy
+  0.7 records stay readable, cancellable, and TTL-reaped in place (same store
+  layout lineage), and legacy `idem-*.json` markers are still read and
+  reaped, but no longer written or replayed (see the fail-closed entry above). Keyed launches go through the store's
+  idempotency index, which dedupes on (key, effective arguments): identical
+  retries replay the existing job; the same key with different arguments is
+  now an `idempotency_conflict` instead of 0.7's key-only silent replay, and
+  two more coordination codes (`idempotency_result_unavailable`,
+  `idempotency_in_progress`) are published for `claude_review_changes_async`.
+- Canonical tool verbs (fingerprint `claude-in-codex/0.1/schema-35`; superseded
+  by schema-36 above in the same unreleased train):
+  `claude_ask` is renamed `claude_consult` and `claude_review_dry_run` is
+  renamed `claude_dry_run`, matching the verb set shared across the agent
+  bridges. The old names remain registered as deprecated aliases — identical
+  parameters and schemas — and identical envelopes too, except that a dry-run
+  envelope echoes the invoked name in `tool` (see the entry above) — with the
+  deprecation surfaced in tool
+  descriptions and `claude_capabilities` — and are planned for removal in
+  0.9.0. The `tools/list` discovery budget is temporarily raised for the
+  duplicated alias schemas and reverts with the removal.
+- Diff redaction preserves the input's trailing newline, so returned diffs are
+  `git apply`-able (ports the sibling bridges' fix; end-to-end
+  redact-then-apply regression test included).
+
+- Add a dependency on [pontonier](https://github.com/briandconnelly/pontonier),
+  the shared agent-bridge library, and declare this server's CLI contract in
+  its shared shape: `cli_contract.PONTONIER_CONTRACT` (derivation-pinned
+  against the legacy constants) plus `cli_contract.FORBIDDEN_SURFACE_PHRASES`
+  with surface-honesty tests enforcing them against the built wire surface.
+- Add `backend.ClaudeBackend`, this bridge's adapter on the frozen pontonier
+  `AgentBackend` protocol (`contract_api_version = 1`), validated by a
+  byte-for-byte argv differential against `claude.build_command` and
+  per-config-mode env scrubbing tests. Every model-bearing run is staged through
+  it. The adapter itself adds no agent-visible surface; the fingerprint moves for
+  the tool renames and the idempotency error codes recorded above.
+
 ### Fixed
 
 - MCP initialization reported FastMCP's version as the server version, so

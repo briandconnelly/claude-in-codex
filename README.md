@@ -78,9 +78,9 @@ available:
 | `claude_review_changes` | Review a git diff now | paid |
 | `claude_review_changes_async` | Start a background diff review | paid |
 | `claude_adversarial_review` | Pressure-test a plan, claim, or change | paid |
-| `claude_ask` | Ask for a free-form second opinion | paid |
+| `claude_consult` | Ask for a free-form second opinion (`claude_ask` is a deprecated alias) | paid |
 | `claude_status` | Check readiness and defaults | free |
-| `claude_review_dry_run` | Preview diff/context before a review | free |
+| `claude_dry_run` | Preview diff/context before a review (`claude_review_dry_run` is a deprecated alias) | free |
 
 Diff review scopes are `working_tree`, `staged`, and `branch`.
 
@@ -170,7 +170,7 @@ Then:
 - If `claude_authenticated` is false, run `claude /login`.
 - If `ready` is false, inspect `readiness_detail` and `default_errors` before making paid calls.
 - If the workspace looks wrong, pass `workspace_root` explicitly.
-- If a review is large or expensive, run `claude_review_dry_run` first.
+- If a review is large or expensive, run `claude_dry_run` first.
 - If a background job id is lost, use `claude_job_list`.
 - If `config_mode=bare` fails, confirm `ANTHROPIC_API_KEY` is set in the environment that
   launches Codex.

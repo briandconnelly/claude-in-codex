@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from claude_in_codex import context
 from claude_in_codex.context import (
     ContextResult,
     DiffOptions,
@@ -661,11 +662,14 @@ def test_secret_redactor_preserves_key_block_state_across_calls():
     clean, clean_changed = redactor.redact_line("ordinary diagnostic")
 
     assert "BEGIN RSA PRIVATE KEY" in begin
-    assert begin_changed is True
+    # `changed` reports emitted replacement markers (the shared engine's invariant),
+    # not state transitions: bare BEGIN/END marker lines open/close the block but
+    # emit nothing, so they report False. The old local engine said True there.
+    assert begin_changed is False
     assert body not in middle
     assert middle_changed is True
     assert "END RSA PRIVATE KEY" in end
-    assert end_changed is True
+    assert end_changed is False
     assert clean == "ordinary diagnostic"
     assert clean_changed is False
 
@@ -679,3 +683,198 @@ def test_redact_tree_redacts_string_leaves_in_nested_structures():
     blob = repr(out)
     assert token not in blob
     assert "[redacted: secret value]" in blob
+
+
+def test_redact_preserves_the_trailing_newline():
+    diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n a\n+b\n"
+    out, _ = context._redact(diff)
+    assert out.endswith("\n")
+
+
+def test_redact_does_not_invent_a_trailing_newline():
+    # A diff that genuinely lacks one must not gain one: that would change the patch.
+    diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n a\n+b"
+    out, _ = context._redact(diff)
+    assert not out.endswith("\n")
+
+
+def test_redact_of_empty_input_stays_empty():
+    assert context._redact("") == ("", [])
+
+
+def test_a_redacted_diff_still_applies(tmp_path):
+    """End-to-end: build a real repo, produce a real diff, redact it, and apply it."""
+    import os
+    import subprocess
+
+    # Isolate from the developer's global/system git config: an external diff
+    # driver (delta, difftastic) would replace the unified diff this test feeds
+    # back through `git apply`.
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    def git(*args, cwd=tmp_path):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=env
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "t@t.t")
+    git("config", "user.name", "T")
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    (tmp_path / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"
+    )
+    raw = git("diff").stdout
+    redacted, _ = context._redact(raw)
+
+    git("checkout", "--", "calc.py")
+    patch = tmp_path / "p.diff"
+    patch.write_text(redacted)
+    git("apply", str(patch))
+    assert "def mul" in (tmp_path / "calc.py").read_text()
+
+
+# --- shared-engine adoption differentials ------------------------------------
+# The pontonier engine swap changed three content-level behaviors on purpose.
+# Each is pinned HERE, at this bridge's own seam, so the suite exercises the
+# divergence rather than passing because nothing ever reached it.
+
+
+def test_shared_engine_code_reference_exemption_is_live():
+    from claude_in_codex.context import _redact
+
+    # Old local engine redacted this (labelled pattern, 16+ char value); the shared
+    # engine recognizes a code REFERENCE on a source-file body line and leaves it.
+    diff = "diff --git a/app.py b/app.py\n+    token = some_helper_function(x)\n"
+    out, paths = _redact(diff)
+    assert out == diff
+    assert paths == []
+    # The exemption is source-file-scoped: identical text in YAML stays redacted —
+    # the known-positive proving the exemption, not a broken matcher, is why the
+    # .py line survived.
+    ydiff = "diff --git a/cfg.yaml b/cfg.yaml\n+token: some_helper_function_xx\n"
+    yout, ypaths = _redact(ydiff)
+    assert "some_helper_function_xx" not in yout
+    assert ypaths == ["cfg.yaml"]
+
+
+def test_shared_engine_partial_marker_is_live_in_prose():
+    from claude_in_codex.context import redact_text
+
+    # `@` right after a labelled value is affirmative evidence the match may have
+    # stopped short; the shared engine says so instead of claiming full coverage.
+    out, changed = redact_text("password=aaaaaaaaaaaaaaaa@tailsegment")
+    assert changed is True
+    assert "[redacted: possibly partial secret value]" in out
+
+
+def test_upstreamed_vendor_patterns_still_covered_through_the_wrapper():
+    from claude_in_codex.context import redact_text
+
+    # The five shapes this bridge contributed upstream must stay covered after the
+    # local list's retirement — the "unification must not weaken" invariant.
+    for token in [
+        "sk-ant-api03-" + "aB3-" * 5,
+        "github_pat_" + "aB3_" * 6,
+        "glpat-" + "aB3-" * 5,
+        "npm_" + "aB3d" * 9,
+        "pypi-AgEIcHlwaS5vcmc" + "aB3d" * 4,
+    ]:
+        out, changed = redact_text(f"leaked {token}")
+        assert token not in out, token
+        assert changed is True
+
+
+def test_sanitize_echo_prose_redacts_a_control_char_wedged_secret():
+    """A control character inside a secret defeats pattern matching outright.
+
+    The clean-secret case is the positive control: it proves the redactor is
+    wired up at all, so a pass on the wedged case is not a broken instrument.
+    """
+    from claude_in_codex.context import sanitize_echo_prose
+
+    secret = "sk-ant-api03-" + "A" * 40
+    assert "[redacted" in sanitize_echo_prose(f"wrapper failed: {secret}")
+    wedged = f"wrapper failed: {secret[:10]}\x08{secret[10:]}"
+    out = sanitize_echo_prose(wedged)
+    assert "[redacted" in out
+    assert "AAAAAAAAAA" not in out
+
+
+def test_sanitize_echo_prose_strips_terminal_escapes():
+    from claude_in_codex.context import sanitize_echo_prose
+
+    out = sanitize_echo_prose("boom\x1b[2J\x1b[1;31mall clear")
+    assert "\x1b" not in out
+
+
+def test_classify_failure_does_not_echo_a_wedged_secret():
+    """End-to-end: the sync error envelope is the actual egress point."""
+    from claude_in_codex.claude import ClaudeRun, classify_failure
+
+    secret = "sk-ant-api03-" + "A" * 40
+    run = ClaudeRun(
+        stdout="",
+        stderr=f"wrapper failed: {secret[:10]}\x08{secret[10:]}",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    message = classify_failure(run).message
+    assert "AAAAAAAAAA" not in message
+    assert "\x08" not in message
+
+
+def test_classify_failure_does_not_echo_a_wedged_secret_in_structured_result():
+    """End-to-end through the structured-envelope path (env['result']), not stderr.
+
+    The positive control (clean secret) proves the redactor is wired up on this
+    path at all, so a pass on the wedged case is not a broken instrument.
+    """
+    import json
+
+    from claude_in_codex.claude import ClaudeRun, classify_failure
+
+    secret = "sk-ant-api03-" + "A" * 40
+
+    clean_run = ClaudeRun(
+        stdout=json.dumps(
+            {"is_error": True, "subtype": "error", "result": f"failed using {secret}"}
+        ),
+        stderr="",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    clean_message = classify_failure(clean_run).message
+    assert secret not in clean_message
+
+    wedged_result = f"failed using {secret[:10]}{chr(8)}{secret[10:]}"
+    ansi_result = f"boom{chr(27)}[2J{chr(27)}[31m*** all clear ***"
+    wedged_run = ClaudeRun(
+        stdout=json.dumps({"is_error": True, "subtype": "error", "result": wedged_result}),
+        stderr="",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    ansi_run = ClaudeRun(
+        stdout=json.dumps({"is_error": True, "subtype": "error", "result": ansi_result}),
+        stderr="",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+
+    wedged_message = classify_failure(wedged_run).message
+    assert "AAAAAAAAAA" not in wedged_message
+    assert chr(8) not in wedged_message
+
+    ansi_message = classify_failure(ansi_run).message
+    assert chr(27) not in ansi_message

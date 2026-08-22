@@ -1,6 +1,7 @@
 import ast
 import inspect
 import json
+import time
 import types
 from typing import get_args
 
@@ -10,6 +11,8 @@ from fastmcp import Client
 from tests.conftest import structured
 
 from claude_in_codex import __version__
+from claude_in_codex import claude as claude_mod
+from claude_in_codex import jobs as jobs_mod
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
@@ -253,7 +256,11 @@ async def test_tool_descriptions_are_concise_and_disambiguating():
     tools = await _tools_by_name()
     for tool in tools.values():
         assert len(tool.description or "") <= 450, tool.name
-    assert "question or design choice" in tools["claude_ask"].description
+    assert "question or design choice" in tools["claude_consult"].description
+    assert tools["claude_ask"].description.startswith("[DEPRECATED alias of claude_consult")
+    assert tools["claude_review_dry_run"].description.startswith(
+        "[DEPRECATED alias of claude_dry_run"
+    )
     assert "git diff" in tools["claude_review_changes"].description
     assert "background" in tools["claude_review_changes_async"].description
     assert "without deleting" in tools["claude_job_result"].description
@@ -559,7 +566,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-34"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-36"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1035,8 +1042,6 @@ async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
     # writes a known claude envelope, so no real CLI runs.
     import json as _json
 
-    import claude_in_codex.server as srv
-
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "off-by-one",
@@ -1057,7 +1062,9 @@ async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
         }
     )
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
     )
 
     async with Client(mcp) as client:
@@ -1102,11 +1109,10 @@ async def test_review_changes_async_lifecycle(monkeypatch, git_repo, tmp_path):
 
 
 async def test_review_changes_async_spawn_failure_is_structured(monkeypatch, git_repo, tmp_path):
-    import claude_in_codex.server as srv
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
-        srv,
+        claude_mod,
         "build_command",
         lambda *a, **k: (["definitely-no-such-claude-binary-xyz"], []),
     )
@@ -1134,7 +1140,7 @@ async def test_review_changes_async_other_oserror_is_internal_error(
     import claude_in_codex.server as srv
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["claude"], []))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["claude"], []))
 
     def fake_start_job(*a, **k):
         raise OSError("boom")
@@ -1172,8 +1178,6 @@ async def test_job_consume_result_deletes_finished_record(monkeypatch, git_repo,
     import json as _json
     import time as _time
 
-    import claude_in_codex.server as srv
-
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "ok",
@@ -1187,7 +1191,9 @@ async def test_job_consume_result_deletes_finished_record(monkeypatch, git_repo,
         {"type": "result", "subtype": "success", "is_error": False, "result": _json.dumps(inner)}
     )
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
     )
 
     async with Client(mcp) as client:
@@ -1232,13 +1238,15 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-34"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-36"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
-        "claude_ask",
+        "claude_consult",
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",
+        # Deprecated alias of claude_consult; removal planned for 0.9.0.
+        "claude_ask",
     }
     assert "claude_status" in data["free_tools"]
     for lifecycle in (
@@ -1348,6 +1356,27 @@ async def test_claude_capabilities_returns_expected_free_tools():
     assert "claude_models" in data["free_tools"]
     # The readonly redaction-bypass caveat is now in the negative scope.
     assert any("readonly" in s for s in data["negative_scope"])
+
+
+async def test_dry_run_envelopes_echo_the_invoked_name(monkeypatch, git_repo):
+    """Request name and envelope `tool` must agree, for BOTH registered names."""
+    monkeypatch.chdir(git_repo)
+    for name in ("claude_dry_run", "claude_review_dry_run"):
+        async with Client(mcp) as client:
+            data = structured(
+                await client.call_tool(
+                    name, {"scope": "working_tree", "workspace_root": str(git_repo)}
+                )
+            )
+        assert data["tool"] == name
+
+
+async def test_dry_run_alias_input_schema_is_identical():
+    """The alias promises identical parameters. Pin that the split did not
+    change either signature."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert tools["claude_dry_run"].inputSchema == tools["claude_review_dry_run"].inputSchema
 
 
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
@@ -1528,12 +1557,10 @@ async def test_paid_result_reports_workspace_hooks(fake_claude, git_repo):
 async def test_async_empty_diff_skips_job_start(monkeypatch, git_repo, tmp_path):
     import subprocess as _sp
 
-    import claude_in_codex.server as srv
-
     _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
-        srv,
+        claude_mod,
         "build_command",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("job should not start")),
     )
@@ -1554,8 +1581,6 @@ async def test_async_result_reports_redacted_paths(monkeypatch, git_repo, tmp_pa
     import subprocess as _sp
     import time as _time
 
-    import claude_in_codex.server as srv
-
     (git_repo / ".env").write_text("API_KEY=supersecret\n")
     _sp.run(["git", "add", "-Nf", ".env"], cwd=git_repo, check=True)
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
@@ -1571,7 +1596,9 @@ async def test_async_result_reports_redacted_paths(monkeypatch, git_repo, tmp_pa
         {"type": "result", "subtype": "success", "is_error": False, "result": _json.dumps(inner)}
     )
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
     )
 
     async with Client(mcp) as client:
@@ -1751,8 +1778,6 @@ async def test_job_list_recovers_job_ids(monkeypatch, git_repo, tmp_path):
     import json as _json
     import time as _time
 
-    import claude_in_codex.server as srv
-
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {
         "summary": "ok",
@@ -1772,7 +1797,9 @@ async def test_job_list_recovers_job_ids(monkeypatch, git_repo, tmp_path):
         }
     )
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
     )
 
     async with Client(mcp) as client:
@@ -2157,10 +2184,9 @@ def test_main_runs_stdio(monkeypatch):
 
 
 async def test_job_cancel_success_via_mcp(monkeypatch, git_repo, tmp_path):
-    import claude_in_codex.server as srv
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
     async with Client(mcp) as client:
         started = structured(
             await client.call_tool(
@@ -2448,8 +2474,6 @@ async def test_dry_run_non_branch_leaves_head_and_range_unset(monkeypatch, git_r
 async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_path):
     import json as _json
 
-    import claude_in_codex.server as srv
-
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     base, head = _make_branch_with_head(git_repo)
     inner = {
@@ -2471,7 +2495,9 @@ async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_p
         }
     )
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
     )
     async with Client(mcp) as client:
         started = structured(
@@ -2818,8 +2844,8 @@ def test_per_tool_error_codes_cover_the_statically_reachable_ones():
     reachable = _statically_reachable_error_codes()
     # Instrument check: a walk that resolves nothing would make the loop below
     # vacuously pass, so pin codes each tool demonstrably raises in server.py.
-    assert "invalid_scope" in reachable["claude_review_dry_run"]
-    assert "context_too_large" in reachable["claude_ask"]
+    assert "invalid_scope" in reachable["claude_dry_run"]
+    assert "context_too_large" in reachable["claude_consult"]
     assert "job_not_found" in reachable["claude_job_status"]
     for tool, codes in reachable.items():
         missing = codes - set(_TOOL_ERROR_CODES[tool])
@@ -2865,10 +2891,9 @@ def test_capabilities_publishes_the_async_lifecycle():
 
 
 async def test_async_same_idempotency_key_returns_existing_job(git_repo, monkeypatch):
-    import claude_in_codex.server as srv
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
     args = {
         "scope": "working_tree",
         "workspace_root": str(git_repo),
@@ -2886,12 +2911,13 @@ async def test_async_same_idempotency_key_returns_existing_job(git_repo, monkeyp
     assert second["status"] == "running"
 
 
-async def test_async_same_key_different_args_returns_existing_job(git_repo, monkeypatch):
-    """The key alone determines the dedupe match, even if the retry's args differ."""
-    import claude_in_codex.server as srv
+async def test_async_same_key_different_args_is_a_conflict(git_repo, monkeypatch):
+    """The store's idempotency index dedupes on (key, effective arguments): the
+    same key with DIFFERENT arguments is a conflict, never a silent replay of a
+    run the caller did not ask for. (0.7 deduped on the key alone.)"""
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
     async with Client(mcp) as client:
         first = structured(
             await client.call_tool(
@@ -2906,7 +2932,49 @@ async def test_async_same_key_different_args_returns_existing_job(git_repo, monk
         second = structured(
             await client.call_tool(
                 "claude_review_changes_async",
-                {"scope": "staged", "workspace_root": str(git_repo), "idempotency_key": "key-2"},
+                {
+                    "scope": "working_tree",
+                    "paths": ["app.py"],
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "key-2",
+                },
+                raise_on_error=False,
+            )
+        )
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": first["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert second["ok"] is False
+    assert second["error"]["code"] == "idempotency_conflict"
+    assert second["error"]["details"]["field"] == "idempotency_key"
+
+
+async def test_async_same_key_same_args_replays_existing_job(git_repo, monkeypatch):
+    """Identical key + identical effective arguments is the replay case: the
+    caller gets the existing job's status instead of a second paid launch."""
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    async with Client(mcp) as client:
+        first = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "key-replay",
+                },
+            )
+        )
+        second = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "key-replay",
+                },
             )
         )
         await client.call_tool(
@@ -2923,7 +2991,7 @@ async def test_async_reservation_contention_returns_existing_job(git_repo, monke
     import claude_in_codex.server as srv
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
     monkeypatch.setattr(srv.jobs, "find_by_idempotency_key", lambda *a, **k: None)
     args = {
         "scope": "working_tree",
@@ -2941,17 +3009,16 @@ async def test_async_reservation_contention_returns_existing_job(git_repo, monke
     assert second["job_id"] == first["job_id"]
 
 
-async def test_async_reservation_holder_with_no_record_is_internal_error(git_repo, monkeypatch):
-    """A reservation marker whose job record never landed (e.g. crashed between
-    reserve and spawn, before it could be reaped) surfaces a retryable error
-    instead of silently starting a duplicate paid job."""
-    import claude_in_codex.server as srv
+async def test_async_legacy_ghost_marker_does_not_block_a_fresh_launch(git_repo, monkeypatch):
+    """A legacy (0.7) marker whose job record never landed is ignored — the keyed
+    launch proceeds fresh through the store index instead of erroring."""
     from claude_in_codex import jobs
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
-    ghost = "f" * 32
-    assert jobs.reserve_idempotency_key(str(git_repo), "ghost-key", ghost) is None
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    marker = jobs._reservation_path(str(git_repo), "ghost-key")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"job_id": "f" * 32, "created_epoch": time.time()}))
     async with Client(mcp) as client:
         result = structured(
             await client.call_tool(
@@ -2961,25 +3028,23 @@ async def test_async_reservation_holder_with_no_record_is_internal_error(git_rep
                     "workspace_root": str(git_repo),
                     "idempotency_key": "ghost-key",
                 },
-                raise_on_error=False,
             )
         )
-    assert result["ok"] is False
-    assert result["error"]["code"] == "internal_error"
-    assert result["error"]["details"]["field"] == "idempotency_key"
-    assert result["error"]["retryable"] is True
-    jobs.release_idempotency_key(str(git_repo), "ghost-key", ghost)
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": result["job_id"], "workspace_root": str(git_repo)},
+        )
+    assert result["ok"] is True
+    assert result["job_id"] != "f" * 32
 
 
 async def test_async_spawn_failure_releases_reservation(monkeypatch, git_repo, tmp_path):
-    """On a spawn failure, the reservation is released so a retry with the same
-    key is not stuck forever behind a job that never started."""
-    import claude_in_codex.server as srv
-    from claude_in_codex import jobs
+    """On a spawn failure the store rolls the reservation back, so a retry with
+    the same key launches fresh instead of being stuck behind a phantom."""
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["definitely-no-such-claude-binary-xyz"], [])
+        claude_mod, "build_command", lambda *a, **k: (["definitely-no-such-claude-binary-xyz"], [])
     )
     async with Client(mcp) as client:
         result = structured(
@@ -2993,24 +3058,40 @@ async def test_async_spawn_failure_releases_reservation(monkeypatch, git_repo, t
                 raise_on_error=False,
             )
         )
-    assert result["ok"] is False
-    assert result["error"]["code"] == "claude_not_found"
-    # Reservation was released: a fresh reserve for the same key succeeds outright.
-    assert jobs.reserve_idempotency_key(str(git_repo), "release-key", "b" * 32) is None
-    jobs.release_idempotency_key(str(git_repo), "release-key", "b" * 32)
+        assert result["ok"] is False
+        assert result["error"]["code"] == "claude_not_found"
+
+        # Reservation rolled back: the same key now launches successfully.
+        monkeypatch.setattr(
+            claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], [])
+        )
+        retry = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "release-key",
+                },
+            )
+        )
+        assert retry["ok"] is True
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": retry["job_id"], "workspace_root": str(git_repo)},
+        )
 
 
-async def test_async_oserror_spawn_failure_releases_reservation(monkeypatch, git_repo, tmp_path):
+async def test_async_oserror_spawn_failure_is_internal_error(monkeypatch, git_repo, tmp_path):
     import claude_in_codex.server as srv
-    from claude_in_codex import jobs
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(srv, "build_command", lambda *a, **k: (["claude"], []))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["claude"], []))
 
-    def fake_start_job(*a, **k):
+    def fake_start(*a, **k):
         raise OSError("boom")
 
-    monkeypatch.setattr(srv.jobs, "start_job", fake_start_job)
+    monkeypatch.setattr(srv.jobs, "start_job_idempotent", fake_start)
     async with Client(mcp) as client:
         result = structured(
             await client.call_tool(
@@ -3025,8 +3106,6 @@ async def test_async_oserror_spawn_failure_releases_reservation(monkeypatch, git
         )
     assert result["ok"] is False
     assert result["error"]["code"] == "internal_error"
-    assert jobs.reserve_idempotency_key(str(git_repo), "release-key-2", "b" * 32) is None
-    jobs.release_idempotency_key(str(git_repo), "release-key-2", "b" * 32)
 
 
 async def test_annotation_contract():
@@ -3128,15 +3207,15 @@ async def test_job_result_accepts_a_detail_override_over_mcp(monkeypatch, git_re
     import json as _json
     import time as _time
 
-    import claude_in_codex.server as srv
-
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
     inner = {"summary": "ok", "verdict": "pass", "confidence": "high", "findings": []}
     envelope = _json.dumps(
         {"type": "result", "subtype": "success", "is_error": False, "result": _json.dumps(inner)}
     )
     monkeypatch.setattr(
-        srv, "build_command", lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], [])
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
     )
 
     async with Client(mcp) as client:
@@ -3194,3 +3273,240 @@ async def test_initialize_reports_application_version_and_name():
     assert server_info["name"] == capabilities["name"]
     assert server_info["version"] == capabilities["version"]
     assert instructions == CAPABILITY_SUMMARY
+
+
+async def test_deprecated_aliases_match_their_primaries(fake_claude):
+    """Both deprecated aliases take the same arguments and publish the same
+    schemas as their primaries. Removal planned for 0.9.0.
+
+    The envelope claim holds for claude_ask only, and that is deliberate: a
+    dry-run envelope echoes the NAME the caller invoked, so claude_review_dry_run
+    and claude_dry_run differ in exactly that one field. This test asserts full
+    envelope equality for the consult pair and schema equality for both pairs;
+    test_dry_run_envelopes_echo_the_invoked_name owns the difference.
+    """
+    async with Client(mcp) as client:
+        primary = structured(await client.call_tool("claude_consult", {"prompt": "is this safe?"}))
+        alias = structured(await client.call_tool("claude_ask", {"prompt": "is this safe?"}))
+    # Identical modulo the genuinely per-call meta fields.
+    for envelope in (primary, alias):
+        for per_call in ("request_id", "elapsed_ms"):
+            envelope["meta"].pop(per_call, None)
+    assert alias == primary
+
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert tools["claude_ask"].inputSchema == tools["claude_consult"].inputSchema
+    assert tools["claude_ask"].outputSchema == tools["claude_consult"].outputSchema
+    assert tools["claude_review_dry_run"].inputSchema == tools["claude_dry_run"].inputSchema
+    assert tools["claude_review_dry_run"].outputSchema == tools["claude_dry_run"].outputSchema
+
+
+@pytest.mark.parametrize(
+    ("outcome_kind", "expected_code", "expected_retryable"),
+    [
+        ("unavailable", "idempotency_result_unavailable", False),
+        ("in_progress", "idempotency_in_progress", True),
+        # NOT idempotency_in_progress: an I/O failure in the index does not
+        # establish that any concurrent launch exists, so telling the caller a
+        # winner will be replayed would be a fabricated cause.
+        ("io_error", "internal_error", True),
+    ],
+)
+async def test_async_idempotency_coordination_outcomes_map_to_published_codes(
+    git_repo, monkeypatch, outcome_kind, expected_code, expected_retryable
+):
+    """The store's non-create, non-replay, non-conflict outcomes are agent-facing.
+
+    `unavailable`, `in_progress`, and `io_error` each reach the caller as a
+    published error code with a repair, and only the recoverable ones are
+    retryable. Nothing else exercised these branches, so a remapping could
+    change the wire silently.
+
+    `io_error` maps to internal_error rather than idempotency_in_progress: the
+    index failed to read or write, which says nothing about a concurrent
+    launch, so reporting one would state a cause that was never established.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(jobs_mod, "start_job_idempotent", lambda *a, **k: {"kind": outcome_kind})
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": f"coord-{outcome_kind}",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == expected_code
+    assert out["error"]["retryable"] is expected_retryable
+    assert out["error"]["repair"]
+    assert out["error"]["details"]["field"] == "idempotency_key"
+
+
+async def test_async_idempotency_replay_without_a_record_is_an_internal_error(
+    git_repo, monkeypatch
+):
+    """A published replay whose job record is gone must not be reported as a
+    successful launch. This branch had no coverage either."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    monkeypatch.setattr(
+        jobs_mod,
+        "start_job_idempotent",
+        lambda *a, **k: {"kind": "replay", "job_id": "0" * 32},
+    )
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "replay-no-record",
+                },
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "internal_error"
+    assert out["error"]["retryable"] is True
+
+
+async def test_legacy_idempotency_marker_fails_closed_instead_of_replaying(git_repo, monkeypatch):
+    """A 0.7 marker cannot honor the (key, effective arguments) guarantee.
+
+    0.7 markers carry no arg_hash, so replaying one is an UNVERIFIED match: the
+    caller could have changed scope, paths, model, effort, or focus and would
+    silently receive the earlier job's answer, which the published contract now
+    promises is an idempotency_conflict. Markers are read-only legacy state and
+    the TTL is 24h, so this window closes on its own; until it does, refusing
+    costs at most one extra launch and never misattributes a paid answer.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+
+    cwd = str(git_repo)
+    cfg = jobs_mod.JobConfig(
+        kind="claude_review_changes",
+        config_mode="inherit",
+        access="toolless",
+        scope="working_tree",
+        base="main",
+        head=None,
+        detail="summary",
+        timeout_seconds=1800,
+        workspace_source="cwd",
+        context_summary=None,
+    )
+    job_id, _ = jobs_mod.start_job(["sh", "-c", "sleep 30"], cwd, cfg)
+    marker = jobs_mod._reservation_path(cwd, "legacy-key")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"job_id": job_id, "created_epoch": time.time()}))
+
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": cwd,
+                    "idempotency_key": "legacy-key",
+                },
+                raise_on_error=False,
+            )
+        )
+    jobs_mod.cancel(cwd, job_id)
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "idempotency_conflict"
+    assert out["error"]["details"]["field"] == "idempotency_key"
+    # The job itself stays reachable by id — refusing the key must not orphan it.
+    assert jobs_mod.status(cwd, job_id) is not None
+
+
+async def test_a_key_with_no_legacy_marker_still_launches(git_repo, monkeypatch):
+    """Positive control: the refusal is specific to legacy markers, not to keys."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "fresh-key",
+                },
+                raise_on_error=False,
+            )
+        )
+        assert out["ok"] is True
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": out["job_id"], "workspace_root": str(git_repo)},
+        )
+
+
+async def test_an_expired_legacy_marker_stops_blocking_the_key(git_repo, monkeypatch):
+    """The 24h compatibility window has to actually close.
+
+    The refusal is only defensible because it expires: markers are never
+    written and terminal records are reaped at the TTL. But the store reaps
+    LAZILY, on a store call, and the legacy check is a fast return that happens
+    before `start_job_idempotent` would trigger one. Resolving the marker
+    without refreshing the record left an expired job blocking its key forever
+    — a permanent refusal wearing a temporary one's justification.
+
+    The live-record refusal
+    (test_legacy_idempotency_marker_fails_closed_instead_of_replaying) is the
+    positive control: it proves this path refuses at all, so a launch here is
+    not a broken check passing everything through.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+
+    cwd = str(git_repo)
+    cfg = jobs_mod.JobConfig(
+        kind="claude_review_changes",
+        config_mode="inherit",
+        access="toolless",
+        scope="working_tree",
+        base="main",
+        head=None,
+        detail="summary",
+        timeout_seconds=1800,
+        workspace_source="cwd",
+        context_summary=None,
+    )
+    job_id, _ = jobs_mod.start_job(["sh", "-c", "exit 0"], cwd, cfg)
+    for _ in range(50):
+        if jobs_mod.status(cwd, job_id)["status"] != "running":
+            break
+        time.sleep(0.05)
+    marker = jobs_mod._reservation_path(cwd, "expired-key")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"job_id": job_id, "created_epoch": time.time()}))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_JOB_TTL", "0")  # every terminal record is expired
+
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": cwd,
+                    "idempotency_key": "expired-key",
+                },
+                raise_on_error=False,
+            )
+        )
+        assert out["ok"] is True, out
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": out["job_id"], "workspace_root": cwd}
+        )

@@ -196,6 +196,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "fastmcp" },
+    { name = "pontonier" },
     { name = "pydantic" },
 ]
 
@@ -214,6 +215,7 @@ dev = [
 requires-dist = [
     { name = "anyio", specifier = ">=4" },
     { name = "fastmcp", specifier = ">=3.4" },
+    { name = "pontonier", specifier = "==0.6.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -854,6 +856,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "pontonier"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/aa/58/2d4c53cf10195b1fbc854b5c6caeeeac460ce7a0257d33b74d43504df97e/pontonier-0.6.0.tar.gz", hash = "sha256:c5a7359846162d4a0bc167a486c63e3685a0bb128c0f95565a34d8c5954607b0", size = 487452, upload-time = "2026-08-20T16:23:53.771Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/40/9b62494c416f39048da2bcacd5fff9ed6d940384e455a6c390f8099389ec/pontonier-0.6.0-py3-none-any.whl", hash = "sha256:2b29a6459e719d6f714e56315fe53f30edacbfe61aaab5279153d938370d6db2", size = 145623, upload-time = "2026-08-20T16:23:52.25Z" },
 ]
 
 [[package]]

@@ -25,7 +25,7 @@ from fastmcp import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "6c9380b8a34db4cce8f93d79e6e7d3fba89f9cf9317b497cda19965542c38925"
+EXPECTED_CONTRACT_DIGEST = "a0585f69c98bb7232e54cd00547ad8a23ef6b2972475819db6288cd03b478e2e"
 
 
 async def _contract_surface() -> dict:
@@ -103,7 +103,8 @@ async def test_contract_surface_includes_resources():
 async def test_contract_surface_pins_annotations_and_descriptions():
     surface = await _contract_surface()
     for name in (
-        "claude_ask",
+        "claude_consult",
+        "claude_ask",  # deprecated alias; must keep the paid annotations + disclosures
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",

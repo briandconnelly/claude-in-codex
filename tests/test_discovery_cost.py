@@ -35,14 +35,17 @@ from claude_in_codex.server import mcp
 # Truncation/DetailModes/OutputBounds in the advertised schemas, the same
 # treatment Meta and ErrorInfo get above — spelling the caps out inline in all
 # four paid tools measured ~2x this.
-WIRE_BUDGET_BYTES = 56_300
+# Temporarily raised for the claude_ask/claude_review_dry_run deprecation window:
+# each alias re-advertises its primary's full schemas (~9KB total). Revert to
+# 56_300 when the aliases are removed in 0.9.0.
+WIRE_BUDGET_BYTES = 66_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(56,300/4)).
-TOKEN_PROXY_BUDGET = 14_075
+# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(66,000/4)).
+TOKEN_PROXY_BUDGET = 16_500  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -70,7 +73,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (14,075 == 56,300/4) and the proxy is
+    The budgets are currently proportional (16,500 == 66,000/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""

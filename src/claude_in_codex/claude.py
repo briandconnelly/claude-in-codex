@@ -21,7 +21,7 @@ from claude_in_codex.config import (
     config_mode_flags,
     is_env_placeholder,
 )
-from claude_in_codex.context import redact_text
+from claude_in_codex.context import sanitize_echo_prose
 from claude_in_codex.schemas import ErrorInfo
 
 _BUDGET_REPAIR = (
@@ -267,8 +267,10 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     env = None
     # stderr is untrusted CLI output and can echo credentials supplied by hooks,
     # wrappers, or upstream failures. Sanitize it before any classification path
-    # can place it in a user-visible envelope.
-    safe_stderr = redact_text(run.stderr)[0]
+    # can place it in a user-visible envelope. sanitize_echo_prose (not
+    # redact_text) because a control character wedged into a secret defeats the
+    # redactor's patterns, and escapes would reach the agent's terminal.
+    safe_stderr = sanitize_echo_prose(run.stderr)
     with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
     if run.stderr == "claude_not_found":
@@ -288,9 +290,11 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
         env.get("is_error") or env.get("subtype") not in cli_contract.SUCCESS_SUBTYPES
     ):
         subtype = str(env.get("subtype") or "").lower()
-        # Model-derived result text is echoed into user-visible error messages below;
-        # scrub secrets first so the error path matches the success-path egress (#66).
-        result = redact_text(str(env.get("result") or ""))[0]
+        # Model-derived result text is echoed into user-visible error messages below.
+        # Use sanitize_echo_prose, not redact_text: a control character wedged into
+        # a secret can defeat plain redaction, and terminal escapes must not reach
+        # the agent's view of the error.
+        result = sanitize_echo_prose(str(env.get("result") or ""))
         structured_blob = f"{subtype}\n{result}".lower()
         combined_blob = f"{structured_blob}\n{safe_stderr}".lower()
         if _has_logged_out_signal(combined_blob):

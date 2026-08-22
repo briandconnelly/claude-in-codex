@@ -7,7 +7,7 @@ from typing import Any, Literal, cast
 
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
-from claude_in_codex.context import redact_text, redact_tree
+from claude_in_codex.context import redact_text, sanitize_echo_prose
 from claude_in_codex.schemas import (
     OUTPUT_BOUNDS,
     TRUNCATION_MARKER,
@@ -40,7 +40,7 @@ _SCHEMA_INSTRUCTION = (
 )
 
 _LEAD = {
-    "claude_ask": "Give an independent second opinion on the following question.",
+    "claude_consult": "Give an independent second opinion on the following question.",
     "claude_review_changes": "Review the following code changes for correctness, "
     "regressions, security, and missing tests.",
     "claude_adversarial_review": "Attack the following plan/claim. Find the strongest "
@@ -64,8 +64,34 @@ def _str_list(value: Any) -> list[str]:
     return [_redact_out(str(x)) for x in value if x] if isinstance(value, list) else []
 
 
+def _sanitize_denials_tree(value: object) -> object:
+    """Deep-apply ``sanitize_echo_prose`` to every string leaf of a denials tree.
+
+    ``sanitize_echo_prose`` deletes Unicode ``Cc`` code points before redacting,
+    which plain ``redact_text``/``redact_tree`` cannot do: a control character
+    wedged into a secret splits it, the patterns miss, and the credential
+    survives. Both agent-visible destinations for this tree need that —
+    ``meta.permission_denials`` and the ``claude_permission_error`` message.
+
+    Leaf-first is required for the message. ``str()`` on a list/dict reprs its
+    string leaves, escaping a real control character into the four printable
+    characters ``\\x08``; sanitizing after that coercion (e.g.
+    ``sanitize_echo_prose(str(tree))``) never sees the control character it
+    needs to strip."""
+    if isinstance(value, str):
+        return sanitize_echo_prose(value)
+    if isinstance(value, list):
+        return [_sanitize_denials_tree(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            sanitize_echo_prose(str(key)): _sanitize_denials_tree(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
-    parts = [_LEAD.get(tool, _LEAD["claude_ask"])]
+    parts = [_LEAD.get(tool, _LEAD["claude_consult"])]
     paths = payload.get("paths")
     paths_note = ""
     if paths:
@@ -74,7 +100,7 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
             "Treat findings as scoped to those paths; access=readonly may still "
             "allow direct workspace reads outside this filter."
         )
-    if tool == "claude_ask":
+    if tool == "claude_consult":
         parts.append(payload["prompt"])
         if payload.get("context"):
             parts.append(f"\nAdditional context:\n{payload['context']}")
@@ -424,12 +450,19 @@ def normalize_envelope(
     # If Claude was blocked by denied tools AND produced nothing usable, surface it.
     # Denied tool calls are model-derived and may carry secrets in their inputs, so
     # scrub them before they reach the error message or meta (#66).
-    denials = cast("list", redact_tree(env.get("permission_denials") or []))
+    # One sanitized tree serves both destinations. redact_tree alone is not
+    # enough for either: it cannot see a secret a control character has split,
+    # and BOTH the message and meta.permission_denials are agent-visible
+    # (#66 follow-up).
+    denials = cast("list", _sanitize_denials_tree(env.get("permission_denials") or []))
     if denials and (inner is None and not text.strip()):
+        # str() the already-sanitized tree — see _sanitize_denials_tree for why
+        # str()-then-sanitize does not work.
+        denial_text = str(denials)[:160]
         return _error(
             ErrorInfo(
                 code="claude_permission_error",
-                message=f"claude was denied required tools: {_redact_out(str(denials))[:160]}",
+                message=f"claude was denied required tools: {denial_text}",
                 repair="Use access=toolless, or allow the needed read-only tools.",
             ),
             meta,
