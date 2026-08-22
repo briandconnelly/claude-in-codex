@@ -7,6 +7,38 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Detached jobs run `claude` in the workspace again. The shared job store spawns
+  the worker with `cwd=<job record dir>` by design, and the worker did not put
+  the child back in the workspace, so `config_mode=inherit`/`scoped` stopped
+  loading the workspace `CLAUDE.md` and `.claude/settings*.json`, and
+  `access=readonly` relative reads resolved inside the cache directory. The
+  synchronous tools were never affected, so the two paths had diverged silently.
+- Foreign text echoed into an agent-visible error is sanitized with pontonier
+  0.6.0's `sanitize_echo_prose`, which deletes Unicode `Cc` code points before
+  redacting. A control character wedged into a secret defeated the redactor's
+  patterns, so a credential in `claude`'s stderr or in a structured error's
+  `result` text could ride out as plaintext in an error message; terminal
+  escapes in the same text reached the agent unaltered. Applies to both sites in
+  the synchronous failure classifier (`stderr` and the structured `result`
+  field) and to job stderr tails. No schema change.
+- Keyed launches deduplicate on the real effective arguments — the built argv
+  and the prompt — instead of an enumerated subset of the job config. `focus`,
+  `model`, and `reasoning_effort` were all outside the digest, so the same key
+  with a different focus replayed the earlier answer instead of reporting
+  `idempotency_conflict`.
+- A terminal job recovers recorded spend from a result the worker had written
+  but not yet published, so a run reaped in the terminate grace window no longer
+  reports `cost_usd: null` for money already spent. A torn write still cannot be
+  surfaced: the JSON parse is the gate.
+- `claude_dry_run` reports its own name. Its envelope's `tool` field was fixed to
+  the deprecated alias `claude_review_dry_run`; each name now echoes the name the
+  caller invoked. Amends the unreleased `claude-in-codex/0.1/schema-36`: the
+  contract digest moves, and the published `FINGERPRINT` string is unchanged.
+- `backend.ClaudeBackend.scrub_env` scrubs the environment it is given rather
+  than returning the process environment. Production behavior is unchanged — the
+  only caller passed `os.environ` — but the protocol method no longer ignores
+  its argument.
+
 - Every model-bearing run now goes through the pontonier `AgentBackend` adapter:
   the sync tools stage via `ClaudeBackend.prepare()` (shared command builder,
   prompt over stdin, help-gate drops on `PreparedRun.dropped_flags`) and keep
@@ -51,11 +83,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   duplicated alias schemas and reverts with the removal.
 - Diff redaction preserves the input's trailing newline, so returned diffs are
   `git apply`-able (ports the sibling bridges' fix; end-to-end
-  redact-then-apply regression test included). Planned engine unification with
-  `pontonier.core.redaction` is deferred: this server's redactor handles
-  multi-line PEM/OpenSSH/PGP key blocks in both diffs and prose, which the
-  shared engine does not yet — a swap today would weaken redaction, so the
-  block-handling flows upstream first.
+  redact-then-apply regression test included).
 
 - Add a dependency on [pontonier](https://github.com/briandconnelly/pontonier),
   the shared agent-bridge library, and declare this server's CLI contract in
@@ -66,7 +94,8 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `AgentBackend` protocol (`contract_api_version = 1`), validated by a
   byte-for-byte argv differential against `claude.build_command` and
   per-config-mode env scrubbing tests. Every model-bearing run is staged through
-  it. No agent-visible surface change (fingerprint digest unchanged).
+  it. The adapter itself adds no agent-visible surface; the fingerprint moves for
+  the tool renames and the idempotency error codes recorded above.
 
 ### Fixed
 
