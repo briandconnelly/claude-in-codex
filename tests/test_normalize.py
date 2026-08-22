@@ -513,6 +513,43 @@ def test_permission_denials_are_redacted_in_error_message():
     assert _SECRET not in json.dumps(out)
 
 
+def test_permission_error_message_strips_a_wedged_control_character():
+    """A control character split into a secret must not survive into the
+    claude_permission_error message (#66 follow-up).
+
+    The plain-secret run is a positive control: it proves this path redacts at
+    all, so a pass on the wedged run is not a broken instrument giving a false
+    negative.
+    """
+    secret = "sk-ant-api03-" + "A" * 40
+
+    def _env_with_denial(command: str) -> str:
+        return json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "",
+                "session_id": "s",
+                "permission_denials": [{"tool": "Bash", "input": {"command": command}}],
+            }
+        )
+
+    plain_out = normalize_envelope(
+        "claude_ask", _env_with_denial(f"tool input {secret}"), _meta(), detail="summary"
+    )
+    assert plain_out["ok"] is False
+    assert secret not in plain_out["error"]["message"]
+
+    wedged_command = f"tool input {secret[:10]}{chr(8)}{secret[10:]}"
+    wedged_out = normalize_envelope(
+        "claude_ask", _env_with_denial(wedged_command), _meta(), detail="summary"
+    )
+    assert wedged_out["ok"] is False
+    assert "AAAAAAAAAA" not in wedged_out["error"]["message"]
+    assert chr(8) not in wedged_out["error"]["message"]
+
+
 def test_permission_denials_are_redacted_in_meta():
     inner = {"summary": "ok", "verdict": "pass", "confidence": "high"}
     env = json.dumps(
