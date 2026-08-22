@@ -18,9 +18,10 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   redacting. A control character wedged into a secret defeated the redactor's
   patterns, so a credential in `claude`'s stderr or in a structured error's
   `result` text could ride out as plaintext in an error message; terminal
-  escapes in the same text reached the agent unaltered. Applies to both sites in
-  the synchronous failure classifier (`stderr` and the structured `result`
-  field) and to job stderr tails. No schema change.
+  escapes in the same text reached the agent unaltered. Applies to the
+  synchronous failure classifier (`stderr` and the structured `result` field),
+  job stderr tails, and the `claude_permission_error` message built from denied
+  tool calls. No schema change.
 - Keyed launches deduplicate on the real effective arguments — the built argv
   and the prompt — instead of an enumerated subset of the job config. `focus`,
   `model`, and `reasoning_effort` were all outside the digest, so the same key
@@ -28,8 +29,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `idempotency_conflict`.
 - A terminal job recovers recorded spend from a result the worker had written
   but not yet published, so a run reaped in the terminate grace window no longer
-  reports `cost_usd: null` for money already spent. A torn write still cannot be
-  surfaced: the JSON parse is the gate.
+  reports `cost_usd: null` for money already spent. `claude_job_status` and
+  `claude_job_result`/`claude_job_consume_result` now agree on this figure — an
+  earlier fix landed on the status path only, so the two tools reported
+  different costs for the same job. A torn write still cannot be surfaced: the
+  JSON parse is the gate.
 - `claude_dry_run` reports its own name. Its envelope's `tool` field was fixed to
   the deprecated alias `claude_review_dry_run`; each name now echoes the name the
   caller invoked. Amends the unreleased `claude-in-codex/0.1/schema-36`: the
@@ -43,10 +47,12 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   the sync tools stage via `ClaudeBackend.prepare()` (shared command builder,
   prompt over stdin, help-gate drops on `PreparedRun.dropped_flags`) and keep
   execution local (`run_claude_async` still owns the kill-tree, cancellation,
-  and per-mode environment — identical to the adapter's `scrub_env` by
-  construction), while the async job path uses `prepare()` to obtain argv for
-  the detached worker (safe because this backend stages no file artifacts).
-  Wire shapes and argv are unchanged.
+  and per-mode environment — equivalent to the adapter's `scrub_env`, which
+  re-implements the same policy over its argument rather than delegating to it;
+  the equivalence is pinned by `tests/test_backend.py`, not by construction),
+  while the async job path uses `prepare()` to obtain argv for the detached
+  worker (safe because this backend stages no file artifacts). Wire shapes and
+  argv are unchanged.
 
 - The redaction engine is now pontonier's (`pontonier.core.redaction`), retiring
   this bridge's local engine after upstream reached parity-or-better on every
