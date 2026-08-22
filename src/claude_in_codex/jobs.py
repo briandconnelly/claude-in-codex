@@ -45,7 +45,7 @@ from pontonier.core.jobs import DiscardOutcome, JobStore
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
-from claude_in_codex.context import redact_text
+from claude_in_codex.context import sanitize_echo_prose
 from claude_in_codex.normalize import apply_cost_usage, normalize_envelope
 from claude_in_codex.schemas import (
     FINGERPRINT,
@@ -521,8 +521,9 @@ def _stderr_tail(jd: Path, meta: dict, limit: int = 200) -> str | None:
         text = (jd / _record_stderr_file(meta)).read_text().strip()
     except OSError:
         return None
-    # Defense in depth for records written by an interrupted or older worker.
-    return redact_text(text)[0][-limit:] or None
+    # Defense in depth for records written by an interrupted or older worker,
+    # and the control-character strip the on-disk line redactor cannot do.
+    return sanitize_echo_prose(text)[-limit:] or None
 
 
 def _status_dict(jd: Path, meta: dict, state: str) -> dict:

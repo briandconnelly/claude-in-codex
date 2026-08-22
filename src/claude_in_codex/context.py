@@ -226,6 +226,26 @@ def redact_text(text: str) -> tuple[str, bool]:
     return out, out != text
 
 
+def sanitize_echo_prose(text: str) -> str:
+    """Sanitize foreign multi-line text bound for an agent-visible envelope.
+
+    Thin wrapper over `pontonier.core.redaction.sanitize_echo_prose`. Use this,
+    NOT `redact_text`, wherever text this server did not author is echoed into
+    an error message: subprocess stderr, job diagnostics, model result text.
+
+    It deletes Unicode Cc code points BEFORE redacting. The order is fixed
+    inside the shared function and is not this caller's to choose — redacting
+    first leaves a control-character-split secret untouched, and stripping
+    afterwards then reassembles it in the outgoing text. Stripping also removes
+    terminal escapes, which would otherwise recolor, reposition, or erase the
+    agent's view of the error. It does not truncate; callers apply their own
+    bound after the call.
+    """
+    if not text:
+        return text
+    return _redaction.sanitize_echo_prose(text) or ""
+
+
 def redact_tree(value: object) -> object:
     """Deep-apply ``redact_text`` to every string in a nested list/dict/str.
 

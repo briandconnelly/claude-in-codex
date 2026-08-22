@@ -789,3 +789,43 @@ def test_upstreamed_vendor_patterns_still_covered_through_the_wrapper():
         out, changed = redact_text(f"leaked {token}")
         assert token not in out, token
         assert changed is True
+
+
+def test_sanitize_echo_prose_redacts_a_control_char_wedged_secret():
+    """A control character inside a secret defeats pattern matching outright.
+
+    The clean-secret case is the positive control: it proves the redactor is
+    wired up at all, so a pass on the wedged case is not a broken instrument.
+    """
+    from claude_in_codex.context import sanitize_echo_prose
+
+    secret = "sk-ant-api03-" + "A" * 40
+    assert "[redacted" in sanitize_echo_prose(f"wrapper failed: {secret}")
+    wedged = f"wrapper failed: {secret[:10]}\x08{secret[10:]}"
+    out = sanitize_echo_prose(wedged)
+    assert "[redacted" in out
+    assert "AAAAAAAAAA" not in out
+
+
+def test_sanitize_echo_prose_strips_terminal_escapes():
+    from claude_in_codex.context import sanitize_echo_prose
+
+    out = sanitize_echo_prose("boom\x1b[2J\x1b[1;31mall clear")
+    assert "\x1b" not in out
+
+
+def test_classify_failure_does_not_echo_a_wedged_secret():
+    """End-to-end: the sync error envelope is the actual egress point."""
+    from claude_in_codex.claude import ClaudeRun, classify_failure
+
+    secret = "sk-ant-api03-" + "A" * 40
+    run = ClaudeRun(
+        stdout="",
+        stderr=f"wrapper failed: {secret[:10]}\x08{secret[10:]}",
+        exit_code=1,
+        elapsed_ms=5,
+        timed_out=False,
+    )
+    message = classify_failure(run).message
+    assert "AAAAAAAAAA" not in message
+    assert "\x08" not in message
