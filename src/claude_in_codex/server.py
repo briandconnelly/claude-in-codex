@@ -1569,20 +1569,31 @@ async def claude_adversarial_review(
     return _result(out)
 
 
-async def _idempotent_match(cwd: str, idempotency_key: str | None) -> dict | None:
-    """Launch dedupe: JobStatus of a live/unexpired job started with this key, or
-    None. This fast path runs once at entry as a cheap early return. The
-    pre-spawn leg (in claude_review_changes_async, just before
-    jobs.start_job_idempotent) is the store's idempotency index, which dedupes
-    on (key, arg_hash) and returns created/replay/conflict/unavailable/
-    in_progress. jobs.find_by_idempotency_key now only replays legacy 0.7
-    idem-*.json markers, which are still read and reaped but never written."""
+async def _legacy_keyed_job(cwd: str, idempotency_key: str | None) -> str | None:
+    """The job_id a legacy 0.7 ``idem-*.json`` marker reserved for this key, else None.
+
+    0.7 deduped on the key ALONE, and its markers carry no argument digest, so a
+    marker can never prove that the current request matches the job it points
+    at. The published contract now guarantees ``(key, effective arguments)``
+    matching, which this path cannot honor: replaying would hand a caller who
+    changed scope, paths, model, effort, or focus the earlier job's answer,
+    silently and for money. So the caller is refused rather than replayed — the
+    same fail-closed rule the CLI contract applies to guarantee-bearing flags.
+
+    The refusal is not a dead end: the error carries a claude_job_status repair
+    action for the job the marker names, so the existing run is still readable
+    without a second paid launch.
+
+    Markers are read and reaped but never written, and the record TTL is 24h, so
+    this window closes on its own after an upgrade from 0.7.
+
+    The store's idempotency index (the pre-spawn leg, just before
+    jobs.start_job_idempotent) is what dedupes current launches, returning
+    created/replay/conflict/unavailable/in_progress on a verified arg_hash.
+    """
     if not idempotency_key:
         return None
-    existing = await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
-    if existing is None:
-        return None
-    return await run_sync(lambda: jobs.status(cwd, existing))
+    return await run_sync(lambda: jobs.find_by_idempotency_key(cwd, idempotency_key))
 
 
 @mcp.tool(
@@ -1673,9 +1684,6 @@ async def claude_review_changes_async(
     )
     if err:
         return _result(err)
-    match = await _idempotent_match(cwd, idempotency_key)
-    if match is not None:
-        return _result(match)
     # A background job is bounded by its wall-clock deadline, not the synchronous
     # timeout_seconds; report that everywhere so meta stays consistent with the job.
     job_timeout = jobs.max_seconds()
@@ -1695,6 +1703,27 @@ async def claude_review_changes_async(
         effective_budget=r.budget,
         head=head,
     )
+    legacy_job = await _legacy_keyed_job(cwd, idempotency_key)
+    if legacy_job is not None:
+        # Cheap early return, before any diff gathering — see _legacy_keyed_job
+        # for why an unverifiable legacy marker is refused rather than replayed.
+        return _result(
+            _err(
+                "idempotency_conflict",
+                "This idempotency_key belongs to a job started by an earlier version, "
+                "which recorded no argument digest, so a replay cannot be verified "
+                "against the arguments you passed.",
+                "Read the existing job with claude_job_status, or pass a new "
+                "idempotency_key to launch a fresh run.",
+                meta,
+                offending="idempotency_key",
+                action=RepairAction(
+                    next_step="call_tool",
+                    tool="claude_job_status",
+                    arguments={"job_id": legacy_job, "workspace_root": cwd},
+                ),
+            )
+        )
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")

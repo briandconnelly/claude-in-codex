@@ -3364,3 +3364,78 @@ async def test_async_idempotency_replay_without_a_record_is_an_internal_error(
     assert out["ok"] is False
     assert out["error"]["code"] == "internal_error"
     assert out["error"]["retryable"] is True
+
+
+async def test_legacy_idempotency_marker_fails_closed_instead_of_replaying(git_repo, monkeypatch):
+    """A 0.7 marker cannot honor the (key, effective arguments) guarantee.
+
+    0.7 markers carry no arg_hash, so replaying one is an UNVERIFIED match: the
+    caller could have changed scope, paths, model, effort, or focus and would
+    silently receive the earlier job's answer, which the published contract now
+    promises is an idempotency_conflict. Markers are read-only legacy state and
+    the TTL is 24h, so this window closes on its own; until it does, refusing
+    costs at most one extra launch and never misattributes a paid answer.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+
+    cwd = str(git_repo)
+    cfg = jobs_mod.JobConfig(
+        kind="claude_review_changes",
+        config_mode="inherit",
+        access="toolless",
+        scope="working_tree",
+        base="main",
+        head=None,
+        detail="summary",
+        timeout_seconds=1800,
+        workspace_source="cwd",
+        context_summary=None,
+    )
+    job_id, _ = jobs_mod.start_job(["sh", "-c", "sleep 30"], cwd, cfg)
+    marker = jobs_mod._reservation_path(cwd, "legacy-key")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"job_id": job_id, "created_epoch": time.time()}))
+
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": cwd,
+                    "idempotency_key": "legacy-key",
+                },
+                raise_on_error=False,
+            )
+        )
+    jobs_mod.cancel(cwd, job_id)
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "idempotency_conflict"
+    assert out["error"]["details"]["field"] == "idempotency_key"
+    # The job itself stays reachable by id — refusing the key must not orphan it.
+    assert jobs_mod.status(cwd, job_id) is not None
+
+
+async def test_a_key_with_no_legacy_marker_still_launches(git_repo, monkeypatch):
+    """Positive control: the refusal is specific to legacy markers, not to keys."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "idempotency_key": "fresh-key",
+                },
+                raise_on_error=False,
+            )
+        )
+        assert out["ok"] is True
+        await client.call_tool(
+            "claude_job_cancel",
+            {"job_id": out["job_id"], "workspace_root": str(git_repo)},
+        )

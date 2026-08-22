@@ -7,6 +7,18 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- A legacy 0.7 keyed launch is refused rather than replayed unverified. 0.7
+  deduped on the key alone, so its `idem-*.json` markers carry no argument
+  digest and cannot prove that a retry matches the job the marker names.
+  Replaying one contradicted the `(key, effective arguments)` guarantee this
+  release publishes: a caller who changed scope, paths, model, effort, or focus
+  would silently receive the earlier job's answer, and pay for a review of
+  something else. The key now returns `idempotency_conflict` carrying a
+  `claude_job_status` repair action for the job the marker names, so the
+  existing run stays readable without a second paid launch. Markers are still
+  read and reaped but never written, and the record TTL is 24h, so this window
+  closes on its own after an upgrade from 0.7. No schema change: the code was
+  already published for this tool.
 - A paid answer is no longer stranded when the worker is killed between writing
   its result and publishing it. The worker publishes atomically (tmp + rename
   after the child exits), so a worker killed inside the terminate grace window
