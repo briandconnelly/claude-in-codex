@@ -671,7 +671,9 @@ class DryRunResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
-    tool: Literal["claude_review_dry_run"] = "claude_review_dry_run"
+    # Echoes the name the caller invoked. Both names are registered until the
+    # deprecated alias goes away in 0.9.0. Make this "claude_dry_run" only then.
+    tool: Literal["claude_dry_run", "claude_review_dry_run"] = "claude_dry_run"
     cwd: str
     workspace_source: str | None = None
     workspace_warning: str | None = None

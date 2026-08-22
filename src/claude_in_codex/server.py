@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -2027,40 +2028,20 @@ async def claude_job_cancel(
     return _result(data)
 
 
-@mcp.tool(
-    annotations=_FREE_READ_ANNOTATIONS,
-    title="Preview review context (no spend)",
-    output_schema=DRY_RUN_SCHEMA,
-)
-async def claude_dry_run(
-    scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
-    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
-    paths: Annotated[
-        list[str] | None,
-        Field(
-            description=(
-                "Optional plain repo-relative paths to filter the previewed diff. "
-                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
-                "glob recursively. []/omitted means unfiltered."
-            )
-        ),
-    ] = None,
-    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
-    workspace_root: Annotated[
-        str | None,
-        Field(
-            description="Absolute path to the repo/workspace. If omitted, the server "
-            "uses the client's first MCP root, else its own cwd."
-        ),
-    ] = None,
-    ctx: Context | None = None,
+async def _dry_run_impl(
+    tool_name,
+    scope,
+    base,
+    head,
+    paths,
+    config_mode,
+    workspace_root,
+    ctx,
 ) -> ToolResult:
-    """Preview what a diff review WOULD send, free and without calling Claude.
+    """Do the dry-run preview for one of the two registered tool names.
 
-    Use before a paid claude_review_changes to confirm the resolved workspace,
-    diff byte size, whether it would be truncated, and how many secret-looking
-    files would be redacted. Read-only; makes no paid call.
+    The parameters have no annotations. Only the registered wrappers carry the
+    schema-bearing annotations.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -2100,6 +2081,7 @@ async def claude_dry_run(
     fs = preflight.flag_support()
     effective_head, diff_range = branch_range(scope, base, head)
     result = DryRunResult(
+        tool=tool_name,
         cwd=cwd,
         workspace_source=ws_source,
         workspace_warning=workspace_warning_for(ws_source, cwd),
@@ -2123,18 +2105,71 @@ async def claude_dry_run(
     return _result(result.model_dump(mode="json", exclude_none=True))
 
 
+@mcp.tool(
+    annotations=_FREE_READ_ANNOTATIONS,
+    title="Preview review context (no spend)",
+    output_schema=DRY_RUN_SCHEMA,
+)
+async def claude_dry_run(
+    scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
+    base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional plain repo-relative paths to filter the previewed diff. "
+                "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
+                "glob recursively. []/omitted means unfiltered."
+            )
+        ),
+    ] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
+    workspace_root: Annotated[
+        str | None,
+        Field(
+            description="Absolute path to the repo/workspace. If omitted, the server "
+            "uses the client's first MCP root, else its own cwd."
+        ),
+    ] = None,
+    ctx: Context | None = None,
+) -> ToolResult:
+    """Preview what a diff review WOULD send, free and without calling Claude.
+
+    Use before a paid claude_review_changes to confirm the resolved workspace,
+    diff byte size, whether it would be truncated, and how many secret-looking
+    files would be redacted. Read-only; makes no paid call.
+    """
+    return await _dry_run_impl(
+        "claude_dry_run",
+        scope=scope,
+        base=base,
+        head=head,
+        paths=paths,
+        config_mode=config_mode,
+        workspace_root=workspace_root,
+        ctx=ctx,
+    )
+
+
 # Deprecated alias (removal in 0.9.0): the canonical verb set shared across the
-# agent bridges names this tool claude_dry_run. Same function, same schema, same
-# envelope — only the wire name and the deprecation notice differ.
+# agent bridges names this tool claude_dry_run. Same parameters and same schema.
+# The envelope's `tool` field echoes the name the caller invoked.
+@functools.wraps(claude_dry_run)
+async def _claude_review_dry_run(**kwargs) -> ToolResult:
+    return await _dry_run_impl("claude_review_dry_run", **kwargs)
+
+
 mcp.tool(
-    claude_dry_run,
+    _claude_review_dry_run,
     name="claude_review_dry_run",
     annotations=_FREE_READ_ANNOTATIONS,
     output_schema=DRY_RUN_SCHEMA,
     title="Preview review context (no spend) — deprecated alias",
     description=(
         "[DEPRECATED alias of claude_dry_run; removal planned for 0.9.0 — call "
-        "claude_dry_run instead.] Identical parameters, schema, and envelope."
+        "claude_dry_run instead.] Identical parameters and schema; the envelope's "
+        "`tool` field echoes the name you called."
     ),
 )
 

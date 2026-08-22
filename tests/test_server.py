@@ -1357,6 +1357,27 @@ async def test_claude_capabilities_returns_expected_free_tools():
     assert any("readonly" in s for s in data["negative_scope"])
 
 
+async def test_dry_run_envelopes_echo_the_invoked_name(monkeypatch, git_repo):
+    """Request name and envelope `tool` must agree, for BOTH registered names."""
+    monkeypatch.chdir(git_repo)
+    for name in ("claude_dry_run", "claude_review_dry_run"):
+        async with Client(mcp) as client:
+            data = structured(
+                await client.call_tool(
+                    name, {"scope": "working_tree", "workspace_root": str(git_repo)}
+                )
+            )
+        assert data["tool"] == name
+
+
+async def test_dry_run_alias_input_schema_is_identical():
+    """The alias promises identical parameters. Pin that the split did not
+    change either signature."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert tools["claude_dry_run"].inputSchema == tools["claude_review_dry_run"].inputSchema
+
+
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
     # No fake_claude: a real paid call would fail. The dry-run must not call Claude.
     monkeypatch.chdir(git_repo)
