@@ -328,25 +328,22 @@ def start_job(
         )
 
 
-def arg_hash_for(cfg: JobConfig) -> str:
+def arg_hash_for(cmd: list[str], prompt: str | None) -> str:
     """The effective-argument digest a keyed launch is deduplicated under.
 
     Two launches with the same idempotency_key but different effective arguments
-    are a conflict, not a replay. Volatile/derived fields (timeouts, workspace
-    provenance, redaction bookkeeping) are excluded — they do not change what
-    the paid run would produce."""
-    material = {
-        "kind": cfg.kind,
-        "config_mode": cfg.config_mode,
-        "access": cfg.access,
-        "scope": cfg.scope,
-        "base": cfg.base,
-        "head": cfg.head,
-        "detail": cfg.detail,
-        "paths": cfg.paths,
-        "effective_max_budget_usd": cfg.effective_max_budget_usd,
-    }
-    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+    are a conflict, not a replay. The pair (argv, prompt) IS the effective
+    argument set: argv carries model, effort, budget, access, and config-mode
+    flags, and the prompt carries scope, base, head, paths, focus, and the
+    gathered diff. Hashing them directly means a newly added tool parameter
+    cannot silently fall out of the digest the way an enumerated field list
+    allowed — `focus`, `model`, and `reasoning_effort` all did.
+
+    Volatile bookkeeping (timeouts, workspace provenance, redaction counts) is
+    excluded by construction: it appears in neither argv nor the prompt.
+    """
+    material = json.dumps({"argv": list(cmd), "prompt": prompt}, sort_keys=True)
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def start_job_idempotent(
@@ -370,7 +367,7 @@ def start_job_idempotent(
             kind=cfg.kind,
             tool=_IDEMPOTENT_TOOL,
             key=key,
-            arg_hash=arg_hash_for(cfg),
+            arg_hash=arg_hash_for(cmd, stdin_text),
             extra=_extra_for(cfg, cwd),
             stdin_text=stdin_text,
         )

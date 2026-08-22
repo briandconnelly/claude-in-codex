@@ -1030,3 +1030,23 @@ def test_detached_child_runs_in_the_workspace(tmp_path, monkeypatch):
         time.sleep(0.05)
     assert env is not None, "child never published a result"
     assert env["result"] == str(ws)
+
+
+def test_arg_hash_separates_runs_that_differ_only_by_focus():
+    """focus reaches the run through the PROMPT, not through JobConfig.
+
+    The equal-inputs case is the positive control: identical argv and prompt
+    must still collide, or the test would pass for a trivially broken hash.
+    """
+    argv = ["claude", "-p", "--model", "sonnet"]
+    assert jobs.arg_hash_for(argv, "review this") == jobs.arg_hash_for(argv, "review this")
+    assert jobs.arg_hash_for(argv, "review this") != jobs.arg_hash_for(
+        argv, "review this, focus on auth"
+    )
+
+
+def test_arg_hash_separates_runs_that_differ_only_by_model():
+    prompt = "review this"
+    assert jobs.arg_hash_for(["claude", "-p", "--model", "sonnet"], prompt) != jobs.arg_hash_for(
+        ["claude", "-p", "--model", "opus"], prompt
+    )
