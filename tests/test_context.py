@@ -28,6 +28,72 @@ def _current_branch(git_repo):
     ).stdout.strip()
 
 
+GIT_REDIRECT_VARS = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+]
+
+
+@pytest.mark.parametrize("var", GIT_REDIRECT_VARS)
+def test_git_env_drops_inherited_git_variables(monkeypatch, var):
+    """Inherited GIT_* state must never reach a git call.
+
+    These variables override repository discovery, so a server launched from a
+    git hook (or any parent exporting them) would read a different repository's
+    diff than the cwd it resolved -- and send it to a paid external API."""
+    monkeypatch.setenv(var, "/somewhere/else")
+    assert var not in context._git_env()
+
+
+@pytest.mark.parametrize(
+    "var",
+    ["GIT_SOME_VARIABLE_THAT_DOES_NOT_EXIST_YET", "GIT_", "GIT_X"],
+)
+def test_git_env_drops_unknown_git_variables(monkeypatch, var):
+    """The scrub is a prefix rule, not a denylist of the names we know today.
+
+    The named-variable test above passes just as well against a denylist of those
+    eight, so it cannot catch that regression. Git keeps adding GIT_* variables,
+    and a new redirect-capable one must be dropped by default rather than
+    silently honored until someone adds it to a list."""
+    monkeypatch.setenv(var, "/somewhere/else")
+    assert var not in context._git_env()
+
+
+def test_git_env_keeps_non_git_variables(monkeypatch):
+    """The scrub is scoped to GIT_*, not a wholesale environment reset.
+
+    Without this, the previous assertion would still pass if _git_env() returned
+    an empty dict, and git would lose PATH and HOME."""
+    monkeypatch.setenv("SOME_UNRELATED_VAR", "kept")
+    env = context._git_env()
+    assert env["SOME_UNRELATED_VAR"] == "kept"
+    assert env["LC_ALL"] == "C"
+
+
+def test_diff_ignores_an_inherited_git_dir(monkeypatch, git_repo, tmp_path):
+    """End-to-end: a bogus GIT_DIR must not redirect the diff.
+
+    Guards the whole path, not just _git_env() in isolation: if the scrub is
+    dropped, git resolves the decoy repository and this fails instead of
+    silently reporting the wrong repository's changes."""
+    decoy = tmp_path / "decoy.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(decoy)], check=True)
+    monkeypatch.setenv("GIT_DIR", str(decoy))
+
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+
+    assert "app.py" in res.text
+    assert "return a - b" in res.text
+    assert res.summary.files_changed == 1
+
+
 def test_working_tree_diff(git_repo):
     res = gather_context(str(git_repo), scope="working_tree", base="main")
     assert isinstance(res, ContextResult)
