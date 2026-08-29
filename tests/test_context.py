@@ -51,6 +51,21 @@ def test_git_env_drops_inherited_git_variables(monkeypatch, var):
     assert var not in context._git_env()
 
 
+@pytest.mark.parametrize(
+    "var",
+    ["GIT_SOME_VARIABLE_THAT_DOES_NOT_EXIST_YET", "GIT_", "GIT_X"],
+)
+def test_git_env_drops_unknown_git_variables(monkeypatch, var):
+    """The scrub is a prefix rule, not a denylist of the names we know today.
+
+    The named-variable test above passes just as well against a denylist of those
+    eight, so it cannot catch that regression. Git keeps adding GIT_* variables,
+    and a new redirect-capable one must be dropped by default rather than
+    silently honoured until someone adds it to a list."""
+    monkeypatch.setenv(var, "/somewhere/else")
+    assert var not in context._git_env()
+
+
 def test_git_env_keeps_non_git_variables(monkeypatch):
     """The scrub is scoped to GIT_*, not a wholesale environment reset.
 
