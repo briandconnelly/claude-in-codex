@@ -109,7 +109,20 @@ def _classify_git_failure(stderr: str) -> None:
 
 
 def _git_env() -> dict[str, str]:
-    env = os.environ.copy()
+    """The environment for every git call: C locale, and no inherited GIT_* state.
+
+    Git's own environment variables override repository discovery. GIT_DIR,
+    GIT_WORK_TREE, GIT_INDEX_FILE and friends make git operate on whatever
+    repository the parent process named, silently ignoring the cwd we resolved
+    and validated. A server launched from a git hook, or from any parent that
+    exports them, would then read a different repository's diff and send it to a
+    paid external API — the workspace guarantee broken with no error.
+
+    Every GIT_* name is dropped rather than a denylist of the dangerous ones: the
+    set grows across git versions, and no git call here needs inherited GIT_*
+    state (all are read-only, local, and fully specified by argv and cwd). An
+    unrecognised GIT_* variable must not be able to redirect us."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
     return env

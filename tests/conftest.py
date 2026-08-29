@@ -1,9 +1,33 @@
 """Shared test fixtures and helpers."""
 
 import json
+import os
 import subprocess
 
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_inherited_git_env():
+    """Drop inherited GIT_* variables for the whole test session.
+
+    Tests build throwaway repositories by running git in `tmp_path`. Git's own
+    environment variables override repository discovery, so if the pytest process
+    inherits GIT_DIR (a git hook exports it — this is why the `pre-push` hook ran
+    the suite against the real repository), those commands target the real repo
+    instead: fixture files get staged into its index and every tracked file shows
+    as deleted.
+
+    Scrubbing the process environment, rather than passing `env=` at each of the
+    ~40 git call sites, fixes the ad-hoc ones too and cannot be forgotten by the
+    next test that shells out to git."""
+    saved = {k: v for k, v in os.environ.items() if k.startswith("GIT_")}
+    for key in saved:
+        del os.environ[key]
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 def structured(result):
