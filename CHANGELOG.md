@@ -5,6 +5,17 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
+## Unreleased
+
+- The `invalid_arguments` envelope survives FastMCP 3.4.3 and later. That
+  release stopped letting the call adapter's pydantic `ValidationError` escape
+  and wraps it in FastMCP's own `ValidationError` instead
+  (PrefectHQ/fastmcp#4128), so `ValidationEnvelopeMiddleware` no longer caught
+  it and a bad call got prose-only `isError:true` content with no code, repair,
+  or `structuredContent`. The middleware now accepts both raise forms, keeping
+  the `call[...]` title as the discriminator so a tool body's own model error
+  still propagates as an internal bug.
+
 ## 0.8.0 - 2026-08-22
 
 - An expired legacy record stops blocking its idempotency key. Refusing an

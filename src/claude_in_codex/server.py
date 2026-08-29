@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlparse
 
 from anyio.to_thread import run_sync
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from pontonier.backend.protocol import RunRequest
@@ -348,10 +349,11 @@ class ValidationEnvelopeMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         try:
             return await call_next(context)
-        except ValidationError as exc:
-            if not exc.title.startswith("call["):
+        except (ValidationError, FastMCPValidationError) as exc:
+            argument_error = self._argument_error(exc)
+            if argument_error is None:
                 raise  # internal model bug, not an argument-shape failure
-            first = exc.errors()[0]
+            first = argument_error.errors()[0]
             loc = first.get("loc") or ("arguments",)
             field = ".".join(str(part) for part in loc)
             expected = (first.get("ctx") or {}).get("expected")
@@ -385,6 +387,22 @@ class ValidationEnvelopeMiddleware(Middleware):
                     action=self._repair_action(context, loc),
                 )
             )
+
+    @staticmethod
+    def _argument_error(exc: Exception) -> ValidationError | None:
+        """The pydantic error behind an argument-shape failure, or None.
+
+        FastMCP 3.4.3 (PrefectHQ/fastmcp#4128) stopped letting the call adapter's
+        pydantic ValidationError escape: it now raises fastmcp's own
+        ValidationError with the pydantic one as `__cause__`. Earlier versions
+        raise the pydantic error directly. Both forms are accepted so the
+        envelope survives either FastMCP; the `call[...]` title check stays the
+        discriminator, so a tool body's own model error still propagates as an
+        internal bug."""
+        candidate = exc if isinstance(exc, ValidationError) else exc.__cause__
+        if isinstance(candidate, ValidationError) and candidate.title.startswith("call["):
+            return candidate
+        return None
 
     @staticmethod
     def _repair_action(context, loc) -> RepairAction:
