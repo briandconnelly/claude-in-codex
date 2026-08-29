@@ -12,8 +12,8 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   repository discovery, so a server launched from a git hook — or from any
   parent that exports them — would read a different repository than the
   workspace it resolved, and would send that repository's diff to a paid
-  external API with no error. `_git_env()` now drops every `GIT_*` name; none of its calls need
-  inherited git state.
+  external API with no error. `_git_env()` now drops every `GIT_*` name; none of
+  its calls need inherited git state.
 
 - The test suite scrubs `GIT_*` for the session. The git fixtures build
   throwaway repositories in `tmp_path`, and an inherited `GIT_DIR` redirected

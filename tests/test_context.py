@@ -61,7 +61,7 @@ def test_git_env_drops_unknown_git_variables(monkeypatch, var):
     The named-variable test above passes just as well against a denylist of those
     eight, so it cannot catch that regression. Git keeps adding GIT_* variables,
     and a new redirect-capable one must be dropped by default rather than
-    silently honoured until someone adds it to a list."""
+    silently honored until someone adds it to a list."""
     monkeypatch.setenv(var, "/somewhere/else")
     assert var not in context._git_env()
 

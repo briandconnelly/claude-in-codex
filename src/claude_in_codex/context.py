@@ -121,7 +121,7 @@ def _git_env() -> dict[str, str]:
     Every GIT_* name is dropped rather than a denylist of the dangerous ones: the
     set grows across git versions, and no git call here needs inherited GIT_*
     state (all are read-only, local, and fully specified by argv and cwd). An
-    unrecognised GIT_* variable must not be able to redirect us."""
+    unrecognized GIT_* variable must not be able to redirect us."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["LC_ALL"] = "C"
     env["LANG"] = "C"

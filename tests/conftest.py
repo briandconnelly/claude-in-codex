@@ -23,10 +23,14 @@ def _no_inherited_git_env():
     next test that shells out to git."""
     saved = {k: v for k, v in os.environ.items() if k.startswith("GIT_")}
     for key in saved:
-        del os.environ[key]
+        os.environ.pop(key, None)
     try:
         yield
     finally:
+        # Drop any GIT_* introduced during the run before restoring, so teardown
+        # and late session hooks see exactly the environment we started with.
+        for key in [k for k in os.environ if k.startswith("GIT_")]:
+            os.environ.pop(key, None)
         os.environ.update(saved)
 
 
