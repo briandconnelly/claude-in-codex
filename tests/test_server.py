@@ -3,11 +3,14 @@ import inspect
 import json
 import time
 import types
-from typing import get_args
+from typing import Literal, get_args
 
 import anyio
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
+from pydantic import ValidationError as PydanticValidationError
+from pydantic import create_model
 from tests.conftest import structured
 
 from claude_in_codex import __version__
@@ -20,6 +23,7 @@ from claude_in_codex.server import (
     _ERROR_CATALOG,
     _TOOL_ERROR_CODES,
     CAPABILITY_SUMMARY,
+    ValidationEnvelopeMiddleware,
     _capabilities_payload,
     _first_root,
     _resolve_workspace,
@@ -2539,6 +2543,43 @@ async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_p
     assert res["ok"] is True
     assert res["meta"]["head"] == head
     assert res["meta"]["diff_range"] == f"{base}...{head}"
+
+
+def _call_validation_error(title: str = "call[claude_ask]") -> PydanticValidationError:
+    """A pydantic ValidationError shaped like FastMCP's call-adapter failure."""
+    model = create_model(title, effort=(Literal["low", "high"], ...))
+    with pytest.raises(PydanticValidationError) as excinfo:
+        model(effort="bogus")
+    return excinfo.value
+
+
+def test_argument_error_unwraps_both_fastmcp_raise_forms():
+    """The envelope must survive either FastMCP argument-validation raise form.
+
+    FastMCP <= 3.4.2 lets the call adapter's pydantic ValidationError escape;
+    3.4.3 and later wrap it in fastmcp's own ValidationError (#4128). Neither
+    form is version-detectable at runtime, so both are asserted here rather than
+    only through whichever FastMCP the test environment installs."""
+    bare = _call_validation_error()
+    wrapped = FastMCPValidationError(str(bare))
+    wrapped.__cause__ = bare
+
+    assert ValidationEnvelopeMiddleware._argument_error(bare) is bare
+    assert ValidationEnvelopeMiddleware._argument_error(wrapped) is bare
+
+
+def test_argument_error_ignores_a_tool_body_model_error():
+    """A tool body's own model error is an internal bug, not a bad call.
+
+    Its title is the model class name, not `call[...]`, in both the bare and the
+    wrapped form — so it must propagate instead of becoming an
+    invalid_arguments envelope addressed to the caller."""
+    body = _call_validation_error(title="SomeInternalModel")
+    wrapped = FastMCPValidationError(str(body))
+    wrapped.__cause__ = body
+
+    assert ValidationEnvelopeMiddleware._argument_error(body) is None
+    assert ValidationEnvelopeMiddleware._argument_error(wrapped) is None
 
 
 async def test_invalid_enum_argument_returns_envelope():
