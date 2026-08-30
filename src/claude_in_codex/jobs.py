@@ -489,6 +489,32 @@ def find_by_idempotency_key(cwd: str, key: str) -> str | None:
     return str(held)
 
 
+def find_live_job_for_key(cwd: str, key: str) -> str | None:
+    """The job_id an existing record reserved for this idempotency_key, or None.
+
+    Advisory, and deliberately NOT the dedupe path: start_job_idempotent still
+    owns the atomic (key, arg_hash) reservation, and nothing here should be used
+    to decide whether to spawn.
+
+    It exists for the one caller that must answer "does this key already hold a
+    paid job?" WITHOUT being able to build the prompt the digest needs — the
+    empty-diff branch, which returns before any launch is attempted. Without it
+    a keyed retry whose diff has since gone empty reports "no changes" while the
+    job that key reserved keeps running and keeps spending.
+    """
+    with _JOBS_LOCK:
+        for sd in _store().list_jobs(cwd):
+            job_id = sd.get("job_id", "")
+            try:
+                jd = _job_dir(cwd, job_id)
+            except ValueError:
+                continue
+            meta = _read_meta(jd)
+            if meta is not None and _record_extra(meta).get("idempotency_key") == key:
+                return job_id
+    return None
+
+
 def _reap_stale_markers(cwd: str) -> None:
     """Delete legacy idempotency markers whose reserved job record no longer
     exists AND whose creation predates the TTL."""

@@ -128,6 +128,40 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   to a question the caller never asked. It does conflict; now proven. (Raised by
   Copilot's review of #129.)
 
+- A keyed `*_async` retry can no longer report "no changes" over a job that is
+  still running and spending. The empty-diff branch returns before any launch,
+  so it never reached the idempotency index and `idempotency_key` was simply
+  ignored on that path. The sequence is ordinary — and is precisely what the
+  shipped guidance now tells an agent to do: launch with a key, lose the
+  connection, commit the change while waiting, retry with the same arguments.
+  The retry answered `verdict: pass`, "No changes in scope; skipped Claude
+  call", with no `job_id` and no hint that a paid job existed; the job kept
+  running and kept spending, recoverable only if the agent independently thought
+  to call `claude_job_list`. A key that already holds a job is now honored even
+  when the current call would not start one: the launch reports
+  `idempotency_conflict` and names that job in `action.arguments`. Conflict is
+  not a rule invented for this branch — the digest covers the gathered diff, so a
+  retry whose diff merely CHANGED already conflicted; this makes a diff that
+  changed to nothing behave the same way instead of reporting success. An empty
+  diff with no key, or with a key holding nothing, still skips the spend exactly
+  as before. Pre-existing for `claude_review_changes_async`, but this PR doubled
+  the surface and added the guidance that walks into it. (Raised by an
+  independent review of #129.)
+
+- The `claude_not_found` catalog entry describes both of its causes. The
+  executable split earlier in this train gave the code a second meaning, "found
+  but not executable", while `error_catalog` still published only "not on PATH"
+  — the one place an agent looks up what a code means would have had it tell a
+  user to reinstall a CLI that was already installed. (Raised by an independent
+  review of #129.)
+
+- `tool_details` gets the same review-only prose pin that `tools/list` already
+  had. Both halves were corrected together, but only one was tested, and this
+  train has already had a prose edit silently fail to apply. `claude_job_result`
+  also now advertises the `detail` parameter it accepts, which the new
+  idempotency guidance tells callers to reach for. (Raised by an independent
+  review of #129.)
+
 - The three `*_async` starters share one launcher. Idempotency-outcome mapping,
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own

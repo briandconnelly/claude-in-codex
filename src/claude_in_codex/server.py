@@ -1603,6 +1603,13 @@ async def claude_adversarial_review(
     return _result(out)
 
 
+async def _job_held_by_key(cwd: str, idempotency_key: str | None) -> str | None:
+    """The job this key already holds, or None when there is no key or no job."""
+    if not idempotency_key:
+        return None
+    return await run_sync(lambda: jobs.find_live_job_for_key(cwd, idempotency_key))
+
+
 async def _legacy_keyed_job(cwd: str, idempotency_key: str | None) -> str | None:
     """The job_id a legacy 0.7 ``idem-*.json`` marker reserved for this key, else None.
 
@@ -1638,6 +1645,38 @@ async def _legacy_keyed_job(cwd: str, idempotency_key: str | None) -> str | None
     if await run_sync(lambda: jobs.status(cwd, held)) is None:
         return None
     return held
+
+
+def _key_holds_job_error(job_id: str, cwd: str, meta: Meta) -> dict:
+    """Refuse a keyed launch whose diff went empty while its job is still held.
+
+    The empty-diff branch returns before any launch, so it never reaches the
+    idempotency index. Left alone, a keyed retry after the diff was committed
+    away answers "No changes in scope; skipped Claude call" with verdict=pass —
+    a clean bill of health — while the paid job that key reserved is still
+    running and still spending, recoverable only if the caller independently
+    thinks to call claude_job_list.
+
+    Conflict is not a rule invented for this branch: the digest covers the
+    gathered diff, so a retry whose diff merely CHANGED already conflicts. This
+    makes a diff that changed to nothing behave the same way instead of
+    reporting success.
+    """
+    return _err(
+        "idempotency_conflict",
+        "This idempotency_key already holds a background job. The diff is now empty, "
+        "so this call cannot carry the same effective arguments that job was started "
+        "with — and that job may still be running and spending.",
+        "Read the existing job with claude_job_status, or pass a new idempotency_key "
+        "to launch a fresh run.",
+        meta,
+        offending="idempotency_key",
+        action=RepairAction(
+            next_step="call_tool",
+            tool="claude_job_status",
+            arguments={"job_id": job_id, "workspace_root": cwd},
+        ),
+    )
 
 
 def _legacy_key_error(job_id: str, cwd: str, meta: Meta) -> dict:
@@ -1758,14 +1797,14 @@ async def _launch_job(
         # whose repair points at that directory. Matching on the bare
         # FileNotFoundError/PermissionError types conflated the two and told a
         # caller with an unwritable state directory to install a CLI they had.
-        runnable = not isinstance(exc, jobs.ClaudeExecutableNotRunnable)
+        missing = not isinstance(exc, jobs.ClaudeExecutableNotRunnable)
         return _err(
             "claude_not_found",
             "The `claude` CLI was not found on PATH."
-            if runnable
+            if missing
             else "The `claude` CLI was found but is not executable.",
             "Install Claude Code and ensure `claude` is on PATH."
-            if runnable
+            if missing
             else "Make `claude` executable (chmod +x) and retry.",
             meta,
         )
@@ -1949,6 +1988,9 @@ async def claude_review_changes_async(
         head=head,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
+        held = await _job_held_by_key(cwd, idempotency_key)
+        if held is not None:
+            return _result(_key_holds_job_error(held, cwd, meta))
         return _result(
             _empty_diff_result(
                 "claude_review_changes", meta, ctx_data.summary, effective_paths, detail=r.detail
@@ -2289,6 +2331,9 @@ async def claude_adversarial_review_async(
             )
         meta = build_meta(paths=effective_paths, redacted_paths=ctx_data.redacted_paths)
         if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
+            held = await _job_held_by_key(cwd, idempotency_key)
+            if held is not None:
+                return _result(_key_holds_job_error(held, cwd, meta))
             # No diff to attack: return the same free result the synchronous tool
             # returns rather than paying for a job. The launch envelope is a
             # SuccessResult here, not a job handle — see #80.
@@ -2937,8 +2982,9 @@ _PAID_PREFLIGHT_ERRORS = [
     *_ARG_ERRORS,
     *_WORKSPACE_ERRORS,
     *_CONFIG_ERRORS,
-    # The only launch failure the starter reports itself: the executable is
-    # missing, so no job is ever spawned.
+    # The only launch failure the starter reports itself: `claude` is missing or
+    # not executable, so no job is ever spawned. Every other launch OSError (the
+    # job-state directory above all) is internal_error — see ClaudeExecutableError.
     "claude_not_found",
     *_INTERNAL_ERRORS,
 ]
@@ -3001,7 +3047,12 @@ _TOOL_ERROR_CODES: dict[str, list[str]] = {
 # the same table the error envelope itself uses, so the published default and the
 # emitted default cannot disagree.
 _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
-    ("claude_not_found", "The `claude` executable is not on PATH.", False, []),
+    (
+        "claude_not_found",
+        "The `claude` executable is not on PATH, or is present but not executable.",
+        False,
+        [],
+    ),
     (
         "claude_auth_required",
         "claude is installed but not logged in for the resolved config_mode.",
@@ -3250,6 +3301,10 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "idempotency_key dedupes on (key, effective arguments) atomically per "
         "workspace via an on-disk reservation. After a dropped connection, retry "
         "with the SAME arguments, or check claude_job_list before re-launching.",
+        "A key that already holds a job is honored even when the current call would "
+        "not start one: a diff-bearing starter whose diff has since gone empty "
+        "reports idempotency_conflict naming that job, rather than a no-changes "
+        "result that would hide a run still spending.",
         "The effective arguments are the ones that change what Claude is asked and "
         "paid to do. `detail` is NOT one of them: the raw envelope is stored, so a "
         "replay can still be read at any density by passing `detail` to "
@@ -3471,7 +3526,7 @@ def _capabilities_payload() -> dict:
                 "Fetch a finished background job result without deleting it.",
                 "the envelope of the tool named by the job's kind, with meta.job_id",
                 required=["job_id"],
-                optional=["workspace_root"],
+                optional=["workspace_root", "detail"],
             ),
             tool_detail(
                 "claude_job_consume_result",

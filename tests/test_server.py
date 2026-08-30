@@ -4181,3 +4181,116 @@ async def test_job_lifecycle_prose_is_not_review_only():
     # And the result tool must not promise one specific tool's envelope.
     assert "`kind`" in tools["claude_job_result"].description
     assert "claude_review_changes envelope" not in tools["claude_job_result"].description
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "t", "scope": "working_tree"}),
+    ],
+)
+async def test_an_empty_diff_cannot_hide_a_job_the_key_already_holds(
+    monkeypatch, git_repo, tmp_path, tool, args
+):
+    """The empty-diff branch returns before any launch, so it never reaches the
+    idempotency index — and a keyed retry used to sail straight past a job that
+    key had already started.
+
+    The scenario is ordinary, not contrived, and it is exactly what the shipped
+    guidance tells an agent to do: launch with a key, lose the connection, commit
+    the change while waiting, then retry with the same arguments. That retry
+    answered "No changes in scope; skipped Claude call" with verdict=pass — a
+    clean bill of health — while the paid job kept running and kept spending,
+    recoverable only if the agent independently thought to call claude_job_list.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    import subprocess as _sp
+
+    ws = str(git_repo)
+    call = {**args, "workspace_root": ws, "idempotency_key": "K"}
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool(tool, call))
+        assert started["ok"] is True
+
+        # The agent commits while waiting, so the working tree is now clean.
+        _sp.run(["git", "add", "-A"], cwd=ws, check=True, capture_output=True)
+        _sp.run(
+            ["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "wip"],
+            cwd=ws,
+            check=True,
+            capture_output=True,
+        )
+
+        retry = structured(await client.call_tool(tool, call, raise_on_error=False))
+
+        listed = structured(await client.call_tool("claude_job_list", {"workspace_root": ws}))
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": started["job_id"], "workspace_root": ws}
+        )
+
+    # The job really is still alive — this is what makes the false all-clear costly.
+    assert [j["status"] for j in listed["jobs"] if j["job_id"] == started["job_id"]] == ["running"]
+
+    assert retry["ok"] is False, "an empty diff must not report success over a held key"
+    assert retry["error"]["code"] == "idempotency_conflict"
+    # The recovery must name the job, so the caller is never left to guess it.
+    assert retry["error"]["action"]["tool"] == "claude_job_status"
+    assert retry["error"]["action"]["arguments"]["job_id"] == started["job_id"]
+
+
+async def test_an_empty_diff_without_a_key_still_skips_spend(monkeypatch, git_repo, tmp_path):
+    """The guard above must not cost the no-spend shortcut its reason for existing:
+    with no key, and with a key that holds nothing, an empty diff still returns
+    the free result rather than starting a paid job."""
+    import subprocess as _sp
+
+    _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("job should not start")),
+    )
+    async with Client(mcp) as client:
+        for extra in ({}, {"idempotency_key": "unused-key"}):
+            data = structured(
+                await client.call_tool(
+                    "claude_review_changes_async",
+                    {"scope": "working_tree", "workspace_root": str(git_repo), **extra},
+                    raise_on_error=False,
+                )
+            )
+            assert data["ok"] is True, extra
+            assert data["verdict"] == "pass"
+            assert "job_id" not in data
+
+
+async def test_error_catalog_condition_covers_both_claude_not_found_causes():
+    """claude_not_found now carries two meanings, and the published catalog is
+    where an agent looks up what a code means. A condition naming only PATH would
+    have it tell a user to reinstall a CLI that is installed but unrunnable."""
+    catalog = {e["code"]: e for e in _capabilities_payload()["error_catalog"]}
+    condition = catalog["claude_not_found"]["condition"].lower()
+    assert "path" in condition
+    assert "not executable" in condition
+
+
+async def test_capability_tool_details_are_not_review_only():
+    """The sibling of the tools/list check. `tool_details` carried the same
+    review-only wording and was corrected in the same commit, but only the
+    tools/list half was pinned — in a repo that has already had one prose edit
+    silently fail to apply, an unpinned correction is the one that regresses."""
+    details = {d["name"]: d for d in _capabilities_payload()["tool_details"]}
+    for name in (
+        "claude_job_status",
+        "claude_job_result",
+        "claude_job_consume_result",
+        "claude_job_cancel",
+        "claude_job_list",
+    ):
+        text = f"{details[name]['use_when']} {details[name]['returns']}"
+        assert "review job" not in text, name
+        assert "same structured envelope as claude_review_changes" not in text, name
+    assert "kind" in details["claude_job_result"]["returns"]
