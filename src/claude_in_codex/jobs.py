@@ -21,7 +21,11 @@ launches go through the store's idempotency index.
 
 The prompt is streamed to the worker over a pipe (`stdin_text`) and the
 worker's child inherits that pipe — the prompt never lands on disk or argv,
-same as 0.7.
+same as 0.7. The SYSTEM prompt is a different matter and always has been: the
+guardrails, and any caller `system_prompt_append` text composed behind them,
+ride argv as the `--append-system-prompt` value, so they are visible to a
+process listing for the run's duration. The job record on disk stores only the
+caller text's FINGERPRINT (sha256 + byte length), never the text.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ from typing import cast
 from uuid import uuid4
 
 from pontonier.core.jobs import DiscardOutcome, JobStore
+from pydantic import ValidationError
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
@@ -57,6 +62,7 @@ from claude_in_codex.schemas import (
     ErrorResult,
     Meta,
     RepairAction,
+    SystemPromptAppend,
     branch_range,
     workspace_warning_for,
 )
@@ -264,6 +270,12 @@ class JobConfig:
     paths: list[str] | None = None
     redacted_paths: list[str] | None = None
     security_warnings: list[str] | None = None
+    # FINGERPRINT of the caller's system-prompt text, never the text. A job
+    # result read later must be able to attest which prompt produced it, and the
+    # sha256/byte-length does that; storing the prose would put system-prompt
+    # material in the on-disk job record, which is exactly what
+    # --no-session-persistence exists to prevent.
+    system_prompt_append: SystemPromptAppend | None = None
     idempotency_key: str | None = None
 
 
@@ -289,6 +301,9 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
             "paths": cfg.paths,
             "redacted_paths": cfg.redacted_paths or [],
             "security_warnings": cfg.security_warnings or [],
+            "system_prompt_append": (
+                cfg.system_prompt_append.model_dump() if cfg.system_prompt_append else None
+            ),
         },
         "context_summary": summary,
     }
@@ -636,8 +651,24 @@ def _build_meta(meta: dict) -> Meta:
         redacted_paths=c.get("redacted_paths") or [],
         security_warnings=c.get("security_warnings") or [],
         elapsed_ms=_elapsed_ms(meta),
+        system_prompt_append=_fingerprint_from(c.get("system_prompt_append")),
         job_id=meta.get("job_id"),
     )
+
+
+def _fingerprint_from(raw: object) -> SystemPromptAppend | None:
+    """Rebuild the persona fingerprint from an on-disk record, or None.
+
+    The record is a file another process wrote and anyone can edit: a tampered,
+    truncated, or hand-written value must degrade the way every other field in
+    `_build_meta` does (missing -> default), not turn a status read into an
+    unstructured error. The cost of degrading is one absent attestation."""
+    if not raw:
+        return None
+    try:
+        return SystemPromptAppend.model_validate(raw)
+    except (ValidationError, TypeError, ValueError):
+        return None
 
 
 _PROMOTABLE = {"cancelled", "timeout", "failed"}

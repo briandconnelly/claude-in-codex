@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Annotated, Literal, cast
 from uuid import uuid4
@@ -24,6 +25,7 @@ FINGERPRINT_COVERS = [
     "async-lifecycle descriptor",
     "config_mode/access/scope/detail/effort value sets",
     "detail-level field density, output bounds, and the truncation contract",
+    "caller-supplied system-prompt text (parameter, cap, and the meta fingerprint)",
     "capability summary and capabilities payload",
 ]
 
@@ -240,6 +242,32 @@ class ContextSummary(BaseModel):
     lines_removed: int = 0
 
 
+class SystemPromptAppend(BaseModel):
+    """Fingerprint of caller-supplied text folded into the system prompt.
+
+    Echoed so a reader of a result knows it was produced under a non-default
+    system prompt, and can tell two runs apart, WITHOUT the text itself being
+    replayed into the envelope. The text is never carried here or stored; the
+    background-job record persists this fingerprint, not the prose.
+
+    Present on every envelope that reports a Claude run: sync results, the
+    async launch acknowledgement, and the meta rebuilt for claude_job_result and
+    claude_job_consume_result. On those, absent means the guardrail prompt ran
+    alone. It is NOT a general "no persona was supplied" signal on envelopes that
+    describe no run — argument errors, an empty-diff pass, and context-too-large
+    rejections may omit it whether or not the call carried one, because nothing
+    was sent to Claude for it to attest."""
+
+    model_config = ConfigDict(extra="forbid")
+    sha256: str
+    bytes: int
+
+    @classmethod
+    def of(cls, text: str) -> SystemPromptAppend:
+        raw = text.encode()
+        return cls(sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+
+
 class Meta(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cwd: str
@@ -278,6 +306,9 @@ class Meta(BaseModel):
     redacted_paths: list[str] = Field(default_factory=list)
     cost_usd: float | None = None
     usage: Usage | None = None
+    # Set when the caller supplied system_prompt_append; None means the guardrail
+    # prompt ran alone. The text is fingerprinted, never echoed.
+    system_prompt_append: SystemPromptAppend | None = None
     job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
     fingerprint: str = FINGERPRINT
@@ -760,7 +791,8 @@ _META_STUB = {
         "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
         "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
-        "usage, job_id, request_id, fingerprint. Full contract: claude_capabilities."
+        "usage, system_prompt_append, job_id, request_id, fingerprint. "
+        "Full contract: claude_capabilities."
     ),
 }
 

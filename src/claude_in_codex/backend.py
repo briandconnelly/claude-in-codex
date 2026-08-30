@@ -42,6 +42,13 @@ CONTRACT = PONTONIER_CONTRACT
 
 _KIND_DEFAULT_ACCESS = "toolless"
 
+# The ONLY extra_args descriptor this backend accepts. RunRequest is frozen at
+# contract_api_version = 1 and has no field for caller-supplied system-prompt
+# text, so the pair rides extra_args and is FOLDED into the composed system
+# prompt by prepare() — it is never appended to argv as a second flag, which
+# would leave the guardrail/persona ordering up to the CLI.
+_PERSONA_FLAG = "--append-system-prompt"
+
 
 class ClaudeBackend:
     """The behavior half of the Claude contract (facts live on PONTONIER_CONTRACT)."""
@@ -50,6 +57,44 @@ class ClaudeBackend:
         # Upstream rejects a bad --effort at arg-parse (loud, zero spend), and this
         # server also enforces VALID_EFFORTS at its boundary; mirror that boundary
         # here so a direct adapter caller cannot send a value the tools would refuse.
+        extra = tuple(request.extra_args)
+        if extra and (len(extra) != 2 or extra[0] != _PERSONA_FLAG):
+            return ClassifiedFailure(
+                code="invalid_arguments",
+                detail=f"extra_args accepts only ('{_PERSONA_FLAG}', <text>).",
+            )
+        # Mirror the server's boundary here too, for the same reason the effort
+        # check above exists: a direct adapter caller must not be able to send a
+        # value the tools would refuse — and then spend on it. Normalize first, so
+        # the cap describes the bytes that are actually sent, and so blank text is
+        # refused rather than silently becoming a default-prompt run.
+        if len(extra) == 2:
+            persona = config.normalize_system_prompt_append(extra[1])
+            if persona is None:
+                return ClassifiedFailure(
+                    code="invalid_arguments",
+                    detail=f"{_PERSONA_FLAG} text is empty after normalization.",
+                )
+            unsafe = config.argv_unsafe_reason(persona)
+            if unsafe is not None:
+                return ClassifiedFailure(
+                    code="invalid_arguments",
+                    detail=f"{_PERSONA_FLAG} text {unsafe}; it cannot ride argv.",
+                )
+            if config.contains_framing_marker(persona):
+                return ClassifiedFailure(
+                    code="invalid_arguments",
+                    detail=f"{_PERSONA_FLAG} text contains a framing marker.",
+                )
+            size = len(persona.encode())
+            if size > config.MAX_SYSTEM_PROMPT_APPEND_BYTES:
+                return ClassifiedFailure(
+                    code="invalid_arguments",
+                    detail=(
+                        f"{_PERSONA_FLAG} text is {size} bytes; the cap is "
+                        f"{config.MAX_SYSTEM_PROMPT_APPEND_BYTES}."
+                    ),
+                )
         effort = request.reasoning_effort
         if effort is not None and effort not in cli_contract.VALID_EFFORTS:
             return ClassifiedFailure(
@@ -66,6 +111,13 @@ class ClaudeBackend:
         artifacts: answer, cost, and session id all arrive in the stdout JSON
         envelope."""
         config_mode = request.config_mode or config.defaults().config_mode
+        # Fail closed rather than dropping an extra_arg we do not understand: a
+        # caller that believed it sent a persona would otherwise get a
+        # default-prompt run — and be billed for it — with no signal.
+        if (invalid := self.validate_request(request)) is not None:
+            raise ValueError(invalid.detail)
+        extra = tuple(request.extra_args)
+        persona = extra[1] if len(extra) == 2 else None
         cmd, dropped = claude.build_command(
             request.prompt,
             config_mode,
@@ -75,6 +127,7 @@ class ClaudeBackend:
             if request.budget_usd is not None
             else config.defaults().max_budget_usd,
             effort=request.reasoning_effort,
+            system_prompt_append=persona,
             flag_support=preflight.flag_support(),
         )
         # This backend stages NO file artifacts, so nothing here outlives the

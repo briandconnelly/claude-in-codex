@@ -203,6 +203,16 @@ PONTONIER_CONTRACT = _pontonier_contract.BackendContract(
         model_identifier_authority="advisory",
         effort_metadata_authority="advisory",
     ),
+    # The behavior half accepts exactly one extra-args form: the persona
+    # descriptor that backend.ClaudeBackend folds into the composed system prompt
+    # (it never reaches argv as a second flag). Declaring it keeps the facts half
+    # honest — an empty policy means "every extra arg is refused loudly", which
+    # stopped being true when system_prompt_append landed. model/effort are
+    # reserved so an extra arg can never shadow the first-class parameters.
+    extra_args=_pontonier_contract.ExtraArgsPolicy(
+        allowed_option_forms=("--append-system-prompt",),
+        reserved_keys=frozenset({"model", "effort"}),
+    ),
     isolation_policy=_pontonier_contract.IsolationPolicy.TOOL_ALLOWLIST,
     needs_orphan_sweep=False,
     # claude rejects a bad --effort at arg-parse (VALID_EFFORTS is also enforced

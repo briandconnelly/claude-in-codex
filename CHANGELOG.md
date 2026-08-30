@@ -219,6 +219,71 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own
   argument validation, context gathering, and prompt.
+- `claude_consult`, `claude_review_changes`, and `claude_review_changes_async`
+  accept `system_prompt_append`: caller-supplied persona or focus text folded
+  into Claude's system prompt BEHIND `INDEPENDENT_CRITIC_PROMPT`, which always
+  leads. Until now a persona had to ride `prompt`/`context`, the untrusted-data
+  tier the guardrails tell Claude not to obey, and nothing recorded that a
+  non-default prompt was used. `claude_adversarial_review` does not accept it:
+  its fixed stance is the product.
+
+  The text is normalized once (stripped; blank means absent), so the bytes
+  capped, hashed, and sent are one string. It is capped at 4096 bytes and
+  refused with `invalid_arguments` before any spend when it is over the cap,
+  cannot ride argv (`details.reason = "argv_unsafe_text"`: NUL or unpaired
+  surrogate), or carries one of the server's framing-marker lines
+  (`details.reason = "forged_framing_marker"`). The framing delimits the text on
+  both sides and labels it caller-supplied and untrusted; the closing marker
+  restates that the guardrails outrank anything between the markers. Marker
+  detection is case- and whitespace-insensitive over common ASCII fences, so it
+  makes forging a close harder, not impossible.
+
+  `meta.system_prompt_append` echoes a SHA-256 and byte length — never the text
+  — on the sync result, the async launch acknowledgement, and the meta rebuilt
+  for `claude_job_result` and `claude_job_consume_result`. Absent means the
+  guardrail prompt ran alone on every envelope that describes a run; envelopes
+  that describe no run (argument errors, empty-diff pass, context-too-large) may
+  omit it either way. `JobConfig` persists the fingerprint, never the text, so a
+  background job keeps prompt material off disk; a tampered on-disk fingerprint
+  degrades to an absent attestation instead of failing the status read.
+
+  Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-37`: a new input parameter
+  on three tools, a new `meta` field, and amended capability text.
+
+  This widens a trust boundary: a client may promote text into the system turn,
+  and the client may itself be acting on an untrusted workspace. Guardrail
+  ordering, the two-sided framing, the byte cap, and the meta echo are
+  mitigations, not a sandbox. Only one guarantee is mechanical — the tool
+  allowlist rides argv, so no prompt text can grant a tool. Verdict integrity is
+  an instruction to the model; the parameter description says "instructed not
+  to", not "cannot". The composed system prompt is passed on the command line,
+  so the plaintext is visible to local process listings during the run; the
+  description, the skill, and `SECURITY.md` say so. Never put secrets there.
+
+- `ClaudeBackend` mirrors the byte cap and fails closed. `validate_request`
+  rejects an oversized persona for the same reason it already rejected an
+  invalid effort — a direct adapter caller must not be able to send a value the
+  tools would refuse, and then spend on it — and `prepare()` now raises instead
+  of silently dropping an `extra_args` form it does not understand, which would
+  have run a default prompt and billed a caller who believed a persona was sent.
+
+- `PONTONIER_CONTRACT` declares its extra-args policy. An empty `ExtraArgsPolicy`
+  means "every extra arg is refused loudly", which stopped being true when the
+  backend began accepting the persona descriptor; the contract's facts half now
+  names the one allowed option form and reserves `model`/`effort` so an extra arg
+  cannot shadow a first-class parameter.
+
+- The `tools/list` wire budget rises from 66,000 to 68,000 bytes and the token
+  proxy from 16,500 to 17,000. Measured 65,400 before `system_prompt_append` and
+  66,718 after (+1,318 bytes / +2.0%) across four advertised records; the
+  previous 600-byte headroom could not absorb it. The parameter description is a
+  pointer, with the contract published once in `claude_capabilities` and the
+  `meta` echo covered by the existing Meta stub.
+
+- The `CAPABILITY_SUMMARY` ceiling rises from 1100 to 1200 characters. A
+  parameter that admits caller text into the system prompt is a first-read
+  security disclosure; the summary measured 1,062 characters and no phrasing of
+  the guardrails-always-lead guarantee fit the remaining 38.
 
 - Git calls no longer inherit `GIT_*` environment variables. `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their relatives override git's

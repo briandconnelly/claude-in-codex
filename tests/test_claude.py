@@ -8,6 +8,7 @@ from claude_in_codex.claude import (
     run_claude_async,
 )
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
+from claude_in_codex.config import INDEPENDENT_CRITIC_PROMPT
 from claude_in_codex.preflight import FlagSupport
 
 # Probe could not run -> fail open: every flag is treated as supported, so these
@@ -550,3 +551,33 @@ def test_classify_auth_not_misread_as_contract_drift():
         timed_out=False,
     )
     assert classify_failure(run).code == "claude_auth_required"
+
+
+def test_build_command_appends_persona_after_guardrails_in_one_flag():
+    cmd, _ = build_command(
+        prompt="hi",
+        config_mode="inherit",
+        access="toolless",
+        model=None,
+        max_budget_usd=1.0,
+        system_prompt_append="Only report auth findings.",
+        flag_support=_NO_PROBE,
+    )
+    assert cmd.count("--append-system-prompt") == 1
+    value = cmd[cmd.index("--append-system-prompt") + 1]
+    assert value.startswith(INDEPENDENT_CRITIC_PROMPT)
+    assert "Only report auth findings." in value
+    # Caller text is bracketed, so the guardrails have the last word.
+    assert not value.endswith("Only report auth findings.")
+
+
+def test_build_command_without_persona_sends_bare_guardrails():
+    cmd, _ = build_command(
+        prompt="hi",
+        config_mode="inherit",
+        access="toolless",
+        model=None,
+        max_budget_usd=1.0,
+        flag_support=_NO_PROBE,
+    )
+    assert cmd[cmd.index("--append-system-prompt") + 1] == INDEPENDENT_CRITIC_PROMPT

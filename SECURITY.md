@@ -34,6 +34,13 @@ is residual risk. This disclosure is mirrored agent-side in each paid tool's
 description and in the `data_egress` field of `claude_capabilities`. Use
 `access=toolless` when a workspace may contain sensitive data.
 
+The system prompt rides argv. The server streams the user prompt to the
+`claude` CLI over a pipe so review material never lands on argv or disk, but the
+guardrails and any caller `system_prompt_append` text composed behind them are
+passed as the `--append-system-prompt` value, so they are visible to a process
+listing on the host for the run's duration. Do not put secrets in
+`system_prompt_append`. Job records store only its SHA-256 and byte length.
+
 The tool allowlist does not govern Claude Code hooks. In `config_mode=inherit`
 or `scoped`, workspace `.claude/settings*.json` hooks may run shell before or
 during a review. Use `config_mode=safe` or `config_mode=bare` for untrusted

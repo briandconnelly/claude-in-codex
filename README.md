@@ -141,6 +141,25 @@ Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECOND
   actual spend in `meta.cost_usd` when available.
 - Reviews default to `effort=xhigh` for depth. Lower `effort` to `high` or `medium` for routine
   reviews when cost matters.
+- `system_prompt_append` (on `claude_consult`, `claude_review_changes`, and
+  `claude_review_changes_async`) adds your own persona or focus directive to Claude's system
+  prompt. The plugin's guardrail prompt always leads and cannot be replaced, and your text is
+  bracketed by markers whose closing side restates that the guardrails outrank anything between
+  them. It is capped at 4096 bytes and rejected before any spend.
+  Text containing one of those marker lines, or a near-miss with a common ASCII fence or
+  `caller supplied` unhyphenated, is refused. That makes it harder to forge a close and pose as
+  server-authored instructions; a determined caller can reword a marker past the pattern, which
+  is why the guardrails also tell Claude to distrust anything between the markers.
+  `meta.system_prompt_append` records a SHA-256 and byte length of
+  the text, never the text, so a result shows it ran under a non-default prompt — on sync results
+  and on background-job results alike. A background job stores that same fingerprint on disk,
+  never your text. `claude_adversarial_review` does not accept it.
+- One guarantee there is mechanical and one is not. Claude cannot gain a tool from this text:
+  the allowlist rides the command line, not the prompt. Claude is only *instructed* not to let
+  the text dictate a verdict. Treat `system_prompt_append` as a trust boundary you are widening
+  — it is the one way caller text reaches the system turn — and never build it from untrusted
+  workspace content. Note that the system prompt rides the command line, so your text is visible
+  to a process listing on that machine for the duration of the run.
 
 If a requested diff scope has no changes, the review tools return a passing result without
 invoking Claude.
