@@ -4677,6 +4677,36 @@ async def test_async_launch_meta_records_system_prompt_append(monkeypatch, git_r
     assert fp["bytes"] == 7
 
 
+async def test_async_launch_argv_carries_the_composed_system_prompt(monkeypatch, git_repo):
+    """The async starter builds its argv through a SECOND _run_request/prepare()
+    call site, so the persona must be proven to reach the detached worker's argv
+    — folded behind the guardrails into one flag, as on the sync path."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.config import compose_system_prompt
+
+    seen = {}
+
+    def start_job(cmd, *a, **k):
+        seen["cmd"] = list(cmd)
+        return ("0" * 32, "2026-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(srv.jobs, "start_job", start_job)
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "claude_review_changes_async",
+            {
+                "scope": "working_tree",
+                "workspace_root": str(git_repo),
+                "system_prompt_append": "Only auth findings.",
+            },
+        )
+    cmd = seen["cmd"]
+    assert cmd.count("--append-system-prompt") == 1
+    assert cmd[cmd.index("--append-system-prompt") + 1] == compose_system_prompt(
+        "Only auth findings."
+    )
+
+
 async def test_job_meta_rebuild_carries_system_prompt_append(tmp_path):
     """A job result read later is the case the audit trail exists for: absent must
     mean the guardrail prompt ran alone, never 'we forgot to record it'."""
