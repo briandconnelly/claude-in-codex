@@ -37,7 +37,10 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   (Claude's stored reply may still repeat any input), so a
   background job keeps prompt material off disk; a tampered on-disk fingerprint
   degrades to an absent attestation plus a `security_warnings` entry, so it is
-  not mistaken for a default-prompt run and does not fail the status read.
+  not mistaken for a default-prompt run and does not fail the status read. A
+  REMOVED fingerprint cannot be detected: the job record is ordinary local
+  state, not a tamper-evident log, so the attestation is of what the server
+  recorded (see `SECURITY.md`).
 
   Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-38` (`schema-37` went to
   the recoverable async forms above): a new input parameter on four tools, a

@@ -4568,6 +4568,25 @@ async def test_input_bound_sums_free_text_with_system_prompt_append(
     assert data["error"]["details"]["limit_bytes"] == 1000
 
 
+async def test_consult_accepts_system_prompt_append_exactly_at_the_cap(fake_claude, tmp_path):
+    """The cap is inclusive at the tool boundary, not just in the adapter: an
+    off-by-one regression would refuse valid text on all four tools."""
+    from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_consult",
+            {
+                "prompt": "x",
+                "workspace_root": str(tmp_path),
+                "system_prompt_append": "a" * MAX_SYSTEM_PROMPT_APPEND_BYTES,
+            },
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert data["meta"]["system_prompt_append"]["bytes"] == MAX_SYSTEM_PROMPT_APPEND_BYTES
+
+
 async def test_consult_blank_system_prompt_append_records_no_fingerprint(fake_claude, tmp_path):
     """Blank text composes to the bare guardrails, so meta must NOT attest a
     non-default prompt for what is really a default run."""

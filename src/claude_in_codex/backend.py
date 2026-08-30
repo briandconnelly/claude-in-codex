@@ -98,6 +98,11 @@ class ClaudeBackend:
             # The operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES bounds everything
             # caller-authored that reaches Anthropic; every tool refuses a persona
             # over it, so a direct adapter caller must not get to spend on one.
+            # This is the persona ALONE, deliberately: `request.prompt` is the
+            # composed prompt (lead-in template, caller fields, and for reviews
+            # the gathered diff, which MAX_DIFF_BYTES bounds separately), so the
+            # adapter cannot see the caller's fields to sum them. That summed
+            # bound lives at the tool boundary, the only place the fields exist.
             limit = config.max_input_bytes()
             if size > limit:
                 return ClassifiedFailure(
