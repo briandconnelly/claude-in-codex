@@ -186,6 +186,26 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `claude_job_list` as the authority, so the contract does not claim a guarantee
   it cannot keep. (Raised by Copilot's review of #129.)
 
+- The held-key conflict no longer offers a repair that cannot work. It said
+  "pass a new idempotency_key to launch a fresh run", but the diff on that
+  branch is still empty, so the same call under a fresh key takes the empty-diff
+  shortcut again and launches nothing — verified. A repair a caller can follow
+  and get nowhere is worse than none: it costs a round trip and teaches them the
+  key is broken. It now points at `claude_job_status` first and says plainly
+  that a new key alone will not start a run while the diff is empty, naming
+  scope/base as the thing to change. The test follows both routes and asserts
+  the dead end is a dead end and the named route reaches a job. (Raised by
+  Copilot's review of #129.)
+
+- The discovery-budget rationale names the budgets in force. Two derived-value
+  references were left at the pre-#93 numbers when the ceiling was raised —
+  `ceil(66,000/4)` and "16,500 == 66,000/4" — because comments are not executed
+  and nothing checked them. That is the third prose edit in this train to drift
+  or silently fail to apply, so `test_the_budget_derivations_in_this_file_are_not_stale`
+  now pins the rationale to the constants it explains, and a future raise that
+  updates only the numbers fails until the reasoning moves with them. (Raised by
+  Copilot's review of #129.)
+
 - The three `*_async` starters share one launcher. Idempotency-outcome mapping,
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own

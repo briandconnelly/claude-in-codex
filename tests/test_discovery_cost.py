@@ -6,6 +6,7 @@ entry, which is why the advertised schemas in schemas.py are slimmed (Meta
 stubbed, ErrorInfo stubbed, pydantic titles stripped) before registration."""
 
 import json
+from pathlib import Path
 
 import pytest
 from fastmcp import Client
@@ -59,7 +60,7 @@ WIRE_BUDGET_BYTES = 80_700
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(66,000/4)).
+# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(80,700/4)).
 TOKEN_PROXY_BUDGET = 20_175  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
 
 
@@ -88,7 +89,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (16,500 == 66,000/4) and the proxy is
+    The budgets are currently proportional (20,175 == 80,700/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""
@@ -220,3 +221,21 @@ async def test_capabilities_publishes_the_full_error_catalog():
     # Required, not optional: this is the catalog's only machine-readable home,
     # so schema-driven clients must be able to rely on its presence.
     assert "error_codes" in CAPABILITIES_SCHEMA["required"]
+
+
+def test_the_budget_derivations_in_this_file_are_not_stale():
+    """The prose that justifies these budgets must name the budgets in force.
+
+    Both derived-value references above were left at the pre-#93 numbers when the
+    ceiling was raised, and nothing noticed: comments are not executed. That is
+    the third prose edit in this train to drift or silently not apply, so this
+    pins the rationale to the constants it explains. A future raise that updates
+    only the numbers fails here until the reasoning is updated with them.
+    """
+    source = Path(__file__).read_text()
+    assert f"ceil({WIRE_BUDGET_BYTES:,}/4)" in source, "the token-proxy note names a stale budget"
+    assert f"({TOKEN_PROXY_BUDGET:,} == {WIRE_BUDGET_BYTES:,}/4)" in source, (
+        "the proportionality claim names stale budgets"
+    )
+    # And the claim itself has to be true, not merely self-consistent.
+    assert _token_proxy(WIRE_BUDGET_BYTES) == TOKEN_PROXY_BUDGET

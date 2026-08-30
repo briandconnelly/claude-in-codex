@@ -1667,8 +1667,13 @@ def _key_holds_job_error(job_id: str, cwd: str, meta: Meta) -> dict:
         "This idempotency_key already holds a background job. The diff is now empty, "
         "so this call cannot carry the same effective arguments that job was started "
         "with — and that job may still be running and spending.",
-        "Read the existing job with claude_job_status, or pass a new idempotency_key "
-        "to launch a fresh run.",
+        # NOT "pass a new idempotency_key": the diff is still empty, so the same
+        # call under a fresh key takes the empty-diff shortcut again and launches
+        # nothing. A repair that cannot work is worse than none — it costs the
+        # caller a round trip and teaches them the key is broken.
+        "Read the existing job with claude_job_status. A new idempotency_key alone "
+        "will not start a run while the diff is empty: change scope/base so there "
+        "are changes to review first.",
         meta,
         offending="idempotency_key",
         action=RepairAction(

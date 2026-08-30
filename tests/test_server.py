@@ -4294,3 +4294,85 @@ async def test_capability_tool_details_are_not_review_only():
         assert "review job" not in text, name
         assert "same structured envelope as claude_review_changes" not in text, name
     assert "kind" in details["claude_job_result"]["returns"]
+
+
+async def test_the_held_key_repair_does_not_send_the_caller_down_a_dead_end(
+    monkeypatch, git_repo, tmp_path
+):
+    """A repair a caller can follow and get nowhere is worse than none.
+
+    The first version of this error said "pass a new idempotency_key to launch a
+    fresh run". Followed literally it launches nothing: the diff is still empty,
+    so the same call under a fresh key takes the empty-diff shortcut again. The
+    caller spends a round trip and learns the key is broken. This asserts the
+    dead-end advice is gone AND that following the advice that replaced it is
+    what actually reaches a run.
+    """
+    import subprocess as _sp
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ws = str(git_repo)
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "K"},
+            )
+        )
+        _sp.run(["git", "add", "-A"], cwd=ws, check=True, capture_output=True)
+        _sp.run(
+            ["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "wip"],
+            cwd=ws,
+            check=True,
+            capture_output=True,
+        )
+        conflict = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "K"},
+                raise_on_error=False,
+            )
+        )
+        repair = conflict["error"]["repair"]
+
+        # The advice it replaced, taken literally: same call, brand-new key.
+        dead_end = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "NEW"},
+                raise_on_error=False,
+            )
+        )
+        # The advice now given: make the diff non-empty, then use a new key.
+        # (A resolved SHA, not "HEAD~1" — the base validator rejects rev syntax.)
+        base = _sp.run(
+            ["git", "rev-parse", "HEAD~1"], cwd=ws, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        working = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "branch",
+                    "base": base,
+                    "workspace_root": ws,
+                    "idempotency_key": "NEW2",
+                },
+                raise_on_error=False,
+            )
+        )
+        for job in (started, working):
+            if job.get("job_id"):
+                await client.call_tool(
+                    "claude_job_cancel", {"job_id": job["job_id"], "workspace_root": ws}
+                )
+
+    assert conflict["error"]["code"] == "idempotency_conflict"
+    assert "claude_job_status" in repair
+    # The dead end really is one — which is why the repair must not name it.
+    assert "job_id" not in dead_end
+    assert "pass a new idempotency_key to launch a fresh run" not in repair
+    assert "scope" in repair
+    # And the route the repair does name reaches a real run.
+    assert working["ok"] is True, working
+    assert working["job_id"]
