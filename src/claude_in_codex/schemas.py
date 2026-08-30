@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
+
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
@@ -259,8 +261,11 @@ class SystemPromptAppend(BaseModel):
     was sent to Claude for it to attest."""
 
     model_config = ConfigDict(extra="forbid")
-    sha256: str
-    bytes: int
+    # Constrained so a tampered or hand-written on-disk record cannot be replayed
+    # as an audit fingerprint: `jobs._fingerprint_from` relies on validation here
+    # to degrade impossible values to an absent attestation.
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(ge=1, le=MAX_SYSTEM_PROMPT_APPEND_BYTES)
 
     @classmethod
     def of(cls, text: str) -> SystemPromptAppend:

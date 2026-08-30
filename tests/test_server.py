@@ -4617,6 +4617,15 @@ async def test_job_meta_rebuild_omits_system_prompt_append_when_unused(tmp_path)
         "not-a-mapping",
         {"sha256": 12345},
         [],
+        # Well-typed but impossible values must degrade too, not be replayed as
+        # an audit fingerprint: a digest that is not 64 lowercase hex chars, and
+        # a byte count outside what normalized text can have.
+        {"sha256": "not-a-digest", "bytes": 7},
+        {"sha256": "AB" * 32, "bytes": 7},
+        {"sha256": "ab" * 31, "bytes": 7},
+        {"sha256": "ab" * 32, "bytes": -1},
+        {"sha256": "ab" * 32, "bytes": 0},
+        {"sha256": "ab" * 32, "bytes": 4097},
     ],
 )
 def test_build_meta_degrades_on_tampered_fingerprint_record(tampered, tmp_path):

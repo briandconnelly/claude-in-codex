@@ -64,12 +64,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   names the one allowed option form and reserves `model`/`effort` so an extra arg
   cannot shadow a first-class parameter.
 
-- The `tools/list` wire budget rises from 66,000 to 68,000 bytes and the token
-  proxy from 16,500 to 17,000. Measured 65,400 before `system_prompt_append` and
-  66,718 after (+1,318 bytes / +2.0%) across four advertised records; the
-  previous 600-byte headroom could not absorb it. The parameter description is a
-  pointer, with the contract published once in `claude_capabilities` and the
-  `meta` echo covered by the existing Meta stub.
+- The `tools/list` wire budget rises from 80,700 to 82,700 bytes and the token
+  proxy from 20,175 to 20,675. Measured 82,191 bytes with `system_prompt_append`
+  on top of the recoverable-async surface (+1,491 bytes / +1.8%) across five
+  advertised records (`claude_consult`, its `claude_ask` alias,
+  `claude_consult_async`, `claude_review_changes`, and
+  `claude_review_changes_async`); the 700-byte headroom left after that surface
+  could not absorb it. The parameter description is a pointer, with the
+  contract published once in `claude_capabilities` and the `meta` echo covered
+  by the existing Meta stub.
 
 - The `CAPABILITY_SUMMARY` ceiling rises from 1100 to 1200 characters. A
   parameter that admits caller text into the system prompt is a first-read
