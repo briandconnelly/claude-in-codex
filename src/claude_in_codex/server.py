@@ -1120,12 +1120,10 @@ def _run_request(kind: str, prompt: str, cwd: str, r: Resolved) -> RunRequest:
         budget_usd=r.budget,
         config_mode=r.config_mode,
         access=r.access,
-        # RunRequest is frozen at contract_api_version = 1 with no field for
-        # system-prompt text; backend.ClaudeBackend folds this descriptor into
-        # the composed prompt rather than appending a second flag to argv.
-        extra_args=(
-            ("--append-system-prompt", r.system_prompt_append) if r.system_prompt_append else ()
-        ),
+        # The protocol's own channel for caller-supplied instruction text.
+        # backend.ClaudeBackend folds it into the composed system prompt rather
+        # than appending a second --append-system-prompt flag to argv.
+        instructions_append=r.system_prompt_append,
     )
 
 

@@ -86,14 +86,13 @@ def test_forbidden_phrases_are_still_justified():
     assert cli_contract.PONTONIER_CONTRACT.backend_id == "claude"
 
 
-def test_extra_args_policy_declares_the_form_the_backend_accepts():
-    """The declarative half must match the behavior half. An empty policy means
-    'every extra arg is refused loudly', which stopped being true when the
-    backend began accepting a persona descriptor."""
-    from claude_in_codex.backend import _PERSONA_FLAG
-
+def test_extra_args_policy_declares_no_operator_form():
+    """The declarative half must match the behavior half. This server exposes no
+    operator extra-args channel, and an empty policy is what says so: every
+    descriptor is refused loudly. The caller's persona is not an extra arg — it
+    rides RunRequest.instructions_append — so no form is declared for it."""
     policy = cli_contract.PONTONIER_CONTRACT.extra_args
-    assert policy.allowed_option_forms == (_PERSONA_FLAG,)
+    assert policy.allowed_option_forms == ()
 
 
 def test_extra_args_policy_reserves_first_class_parameter_keys():

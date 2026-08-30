@@ -7,6 +7,20 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Internal: `system_prompt_append` now rides `RunRequest.instructions_append`,
+  the field pontonier 0.7.0 added for caller-supplied instruction text, instead
+  of an `("--append-system-prompt", <text>)` pair pressed into
+  `RunRequest.extra_args`. `extra_args` is the operator channel — descriptors
+  vetted against the contract's `ExtraArgsPolicy` — so carrying caller MCP data
+  on it misstated what the channel is, and it forced
+  `PONTONIER_CONTRACT.extra_args` to declare `--append-system-prompt` as an
+  operator form the server never actually accepts from an operator. That
+  declaration is now empty again, which is the honest one: this server exposes
+  no operator extra-args channel, and every descriptor is refused loudly. The
+  agent-visible surface is unchanged — same parameter, description, cap, marker
+  refusal, and `meta.system_prompt_append` fingerprint — so `FINGERPRINT` does
+  not move.
+
 - `claude_consult`, `claude_consult_async`, `claude_review_changes`, and
   `claude_review_changes_async` accept `system_prompt_append`: caller-supplied
   persona or focus text folded

@@ -42,12 +42,13 @@ CONTRACT = PONTONIER_CONTRACT
 
 _KIND_DEFAULT_ACCESS = "toolless"
 
-# The ONLY extra_args descriptor this backend accepts. RunRequest is frozen at
-# contract_api_version = 1 and has no field for caller-supplied system-prompt
-# text, so the pair rides extra_args and is FOLDED into the composed system
-# prompt by prepare() — it is never appended to argv as a second flag, which
-# would leave the guardrail/persona ordering up to the CLI.
-_PERSONA_FLAG = "--append-system-prompt"
+# Caller-supplied persona text arrives on RunRequest.instructions_append (the
+# protocol's own channel for it, since pontonier 0.7.0) and is FOLDED into the
+# composed system prompt by prepare() — it is never appended to argv as a
+# second --append-system-prompt flag, which would leave the guardrail/persona
+# ordering up to the CLI. It is NOT an extra_args descriptor: that channel is
+# operator-owned, and this backend accepts nothing on it.
+_PERSONA_FIELD = "instructions_append"
 
 
 class ClaudeBackend:
@@ -57,41 +58,43 @@ class ClaudeBackend:
         # Upstream rejects a bad --effort at arg-parse (loud, zero spend), and this
         # server also enforces VALID_EFFORTS at its boundary; mirror that boundary
         # here so a direct adapter caller cannot send a value the tools would refuse.
-        extra = tuple(request.extra_args)
-        if extra and (len(extra) != 2 or extra[0] != _PERSONA_FLAG):
+        # extra_args is the operator channel, and this backend's ExtraArgsPolicy
+        # declares no allowed option form: every descriptor is refused loudly
+        # rather than silently dropped.
+        if request.extra_args:
             return ClassifiedFailure(
                 code="invalid_arguments",
-                detail=f"extra_args accepts only ('{_PERSONA_FLAG}', <text>).",
+                detail="extra_args accepts no descriptors on this backend.",
             )
         # Mirror the server's boundary here too, for the same reason the effort
         # check above exists: a direct adapter caller must not be able to send a
         # value the tools would refuse — and then spend on it. Normalize first, so
         # the cap describes the bytes that are actually sent, and so blank text is
         # refused rather than silently becoming a default-prompt run.
-        if len(extra) == 2:
-            persona = config.normalize_system_prompt_append(extra[1])
+        if request.instructions_append is not None:
+            persona = config.normalize_system_prompt_append(request.instructions_append)
             if persona is None:
                 return ClassifiedFailure(
                     code="invalid_arguments",
-                    detail=f"{_PERSONA_FLAG} text is empty after normalization.",
+                    detail=f"{_PERSONA_FIELD} text is empty after normalization.",
                 )
             unsafe = config.argv_unsafe_reason(persona)
             if unsafe is not None:
                 return ClassifiedFailure(
                     code="invalid_arguments",
-                    detail=f"{_PERSONA_FLAG} text {unsafe}; it cannot ride argv.",
+                    detail=f"{_PERSONA_FIELD} text {unsafe}; it cannot ride argv.",
                 )
             if config.contains_framing_marker(persona):
                 return ClassifiedFailure(
                     code="invalid_arguments",
-                    detail=f"{_PERSONA_FLAG} text contains a framing marker.",
+                    detail=f"{_PERSONA_FIELD} text contains a framing marker.",
                 )
             size = len(persona.encode())
             if size > config.MAX_SYSTEM_PROMPT_APPEND_BYTES:
                 return ClassifiedFailure(
                     code="invalid_arguments",
                     detail=(
-                        f"{_PERSONA_FLAG} text is {size} bytes; the cap is "
+                        f"{_PERSONA_FIELD} text is {size} bytes; the cap is "
                         f"{config.MAX_SYSTEM_PROMPT_APPEND_BYTES}."
                     ),
                 )
@@ -108,7 +111,7 @@ class ClaudeBackend:
                 return ClassifiedFailure(
                     code="invalid_arguments",
                     detail=(
-                        f"{_PERSONA_FLAG} text is {size} bytes; the operator input "
+                        f"{_PERSONA_FIELD} text is {size} bytes; the operator input "
                         f"bound (CLAUDE_IN_CODEX_MAX_INPUT_BYTES) is {limit}."
                     ),
                 )
@@ -128,13 +131,12 @@ class ClaudeBackend:
         artifacts: answer, cost, and session id all arrive in the stdout JSON
         envelope."""
         config_mode = request.config_mode or config.defaults().config_mode
-        # Fail closed rather than dropping an extra_arg we do not understand: a
-        # caller that believed it sent a persona would otherwise get a
-        # default-prompt run — and be billed for it — with no signal.
+        # Fail closed rather than dropping input we do not understand: a caller
+        # that believed it sent a persona would otherwise get a default-prompt
+        # run — and be billed for it — with no signal.
         if (invalid := self.validate_request(request)) is not None:
             raise ValueError(invalid.detail)
-        extra = tuple(request.extra_args)
-        persona = extra[1] if len(extra) == 2 else None
+        persona = request.instructions_append
         cmd, dropped = claude.build_command(
             request.prompt,
             config_mode,
