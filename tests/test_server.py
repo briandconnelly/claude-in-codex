@@ -4739,6 +4739,10 @@ async def test_job_meta_rebuild_omits_system_prompt_append_when_unused(tmp_path)
         {"sha256": "ab" * 32, "bytes": -1},
         {"sha256": "ab" * 32, "bytes": 0},
         {"sha256": "ab" * 32, "bytes": 4097},
+        # Lax pydantic would coerce these; strict types must refuse them.
+        {"sha256": "ab" * 32, "bytes": "7"},
+        {"sha256": "ab" * 32, "bytes": 7.0},
+        {"sha256": "ab" * 32, "bytes": True},
     ],
 )
 def test_build_meta_degrades_on_tampered_fingerprint_record(tampered, tmp_path):

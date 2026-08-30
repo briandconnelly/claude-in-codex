@@ -7,7 +7,15 @@ import json
 from typing import Annotated, Literal, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    TypeAdapter,
+    model_validator,
+)
 
 from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 
@@ -269,8 +277,10 @@ class SystemPromptAppend(BaseModel):
     # Constrained so a tampered or hand-written on-disk record cannot be replayed
     # as an audit fingerprint: `jobs._fingerprint_from` relies on validation here
     # to degrade impossible values to an absent attestation.
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    bytes: int = Field(ge=1, le=MAX_SYSTEM_PROMPT_APPEND_BYTES)
+    # Strict types: lax mode would coerce "7", 7.0, or true into a byte count
+    # and a non-str digest, hiding a corrupt record behind a valid-looking value.
+    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: StrictInt = Field(ge=1, le=MAX_SYSTEM_PROMPT_APPEND_BYTES)
 
     @classmethod
     def of(cls, text: str) -> SystemPromptAppend:
@@ -316,8 +326,11 @@ class Meta(BaseModel):
     redacted_paths: list[str] = Field(default_factory=list)
     cost_usd: float | None = None
     usage: Usage | None = None
-    # Set when the caller supplied system_prompt_append; None means the guardrail
-    # prompt ran alone. The text is fingerprinted, never echoed.
+    # Set when the caller supplied system_prompt_append. On an envelope that
+    # describes a run, None means the guardrail prompt ran alone; envelopes that
+    # describe no run (argument errors, empty diff, context too large) may omit
+    # it either way — see SystemPromptAppend. The text is fingerprinted, never
+    # echoed.
     system_prompt_append: SystemPromptAppend | None = None
     job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
