@@ -57,6 +57,35 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `tasks/*` or to surface tool progress. Native tasks stay additive-later, not
   a replacement.
 
+- `idempotency_key` publishes what its "same effective arguments" rule excludes.
+  The digest is taken over `(argv, prompt)`, and `detail` reaches neither: it
+  selects how a stored result is rendered, not what Claude is asked or paid to
+  do. So a keyed retry that changes only `detail` replays rather than
+  conflicting. That is the right behavior and now says so — the record keeps the
+  raw envelope, so the replayed job can be re-read at any density through
+  `claude_job_result` for free, and treating `detail` as effective would force a
+  second PAID run to obtain a rendering that costs nothing. Documented at
+  `arg_hash_for`, published in `claude_capabilities.async_lifecycle`, and pinned
+  by a test, so it is a contract rather than an accident of what reaches argv.
+  Amends the unreleased `claude-in-codex/0.1/schema-37`: the contract digest
+  moves, and the published `FINGERPRINT` string is unchanged. (Raised by
+  Copilot's review of #129.)
+
+- `CAPABILITY_SUMMARY`, the README, and the shipped skill no longer promise a
+  job handle unconditionally. Two claims were wrong in the same way — they
+  generalized over `paid_tools`, which still contains the deprecated
+  `claude_ask`, and over launches, which return the result itself rather than a
+  `job_id` when a diff-bearing `*_async` call finds an empty diff. An agent
+  reading either could reach for a `claude_ask_async` that does not exist, or
+  poll a handle it was never given. All three now say the aliases have no async
+  form and tell the caller to branch on `job_id`. Amends the unreleased
+  `claude-in-codex/0.1/schema-37` for the summary text. (Raised by Copilot's
+  review of #129.)
+
+- The shipped skill's async guardrail is three rules instead of one bundle:
+  prefer `_async`, pass `idempotency_key`, cancel what you abandon. An agent
+  checks obligations one at a time. (Raised by Copilot's review of #129.)
+
 - The three `*_async` starters share one launcher. Idempotency-outcome mapping,
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own

@@ -118,8 +118,8 @@ CAPABILITY_SUMMARY = (
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
     "config_mode=bare disable hooks. Paid tools send context to Anthropic; call "
     "claude_status before spending. Use claude_models to discover valid model slugs. "
-    "Every paid tool has a blocking form and a claude_*_async form returning a job_id "
-    "with poll/result/cancel; prefer async for long runs. "
+    "Paid tools have claude_*_async forms (deprecated aliases do not): a job_id to "
+    "poll/result/cancel, absent on an empty diff. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
     "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
@@ -161,7 +161,8 @@ _IDEMPOTENCY_KEY_DESCRIPTION = (
     "Optional client-chosen key making launch retry-safe (atomic per workspace via "
     "an on-disk reservation): a job matching this key AND the same effective "
     "arguments (within the job TTL) has its status returned instead of starting a "
-    "duplicate paid job. Replay, conflict, and in-progress rules: "
+    "duplicate paid job. `detail` is not an effective argument (re-render a stored "
+    "result for free instead). Replay, conflict, and in-progress rules: "
     "claude_capabilities.async_lifecycle."
 )
 
@@ -3235,6 +3236,12 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "idempotency_key dedupes on (key, effective arguments) atomically per "
         "workspace via an on-disk reservation. After a dropped connection, retry "
         "with the SAME arguments, or check claude_job_list before re-launching.",
+        "The effective arguments are the ones that change what Claude is asked and "
+        "paid to do. `detail` is NOT one of them: the raw envelope is stored, so a "
+        "replay can still be read at any density by passing `detail` to "
+        "claude_job_result, for free. Retrying a key with only `detail` changed is "
+        "therefore a replay, not a conflict — conflicting would force a second paid "
+        "run to obtain a rendering that is already free.",
         "Reusing an idempotency_key with different effective arguments is "
         "idempotency_conflict, not a replay.",
         "idempotency_in_progress means a concurrent launch is still being "

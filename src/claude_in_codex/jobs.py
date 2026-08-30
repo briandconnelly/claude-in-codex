@@ -385,6 +385,16 @@ def arg_hash_for(cmd: list[str], prompt: str | None) -> str:
 
     Volatile bookkeeping (timeouts, workspace provenance, redaction counts) is
     excluded by construction: it appears in neither argv nor the prompt.
+
+    `detail` is excluded the same way, and that exclusion is deliberate rather
+    than incidental. It selects how a stored result is RENDERED, not what Claude
+    is asked or paid to do, and the record keeps the raw envelope — so a replayed
+    job can still be read at any density by passing `detail` to claude_job_result,
+    for free. Treating it as an effective argument would turn a free re-render
+    into an idempotency_conflict and push the caller into a second paid run to get
+    a rendering they could already have. Published in
+    claude_capabilities.async_lifecycle and pinned by a test, so it is a contract,
+    not an accident of what happens to reach argv.
     """
     material = json.dumps({"argv": list(cmd), "prompt": prompt}, sort_keys=True)
     return hashlib.sha256(material.encode()).hexdigest()

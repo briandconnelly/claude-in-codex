@@ -3989,3 +3989,79 @@ async def test_adversarial_async_caps_free_form_input_before_spending(monkeypatc
         )
     assert out["ok"] is False
     assert out["error"]["code"] == "context_too_large"
+
+
+async def test_a_keyed_retry_that_changes_only_detail_replays(monkeypatch, git_repo, tmp_path):
+    """`detail` is deliberately NOT an effective argument, and this pins that.
+
+    It selects how a stored result is rendered, not what Claude is asked or paid
+    to do, and the record keeps the raw envelope — so the replayed job can still
+    be read at full density for free. Treating `detail` as effective would make
+    this an idempotency_conflict and push the caller into a SECOND PAID RUN to
+    obtain a rendering that was already free, which is the opposite of what the
+    key exists for. The second half of this test is the part that earns the
+    exclusion: it shows the full rendering really is recoverable.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    inner = {
+        "summary": "S" * 400,
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [],
+        "questions": [],
+        "assumptions": [],
+    }
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", _fake_envelope(inner)], []),
+    )
+    base = {"prompt": "q", "workspace_root": str(git_repo), "idempotency_key": "detail-key"}
+    async with Client(mcp) as client:
+        first = structured(
+            await client.call_tool("claude_consult_async", {**base, "detail": "summary"})
+        )
+        second = structured(
+            await client.call_tool(
+                "claude_consult_async", {**base, "detail": "full"}, raise_on_error=False
+            )
+        )
+        assert first["ok"] is True
+        assert second["ok"] is True, "changing only detail must replay, not conflict"
+        assert second["job_id"] == first["job_id"]
+
+        job_id = first["job_id"]
+        assert (await _drain(client, job_id, str(git_repo)))["status"] == "done"
+        stored = structured(
+            await client.call_tool(
+                "claude_job_result", {"job_id": job_id, "workspace_root": str(git_repo)}
+            )
+        )
+        rerendered = structured(
+            await client.call_tool(
+                "claude_job_result",
+                {"job_id": job_id, "workspace_root": str(git_repo), "detail": "full"},
+            )
+        )
+    # The job kept the level it was STARTED with...
+    assert stored["raw_response"].get("text") is None
+    # ...and the density the replayed call asked for is still available, free.
+    assert rerendered["raw_response"]["text"] is not None
+    assert len(rerendered["summary"]) == 400
+
+
+async def test_capability_summary_does_not_promise_an_alias_async_form():
+    """CAPABILITY_SUMMARY is first-read instruction text, so a universal claim in
+    it sends agents to tools that do not exist. `paid_tools` includes the
+    deprecated `claude_ask`, and there is no `claude_ask_async`."""
+    data = _capabilities_payload()
+    starters = set(data["async_lifecycle"]["start_tools"])
+    blocking = [t for t in data["paid_tools"] if t not in starters]
+    # The deprecated alias is the ONE blocking paid tool with no async form, and
+    # it is deprecated rather than missing one. Any other name reaching this list
+    # means a new paid tool shipped blocking-only.
+    assert [t for t in blocking if f"{t}_async" not in starters] == ["claude_ask"]
+    summary = CAPABILITY_SUMMARY.lower()
+    assert "deprecated aliases do not" in summary
+    # And it must not tell a caller to assume the handle it may not get.
+    assert "absent on an empty diff" in summary

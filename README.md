@@ -107,14 +107,21 @@ claude_review_changes_async({
 })
 ```
 
-Poll with `claude_job_status`, then fetch the result with `claude_job_result`.
+If the call returns a `job_id`, poll with `claude_job_status`, then fetch the result with
+`claude_job_result`. A diff-bearing `_async` call whose diff turns out to be empty skips the
+spend and returns the result itself, with no `job_id` to poll — so branch on `job_id` rather
+than assuming one.
 
-Every paid tool has an `_async` form. Prefer it whenever the run may outlive the call: a
-blocking call that is cancelled or loses its connection loses the work it already paid for,
-while a job keeps running and `claude_job_result` still pays out. Pass `idempotency_key` so a
-retry after a dropped connection replays the existing job instead of starting a second paid
-one. Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECONDS`), not
-by `timeout_seconds`, which the `_async` tools therefore do not accept.
+Each of the three paid operations — `claude_consult`, `claude_review_changes`, and
+`claude_adversarial_review` — has an `_async` form. The deprecated aliases do not: use
+`claude_consult_async` rather than looking for a `claude_ask_async`.
+
+Prefer the `_async` form whenever the run may outlive the call: a blocking call that is
+cancelled or loses its connection loses the work it already paid for, while a job keeps
+running and `claude_job_result` still pays out. Pass `idempotency_key` so a retry after a
+dropped connection replays the existing job instead of starting a second paid one.
+Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECONDS`), not by
+`timeout_seconds`, which the `_async` tools therefore do not accept.
 
 ## Safety and cost
 
