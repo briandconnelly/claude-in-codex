@@ -7,20 +7,6 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-- Internal: `system_prompt_append` now rides `RunRequest.instructions_append`,
-  the field pontonier 0.7.0 added for caller-supplied instruction text, instead
-  of an `("--append-system-prompt", <text>)` pair pressed into
-  `RunRequest.extra_args`. `extra_args` is the operator channel — descriptors
-  vetted against the contract's `ExtraArgsPolicy` — so carrying caller MCP data
-  on it misstated what the channel is, and it forced
-  `PONTONIER_CONTRACT.extra_args` to declare `--append-system-prompt` as an
-  operator form the server never actually accepts from an operator. That
-  declaration is now empty again, which is the honest one: this server exposes
-  no operator extra-args channel, and every descriptor is refused loudly. The
-  agent-visible surface is unchanged — same parameter, description, cap, marker
-  refusal, and `meta.system_prompt_append` fingerprint — so `FINGERPRINT` does
-  not move.
-
 - `claude_consult`, `claude_consult_async`, `claude_review_changes`, and
   `claude_review_changes_async` accept `system_prompt_append`: caller-supplied
   persona or focus text folded
@@ -70,18 +56,21 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   so the plaintext is visible to local process listings during the run; the
   description, the skill, and `SECURITY.md` say so. Never put secrets there.
 
-- `ClaudeBackend` mirrors the byte cap and fails closed. `validate_request`
-  rejects an oversized persona for the same reason it already rejected an
-  invalid effort — a direct adapter caller must not be able to send a value the
-  tools would refuse, and then spend on it — and `prepare()` now raises instead
-  of silently dropping an `extra_args` form it does not understand, which would
-  have run a default prompt and billed a caller who believed a persona was sent.
+- `ClaudeBackend` mirrors the byte cap and fails closed. The persona reaches the
+  adapter on `RunRequest.instructions_append`, the field pontonier 0.7.0 added
+  for caller-supplied instruction text (this server requires `pontonier==0.7.0`).
+  `validate_request` rejects an oversized persona for the same reason it already
+  rejected an invalid effort — a direct adapter caller must not be able to send a
+  value the tools would refuse, and then spend on it — and `prepare()` raises
+  rather than staging a run whose input it could not validate, which would have
+  run a default prompt and billed a caller who believed a persona was sent.
 
-- `PONTONIER_CONTRACT` declares its extra-args policy. An empty `ExtraArgsPolicy`
-  means "every extra arg is refused loudly", which stopped being true when the
-  backend began accepting the persona descriptor; the contract's facts half now
-  names the one allowed option form and reserves `model`/`effort` so an extra arg
-  cannot shadow a first-class parameter.
+- `PONTONIER_CONTRACT` declares its extra-args policy. An empty
+  `ExtraArgsPolicy.allowed_option_forms` means "every extra arg is refused
+  loudly", and that is the honest declaration here: `extra_args` is pontonier's
+  operator channel, this server exposes no operator extra-args channel, and the
+  caller's persona is not a descriptor on it. `model`/`effort` stay reserved so a
+  future descriptor could never shadow a first-class parameter.
 
 - The `tools/list` wire budget rises from 80,700 to 82,700 bytes and the token
   proxy from 20,175 to 20,675. Measured 82,191 bytes with `system_prompt_append`

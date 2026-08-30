@@ -369,10 +369,10 @@ def test_backend_accepts_persona_at_the_cap():
     assert BACKEND.validate_request(request) is None
 
 
-async def test_prepare_fails_closed_on_malformed_extra_args(tmp_path, clean_env):
-    """prepare() must not silently drop an extra_arg it does not understand: a
-    caller that believed it sent a persona would otherwise get a default-prompt
-    run and be billed for it."""
+async def test_prepare_fails_closed_on_any_extra_args(tmp_path, clean_env):
+    """prepare() must not silently drop a descriptor it does not accept — and it
+    accepts none. A caller that believed the descriptor did something would
+    otherwise get a run it did not ask for and be billed for it."""
     request = RunRequest(
         kind="consult",
         prompt="q",
