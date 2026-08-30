@@ -86,6 +86,48 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   prefer `_async`, pass `idempotency_key`, cancel what you abandon. An agent
   checks obligations one at a time. (Raised by Copilot's review of #129.)
 
+- An unwritable job-state directory no longer reports `claude_not_found`. A
+  launch raises OSError from two unrelated sources — the `claude` executable and
+  the state directory — and the branch matched the bare `FileNotFoundError` /
+  `PermissionError` types, so both answered "Install Claude Code and ensure
+  `claude` is on PATH". A caller whose state directory was read-only was sent to
+  reinstall a CLI that was already there and working, while the very next branch
+  already carried the right repair. `jobs` now raises a marked
+  `ClaudeExecutableError` (keeping the Popen exception types for callers that
+  match on them), so the executable's failures keep `claude_not_found` — now
+  distinguishing "not on PATH" from "found but not executable", with chmod as the
+  repair for the second — and everything else falls through to the
+  state-directory repair. Both sides are tested. (Raised by Copilot's review of
+  #129.)
+
+- The `claude_job_*` tools no longer describe themselves as diff-review-only.
+  The lifecycle serves three starters now, but its own `tools/list` descriptions
+  still said to use `claude_job_status` "after claude_review_changes_async",
+  promised `claude_job_result` would return "the claude_review_changes
+  envelope", and called every job a review job. A client that reads tool
+  descriptions rather than calling `claude_capabilities` — which is most of them
+  — was never told the two new starters use the same lifecycle. The descriptions
+  and the matching `tool_details` now speak of any `*_async` job, and
+  `claude_job_result` promises the envelope of the tool named by the job's
+  `kind`. (Raised by Copilot's review of #129.)
+
+- `annotations_policy` and the `async_lifecycle` notes drop their remaining
+  universal claims over `paid_tools`, which still contains the deprecated
+  `claude_ask`. `annotations_policy` had been missed entirely in the first pass
+  at this — the edit was written but silently did not apply — so its paid-tool
+  list still ended at `claude_review_changes_async`. `COMPATIBILITY.md`'s
+  compatibility-strategy paragraph had the same defect. (Raised by Copilot's
+  review of #129.)
+
+- The cross-starter idempotency invariant is tested rather than only asserted in
+  a comment. All three starters share one namespace in the store's index, and
+  `_IDEMPOTENCY_NAMESPACE` claims that reusing a key across two of them
+  conflicts rather than replaying the first tool's job — but the digest carries
+  only `(argv, prompt)`, not the job kind, and nothing exercised the claim. A
+  cross-tool replay would be this key's worst failure: handing back a paid answer
+  to a question the caller never asked. It does conflict; now proven. (Raised by
+  Copilot's review of #129.)
+
 - The three `*_async` starters share one launcher. Idempotency-outcome mapping,
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own

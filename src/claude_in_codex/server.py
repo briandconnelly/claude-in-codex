@@ -1752,11 +1752,21 @@ async def _launch_job(
                 )
         else:
             job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
-    except (FileNotFoundError, PermissionError):
+    except jobs.ClaudeExecutableError as exc:
+        # Only `claude` itself lands here. Everything else a launch can fail on —
+        # the job-state directory above all — falls through to the OSError branch,
+        # whose repair points at that directory. Matching on the bare
+        # FileNotFoundError/PermissionError types conflated the two and told a
+        # caller with an unwritable state directory to install a CLI they had.
+        runnable = not isinstance(exc, jobs.ClaudeExecutableNotRunnable)
         return _err(
             "claude_not_found",
-            "The `claude` CLI was not found on PATH.",
-            "Install Claude Code and ensure `claude` is on PATH.",
+            "The `claude` CLI was not found on PATH."
+            if runnable
+            else "The `claude` CLI was found but is not executable.",
+            "Install Claude Code and ensure `claude` is on PATH."
+            if runnable
+            else "Make `claude` executable (chmod +x) and retry.",
             meta,
         )
     except OSError as e:
@@ -2353,12 +2363,12 @@ async def claude_job_status(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Check a background review job without fetching the full result. Polling
+    """Check a background job without fetching the full result. Polling
     performs lazy maintenance: an overdue job is killed and marked timeout, and
     TTL-expired records are deleted; a terminal job's stored result is never
     altered.
 
-    Use after claude_review_changes_async. Returns status, elapsed time,
+    Use after any *_async starter. Returns status, elapsed time,
     result_available, polling hints, and cost when available. If
     result_available is true, call claude_job_result.
     """
@@ -2389,13 +2399,14 @@ async def claude_job_result(
     detail: Annotated[Detail | None, Field(description=_JOB_DETAIL_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Fetch a finished background review without deleting the job record.
-    Polling lazily reaps: an overdue job is killed and marked timeout, and
+    """Fetch a finished job's result without deleting the record.
+
+    Polling lazily reaps: overdue jobs are killed and marked timeout and
     TTL-expired records deleted; a terminal result is never altered.
 
     Use when claude_job_status reports result_available=true. Returns the
-    claude_review_changes envelope with meta.job_id set. Free: detail="full"
-    re-renders it, recovering a truncated summary without spending.
+    envelope of the tool named by the job's `kind`, with meta.job_id set. Free:
+    detail="full" re-renders it, recovering a truncated summary without spend.
     claude_job_consume_result deletes.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
@@ -2425,7 +2436,7 @@ async def claude_job_consume_result(
     detail: Annotated[Detail | None, Field(description=_JOB_DETAIL_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Fetch a finished background review and delete the stored job record.
+    """Fetch a finished background job's result and delete the stored job record.
 
     Use only when you no longer need to poll or re-read the job. Returns the
     claude_job_result envelope, then deletes completed job state. Non-done jobs
@@ -2458,9 +2469,9 @@ async def claude_job_cancel(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Cancel a running background review job.
+    """Cancel a running background job.
 
-    Use to stop a job from claude_review_changes_async. Terminates the Claude
+    Use to stop a job from any *_async starter. Terminates the Claude
     process and marks the job cancelled; cancelled jobs cannot be resumed.
     Already-terminal jobs are returned unchanged.
     """
@@ -2632,7 +2643,7 @@ async def claude_job_list(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """List the background review jobs known for this workspace, newest first.
+    """List the background jobs known for this workspace, newest first.
 
     Use to recover job_ids lost across context compaction or interruption. Returns
     each job's id, kind, status, start time, result_available, expiry, and cost when
@@ -3226,10 +3237,13 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "claude_job_cancel is the only way to stop it early.",
         "An expired record is deleted, so it reports job_not_found rather than a "
         "distinct expired state.",
-        "Every paid tool has a start tool here, so no paid call has to be made "
-        "blocking. Prefer the *_async form whenever the run may outlive the "
-        "caller's patience: a blocking call that is cancelled or loses its "
-        "connection loses the work it already paid for, and a job does not.",
+        "start_tools is the complete list: claude_consult, claude_review_changes, "
+        "and claude_adversarial_review each have one, and the deprecated "
+        "claude_ask alias has none (use claude_consult_async). No canonical paid "
+        "call therefore has to be made blocking. Prefer the *_async form whenever "
+        "the run may outlive the caller's patience: a blocking call that is "
+        "cancelled or loses its connection loses the work it already paid for, "
+        "and a job does not.",
         "kind names the tool whose envelope claude_job_result will return "
         "(claude_consult, claude_review_changes, or claude_adversarial_review), "
         "not the *_async tool that started it.",
@@ -3446,7 +3460,7 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_job_status",
                 "free",
-                "Poll a background job without fetching the full result.",
+                "Poll a background job from any *_async starter without fetching the full result.",
                 "job state, result_available, elapsed time, expiry, cost when terminal",
                 required=["job_id"],
                 optional=["workspace_root"],
@@ -3455,7 +3469,7 @@ def _capabilities_payload() -> dict:
                 "claude_job_result",
                 "free",
                 "Fetch a finished background job result without deleting it.",
-                "same structured envelope as claude_review_changes, with meta.job_id",
+                "the envelope of the tool named by the job's kind, with meta.job_id",
                 required=["job_id"],
                 optional=["workspace_root"],
             ),
@@ -3470,7 +3484,7 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_job_cancel",
                 "free",
-                "Cancel a running background review job.",
+                "Cancel a running background job from any *_async starter.",
                 "job status after cancellation or terminal-state refresh",
                 required=["job_id"],
                 optional=["workspace_root"],
@@ -3563,10 +3577,11 @@ def _capabilities_payload() -> dict:
         ),
         annotations_policy=(
             "Static annotations represent the worst case across config modes. "
-            "readOnlyHint tracks observable effects: paid tools (claude_consult, "
-            "claude_review_changes, claude_adversarial_review, "
-            "claude_review_changes_async) spend money and send context to "
-            "Anthropic, so they are not read-only; their destructiveHint is true "
+            "readOnlyHint tracks observable effects: the paid tools (claude_consult, "
+            "claude_review_changes, claude_adversarial_review, each of their "
+            "claude_*_async forms, and the deprecated claude_ask) spend money and "
+            "send context to Anthropic, so they are not read-only; their "
+            "destructiveHint is true "
             "because config_mode=inherit or config_mode=scoped may execute "
             "workspace hooks with arbitrary shell commands, while config_mode=safe "
             "and config_mode=bare disable hooks; claude_job_status/"

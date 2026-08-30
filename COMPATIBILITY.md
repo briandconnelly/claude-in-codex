@@ -125,8 +125,11 @@ Two reasons, in order of weight:
    An advertised capability no client exercises is discovery cost with no
    recipient — and, worse, a claim this repository would then owe a test.
 
-The compatibility strategy is therefore: **every paid tool has a blocking form
-and a `claude_*_async` form**, and the async lifecycle is published structurally
+The compatibility strategy is therefore: **each canonical paid operation —
+`claude_consult`, `claude_review_changes`, `claude_adversarial_review` — has both
+a blocking form and a `claude_*_async` form**. The deprecated `claude_ask` alias
+has no async form of its own; callers use `claude_consult_async`. The async
+lifecycle is published structurally
 in `claude_capabilities.async_lifecycle` so an agent can drive it without
 parsing prose. Nothing here forecloses native tasks later; adding them would be
 an additive capability alongside `claude_job_*`, not a replacement, and it

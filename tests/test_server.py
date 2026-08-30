@@ -4065,3 +4065,119 @@ async def test_capability_summary_does_not_promise_an_alias_async_form():
     assert "deprecated aliases do not" in summary
     # And it must not tell a caller to assume the handle it may not get.
     assert "absent on an empty diff" in summary
+
+
+async def test_one_key_cannot_replay_across_two_starters(monkeypatch, git_repo):
+    """The idempotency index keys on (namespace, key), and all three starters
+    share one namespace — so a key is unique per WORKSPACE, not per tool.
+
+    `jobs._IDEMPOTENCY_NAMESPACE` asserts in a comment that reusing a key across
+    two starters conflicts rather than replaying the first tool's job. Nothing
+    tested it, and the digest itself carries only (argv, prompt), not the job
+    kind. A cross-tool replay would be the worst failure this key has: it would
+    hand back a paid answer to a question the caller never asked.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ws = str(git_repo)
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_consult_async",
+                {"prompt": "q", "workspace_root": ws, "idempotency_key": "shared"},
+            )
+        )
+        crossed = structured(
+            await client.call_tool(
+                "claude_adversarial_review_async",
+                {"target": "t", "workspace_root": ws, "idempotency_key": "shared"},
+                raise_on_error=False,
+            )
+        )
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": started["job_id"], "workspace_root": ws}
+        )
+    assert started["ok"] is True
+    assert crossed["ok"] is False
+    assert crossed["error"]["code"] == "idempotency_conflict"
+    # The decisive part: the other tool's job was never handed over.
+    assert crossed.get("job_id") != started["job_id"]
+
+
+async def test_an_unwritable_state_dir_is_not_reported_as_a_missing_cli(
+    monkeypatch, git_repo, tmp_path
+):
+    """The two OSError sources a launch has need opposite repairs.
+
+    Matching the bare FileNotFoundError/PermissionError types conflated them, so
+    an unwritable job-state directory answered "Install Claude Code and ensure
+    `claude` is on PATH" — a wrong diagnosis pointing at the wrong fix, for a CLI
+    that was installed and working.
+    """
+    state = tmp_path / "locked"
+    state.mkdir()
+    state.chmod(0o500)  # readable, not writable
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(state))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    try:
+        async with Client(mcp) as client:
+            out = structured(
+                await client.call_tool(
+                    "claude_consult_async",
+                    {"prompt": "q", "workspace_root": str(git_repo)},
+                    raise_on_error=False,
+                )
+            )
+    finally:
+        state.chmod(0o700)
+    assert out["ok"] is False
+    assert out["error"]["code"] == "internal_error"
+    assert "claude" not in out["error"]["repair"].lower()
+    assert "director" in out["error"]["repair"].lower()
+
+
+async def test_a_non_executable_claude_still_reports_claude_not_found(
+    monkeypatch, git_repo, tmp_path
+):
+    """The other side of the split: a present-but-unrunnable CLI must not be
+    reported as a state-directory problem either. The repair names chmod, not
+    install, because the binary is already there."""
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o600)  # present, not executable
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: ([str(fake)], []))
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_consult_async",
+                {"prompt": "q", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "claude_not_found"
+    assert "not executable" in out["error"]["message"]
+    assert "chmod" in out["error"]["repair"]
+
+
+async def test_job_lifecycle_prose_is_not_review_only():
+    """The lifecycle now serves three starters, so its own tools must not describe
+    only diff review. Clients that read tool descriptions rather than calling
+    claude_capabilities were otherwise never told the new starters use it."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    for name in (
+        "claude_job_status",
+        "claude_job_result",
+        "claude_job_consume_result",
+        "claude_job_cancel",
+        "claude_job_list",
+    ):
+        text = tools[name].description
+        assert "review job" not in text, name
+        assert "background review" not in text, name
+        assert "claude_review_changes_async" not in text, name
+    # And the result tool must not promise one specific tool's envelope.
+    assert "`kind`" in tools["claude_job_result"].description
+    assert "claude_review_changes envelope" not in tools["claude_job_result"].description

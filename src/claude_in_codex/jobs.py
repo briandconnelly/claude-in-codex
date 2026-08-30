@@ -336,8 +336,35 @@ def _worker_factory(cmd: list[str], workspace: str, *, config_mode: str):
     return factory
 
 
+class ClaudeExecutableError(OSError):
+    """Marker: the launch failed on `claude` itself, not on the job-state directory.
+
+    A launch can raise OSError from either, and the two need opposite repairs.
+    Without this marker the server matched on FileNotFoundError/PermissionError
+    and reported "install Claude Code" for BOTH — so an unwritable state
+    directory sent the caller to reinstall a CLI that was already there. The two
+    concrete classes keep Popen's exception types (see _check_executable), so
+    callers matching those still match.
+    """
+
+
+class ClaudeExecutableMissing(ClaudeExecutableError, FileNotFoundError):
+    """`claude` is not on PATH, or the named path does not exist."""
+
+
+class ClaudeExecutableNotRunnable(ClaudeExecutableError, PermissionError):
+    """`claude` exists but is not executable."""
+
+
 def _check_executable(cmd: list[str], cwd: str) -> None:
-    """Preserve Popen's immediate missing/non-executable command failure."""
+    """Preserve Popen's immediate missing/non-executable command failure.
+
+    The raised types stay FileNotFoundError/PermissionError for fidelity; the
+    ClaudeExecutableError mixin only adds the provenance the server needs to
+    pick a repair. An empty argv is deliberately NOT marked: that is a bug in
+    this process, not a missing CLI, and it should reach the caller as
+    internal_error rather than as advice to install something.
+    """
     if not cmd:
         raise FileNotFoundError("job command is empty")
     executable = cmd[0]
@@ -346,11 +373,11 @@ def _check_executable(cmd: list[str], cwd: str) -> None:
         if not path.is_absolute():
             path = Path(cwd) / path
         if not path.is_file():
-            raise FileNotFoundError(executable)
+            raise ClaudeExecutableMissing(executable)
         if not os.access(path, os.X_OK):
-            raise PermissionError(executable)
+            raise ClaudeExecutableNotRunnable(executable)
     elif shutil.which(executable) is None:
-        raise FileNotFoundError(executable)
+        raise ClaudeExecutableMissing(executable)
 
 
 def start_job(
