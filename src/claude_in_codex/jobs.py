@@ -356,6 +356,23 @@ class ClaudeExecutableNotRunnable(ClaudeExecutableError, PermissionError):
     """`claude` exists but is not executable."""
 
 
+def _on_path_but_not_executable(name: str) -> bool:
+    """True when some PATH entry holds `name` as a file that cannot be executed.
+
+    Only consulted once shutil.which() has already answered None, to tell its two
+    causes apart; a readable candidate that merely lacks the execute bit is a
+    chmod away from working, which is a different repair from "install it".
+    """
+    for entry in os.get_exec_path():
+        candidate = Path(entry) / name
+        try:
+            if candidate.is_file() and not os.access(candidate, os.X_OK):
+                return True
+        except OSError:  # unreadable PATH entry: not our candidate, keep looking
+            continue
+    return False
+
+
 def _check_executable(cmd: list[str], cwd: str) -> None:
     """Preserve Popen's immediate missing/non-executable command failure.
 
@@ -377,6 +394,13 @@ def _check_executable(cmd: list[str], cwd: str) -> None:
         if not os.access(path, os.X_OK):
             raise ClaudeExecutableNotRunnable(executable)
     elif shutil.which(executable) is None:
+        # shutil.which() tests X_OK, so it answers None for "absent" AND for "on
+        # PATH but not executable". The bare name is what production passes
+        # (cli_contract.CLAUDE_BIN), so collapsing the two here would leave
+        # ClaudeExecutableNotRunnable unreachable in every real launch, and the
+        # chmod repair would never be the one a caller actually sees.
+        if _on_path_but_not_executable(executable):
+            raise ClaudeExecutableNotRunnable(executable)
         raise ClaudeExecutableMissing(executable)
 
 
@@ -501,6 +525,16 @@ def find_live_job_for_key(cwd: str, key: str) -> str | None:
     empty-diff branch, which returns before any launch is attempted. Without it
     a keyed retry whose diff has since gone empty reports "no changes" while the
     job that key reserved keeps running and keeps spending.
+
+    KNOWN LIMIT, and not one that locking fixes. A concurrent launch that has
+    gathered a non-empty diff but has not yet reserved the key is invisible here,
+    so an empty-diff caller can still answer "no changes" moments before that
+    peer spawns. The race is read-before-write: no atomicity on THIS read can
+    observe a reservation that does not exist yet. Closing it needs the empty-diff
+    outcome to TAKE the reservation, so the two serialize on the key — which needs
+    a reserve-without-spawn primitive the store does not expose (see #131). What
+    this does cover is the sequential case the published retry guidance actually
+    describes: launch, lose the connection, commit, retry.
     """
     with _JOBS_LOCK:
         for sd in _store().list_jobs(cwd):

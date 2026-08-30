@@ -1384,3 +1384,35 @@ def test_list_jobs_agrees_with_status_on_a_promoted_record(tmp_path):
     assert listed["status"] == st["status"] == "done"
     assert listed["result_available"] is st["result_available"] is True
     assert listed["cost_usd"] == st["cost_usd"] == 0.42
+
+
+def test_a_bare_name_on_path_without_the_execute_bit_is_not_reported_as_missing(
+    tmp_path, monkeypatch
+):
+    """The production command is the bare name `claude`, not a path.
+
+    shutil.which() tests X_OK, so it answers None both for "absent" and for "on
+    PATH but not executable" — which made ClaudeExecutableNotRunnable
+    unreachable in every real launch, and meant the chmod repair could never be
+    the one a caller actually saw. The existing path-form test passed only
+    because it used an absolute path, a shape production never sends.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    candidate = bin_dir / "claude"
+    candidate.write_text("#!/bin/sh\n")
+    candidate.chmod(0o644)  # present, readable, NOT executable
+    monkeypatch.setenv("PATH", str(bin_dir))  # isolate: no real claude in reach
+
+    with pytest.raises(jobs.ClaudeExecutableNotRunnable):
+        jobs._check_executable(["claude"], str(tmp_path))
+
+    # ...and the same bare name really is missing once nothing on PATH holds it.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(jobs.ClaudeExecutableMissing):
+        jobs._check_executable(["claude"], str(tmp_path))
+
+    # Both stay catchable as the Popen types callers already match on.
+    monkeypatch.setenv("PATH", str(bin_dir))
+    with pytest.raises(PermissionError):
+        jobs._check_executable(["claude"], str(tmp_path))

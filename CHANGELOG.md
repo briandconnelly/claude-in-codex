@@ -162,6 +162,30 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   idempotency guidance tells callers to reach for. (Raised by an independent
   review of #129.)
 
+- A `claude` on PATH without its execute bit no longer reports "not found". The
+  executable split earlier in this train promised a chmod repair, but
+  `shutil.which()` tests `X_OK` and so answers `None` for BOTH "absent" and "on
+  PATH but not executable" — and the bare name is what production passes
+  (`cli_contract.CLAUDE_BIN`). The `ClaudeExecutableNotRunnable` branch was
+  therefore unreachable in every real launch, and the chmod repair could never
+  be the one a caller actually saw. The test that "proved" the distinction used
+  an absolute path, a shape production never sends: a check that could not have
+  failed. `_check_executable` now scans PATH for a readable but non-executable
+  candidate before classifying, and the new test uses the bare name with an
+  isolated PATH. (Raised by Copilot's review of #129.)
+
+- The empty-diff idempotency check is published as a check, not a guarantee. It
+  reads the key; it does not serialize on it, so a peer launch that has gathered
+  a non-empty diff but has not yet reserved the key stays invisible and an
+  empty-diff caller can still answer "no changes" moments before that peer
+  spawns. Locking cannot close this: the race is read-before-write, and no
+  atomicity on the read can observe a reservation that does not exist yet. Doing
+  so needs the empty-diff outcome to TAKE the reservation, which needs a
+  reserve-without-spawn primitive the store does not expose — tracked in #131.
+  `claude_capabilities.async_lifecycle` now says so plainly and names
+  `claude_job_list` as the authority, so the contract does not claim a guarantee
+  it cannot keep. (Raised by Copilot's review of #129.)
+
 - The three `*_async` starters share one launcher. Idempotency-outcome mapping,
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own

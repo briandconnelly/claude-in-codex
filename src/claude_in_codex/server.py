@@ -3304,7 +3304,10 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "A key that already holds a job is honored even when the current call would "
         "not start one: a diff-bearing starter whose diff has since gone empty "
         "reports idempotency_conflict naming that job, rather than a no-changes "
-        "result that would hide a run still spending.",
+        "result that would hide a run still spending. This is checked, not "
+        "serialized: a peer launch under the same key that has not yet reserved it "
+        "is not yet visible, so do not treat a no-changes result as proof that no "
+        "job exists — claude_job_list is the authority.",
         "The effective arguments are the ones that change what Claude is asked and "
         "paid to do. `detail` is NOT one of them: the raw envelope is stored, so a "
         "replay can still be read at any density by passing `detail` to "
