@@ -141,8 +141,8 @@ Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECOND
   actual spend in `meta.cost_usd` when available.
 - Reviews default to `effort=xhigh` for depth. Lower `effort` to `high` or `medium` for routine
   reviews when cost matters.
-- `system_prompt_append` (on `claude_consult`, `claude_review_changes`, and
-  `claude_review_changes_async`) adds your own persona or focus directive to Claude's system
+- `system_prompt_append` (on `claude_consult`, `claude_consult_async`, `claude_review_changes`,
+  and `claude_review_changes_async`) adds your own persona or focus directive to Claude's system
   prompt. The plugin's guardrail prompt always leads and cannot be replaced, and your text is
   bracketed by markers whose closing side restates that the guardrails outrank anything between
   them. It is capped at 4096 bytes and rejected before any spend.
@@ -153,7 +153,7 @@ Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECOND
   `meta.system_prompt_append` records a SHA-256 and byte length of
   the text, never the text, so a result shows it ran under a non-default prompt — on sync results
   and on background-job results alike. A background job stores that same fingerprint on disk,
-  never your text. `claude_adversarial_review` does not accept it.
+  never your text. Neither `claude_adversarial_review` form accepts it.
 - One guarantee there is mechanical and one is not. Claude cannot gain a tool from this text:
   the allowlist rides the command line, not the prompt. Claude is only *instructed* not to let
   the text dictate a verdict. Treat `system_prompt_append` as a trust boundary you are widening

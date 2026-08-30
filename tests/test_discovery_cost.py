@@ -54,14 +54,24 @@ from claude_in_codex.server import mcp
 # JOB_STARTED_SCHEMA because it has no diff to find empty and so can never
 # answer with a SuccessResult (~3KB, and one fewer shape for the caller to
 # handle). Revert to 69_000 when the aliases are removed in 0.9.0.
-WIRE_BUDGET_BYTES = 80_700
+#
+# Raised from 80_700 for the system_prompt_append parameter: measured 82,191
+# on top of the #93 surface (+1,491 bytes / +1.8%), which the 700-byte headroom
+# left after #93 could not absorb. The parameter is advertised on five records
+# (claude_consult, its claude_ask alias, claude_consult_async,
+# claude_review_changes, and claude_review_changes_async); its description is
+# deliberately a pointer, with the full contract published once in
+# claude_capabilities and the Meta echo stubbed, the same treatment Meta and
+# ErrorInfo get above. 82_700 restores ~0.6% headroom; the next feature that
+# needs room should slim a schema rather than raise this again.
+WIRE_BUDGET_BYTES = 82_700
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(80,700/4)).
-TOKEN_PROXY_BUDGET = 20_175  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
+# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(82,700/4)).
+TOKEN_PROXY_BUDGET = 20_675  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -89,7 +99,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (20,175 == 80,700/4) and the proxy is
+    The budgets are currently proportional (20,675 == 82,700/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""

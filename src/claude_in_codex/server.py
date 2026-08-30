@@ -131,8 +131,8 @@ CAPABILITY_SUMMARY = (
     "toolless default; readonly lets Claude read files, bypassing diff redaction. "
     "Tool semantic and argument-validation failures return isError:true with an "
     "ok:false envelope (code/message/repair) in structuredContent. "
-    "system_prompt_append adds caller text behind the guardrails, which always lead; "
-    "it grants no tools and is hashed into meta. "
+    "system_prompt_append adds caller text behind the always-leading guardrails; "
+    "grants no tools; hashed into meta. "
     "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
@@ -2207,6 +2207,9 @@ async def claude_consult_async(
     ] = None,
     detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     idempotency_key: Annotated[str | None, Field(description=_IDEMPOTENCY_KEY_DESCRIPTION)] = None,
+    system_prompt_append: Annotated[
+        str | None, Field(description=_SYSTEM_PROMPT_APPEND_DESCRIPTION)
+    ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
     """Ask claude_consult's question in the background and return a job_id.
@@ -2232,6 +2235,7 @@ async def claude_consult_async(
         cwd,
         workspace_source=ws_source,
         effort=effort,
+        system_prompt_append=system_prompt_append,
     )
     if err:
         return _result(err)
@@ -2250,6 +2254,7 @@ async def claude_consult_async(
         requested_budget=r.requested_budget,
         configured_budget=r.configured_budget,
         effective_budget=r.budget,
+        system_prompt_append=r.system_prompt_append,
     )
     legacy = await _legacy_keyed_job(cwd, idempotency_key)
     if legacy is not None:
@@ -2272,6 +2277,9 @@ async def claude_consult_async(
         configured_max_budget_usd=r.configured_budget,
         effective_max_budget_usd=r.budget,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        system_prompt_append=(
+            SystemPromptAppend.of(r.system_prompt_append) if r.system_prompt_append else None
+        ),
         idempotency_key=idempotency_key,
     )
     return _result(
@@ -2294,6 +2302,7 @@ async def claude_consult_async(
                 effective_budget=r.budget,
                 compat_warnings=dropped,
                 security_warnings=hook_security_warnings(cwd, r.config_mode),
+                system_prompt_append=r.system_prompt_append,
             ),
             idempotency_key=idempotency_key,
             job_timeout=job_timeout,

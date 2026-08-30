@@ -576,7 +576,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-37"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-38"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1248,7 +1248,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-37"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-38"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -4380,6 +4380,8 @@ async def test_the_held_key_repair_does_not_send_the_caller_down_a_dead_end(
     # And the route the repair does name reaches a real run.
     assert working["ok"] is True, working
     assert working["job_id"]
+
+
 async def test_consult_system_prompt_append_reaches_argv_after_guardrails(monkeypatch, tmp_path):
     """The caller's text lands in the system turn, composed behind the guardrails."""
     import claude_in_codex.server as srv
@@ -4697,11 +4699,19 @@ async def test_job_record_never_stores_persona_text_on_disk(monkeypatch, git_rep
     ), f"no record carries the persona fingerprint: {fingerprints!r}"
 
 
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_consult_async", {"prompt": "q"}),
+    ],
+)
 async def test_job_result_meta_attests_persona_through_the_real_store(
-    monkeypatch, git_repo, tmp_path
+    monkeypatch, git_repo, tmp_path, tool, args
 ):
-    """End-to-end: server -> JobConfig -> store record -> rebuilt result meta.
-    A hand-built record would exercise the legacy config fallback instead."""
+    """End-to-end: server -> JobConfig -> store record -> rebuilt result meta,
+    for every async starter that accepts the parameter. A hand-built record
+    would exercise the legacy config fallback instead."""
     import hashlib
 
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
@@ -4710,12 +4720,8 @@ async def test_job_result_meta_attests_persona_through_the_real_store(
     monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
     async with Client(mcp) as client:
         launched = await client.call_tool(
-            "claude_review_changes_async",
-            {
-                "scope": "working_tree",
-                "workspace_root": str(git_repo),
-                "system_prompt_append": "persona",
-            },
+            tool,
+            {**args, "workspace_root": str(git_repo), "system_prompt_append": "persona"},
         )
         job_id = structured(launched)["job_id"]
         status = await client.call_tool(
@@ -4786,24 +4792,26 @@ async def test_consult_rejects_argv_unsafe_system_prompt_append(monkeypatch, tmp
     assert data["error"]["details"]["reason"] == "argv_unsafe_text"
 
 
-async def test_adversarial_review_refuses_system_prompt_append(monkeypatch, tmp_path):
+@pytest.mark.parametrize("tool", ["claude_adversarial_review", "claude_adversarial_review_async"])
+async def test_adversarial_review_refuses_system_prompt_append(monkeypatch, tmp_path, tool):
     """The fixed adversarial stance is the product, so the parameter must stay off
-    that tool. Today it is refused because the signature lacks it; this pins the
-    guarantee so a copy-paste of the parameter cannot land silently."""
+    both adversarial forms. Today it is refused because the signature lacks it;
+    this pins the guarantee so a copy-paste of the parameter cannot land silently."""
     import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
 
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "exit 1"], []))
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_adversarial_review",
+            tool,
             {"target": "x", "workspace_root": str(tmp_path), "system_prompt_append": "persona"},
             raise_on_error=False,
         )
-    assert result.is_error, "claude_adversarial_review accepted system_prompt_append"
-    sig = inspect.signature(srv.claude_adversarial_review)
+    assert result.is_error, f"{tool} accepted system_prompt_append"
+    sig = inspect.signature(getattr(srv, tool))
     assert "system_prompt_append" not in sig.parameters
 
 
