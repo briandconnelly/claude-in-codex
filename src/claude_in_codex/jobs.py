@@ -626,6 +626,10 @@ def _expires_at(meta: dict) -> str | None:
 def _build_meta(meta: dict) -> Meta:
     c = _record_config(meta)
     cwd = c.get("cwd", "")
+    fingerprint, fp_warning = _fingerprint_from(c.get("system_prompt_append"))
+    security_warnings = list(c.get("security_warnings") or [])
+    if fp_warning:
+        security_warnings.append(fp_warning)
     source = c.get("workspace_source")
     scope = c.get("scope")
     # Recompute diff_range from the stored base+head inputs so it cannot drift from
@@ -649,26 +653,35 @@ def _build_meta(meta: dict) -> Meta:
             "effective_max_budget_usd", c.get("requested_max_budget_usd")
         ),
         redacted_paths=c.get("redacted_paths") or [],
-        security_warnings=c.get("security_warnings") or [],
+        security_warnings=security_warnings,
         elapsed_ms=_elapsed_ms(meta),
-        system_prompt_append=_fingerprint_from(c.get("system_prompt_append")),
+        system_prompt_append=fingerprint,
         job_id=meta.get("job_id"),
     )
 
 
-def _fingerprint_from(raw: object) -> SystemPromptAppend | None:
-    """Rebuild the persona fingerprint from an on-disk record, or None.
+MALFORMED_FINGERPRINT_WARNING = (
+    "The job record's system_prompt_append fingerprint is malformed, so meta "
+    "cannot attest which system prompt this run used; treat the absent "
+    "fingerprint as unknown, not as the default prompt."
+)
 
-    The record is a file another process wrote and anyone can edit: a tampered,
-    truncated, or hand-written value must degrade the way every other field in
-    `_build_meta` does (missing -> default), not turn a status read into an
-    unstructured error. The cost of degrading is one absent attestation."""
-    if not raw:
-        return None
+
+def _fingerprint_from(raw: object) -> tuple[SystemPromptAppend | None, str | None]:
+    """Rebuild the persona fingerprint from an on-disk record.
+
+    Returns (fingerprint, warning). The record is a file another process wrote
+    and anyone can edit: a tampered, truncated, or hand-written value must not
+    turn a status read into an unstructured error — but it must not be silent
+    either, because an absent fingerprint on a completed run means "the
+    guardrail prompt ran alone", and a malformed one means "unknown". The
+    warning carries that distinction into `security_warnings`."""
+    if raw is None:
+        return None, None
     try:
-        return SystemPromptAppend.model_validate(raw)
+        return SystemPromptAppend.model_validate(raw), None
     except (ValidationError, TypeError, ValueError):
-        return None
+        return None, MALFORMED_FINGERPRINT_WARNING
 
 
 _PROMOTABLE = {"cancelled", "timeout", "failed"}

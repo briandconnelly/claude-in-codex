@@ -4474,6 +4474,89 @@ async def test_consult_rejects_oversized_system_prompt_append(monkeypatch, tmp_p
     assert data["error"]["details"]["actual_bytes"] == MAX_SYSTEM_PROMPT_APPEND_BYTES + 1
 
 
+async def test_system_prompt_append_cap_counts_utf8_bytes_not_characters(monkeypatch, tmp_path):
+    """2049 two-byte characters is 4098 bytes: over the cap even though it is
+    under it in characters. A regression to character counting must fail here."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    over = "é" * (MAX_SYSTEM_PROMPT_APPEND_BYTES // 2 + 1)
+    assert len(over) < MAX_SYSTEM_PROMPT_APPEND_BYTES < len(over.encode())
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_consult",
+            {"prompt": "x", "workspace_root": str(tmp_path), "system_prompt_append": over},
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_arguments"
+    assert data["error"]["details"]["actual_bytes"] == len(over.encode())
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_consult", {"prompt": "x"}),
+        ("claude_consult_async", {"prompt": "x"}),
+        ("claude_review_changes", {"scope": "working_tree"}),
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+    ],
+)
+async def test_system_prompt_append_honours_operator_input_bound(monkeypatch, git_repo, tool, args):
+    """CLAUDE_IN_CODEX_MAX_INPUT_BYTES bounds everything caller-authored that
+    reaches Anthropic. A 2000-byte persona under a 1000-byte bound must be
+    refused before spend on every tool that accepts the parameter, not slip
+    past because it has its own 4096-byte ceiling."""
+    import claude_in_codex.server as srv
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "exit 1"], []))
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            tool,
+            {**args, "workspace_root": str(git_repo), "system_prompt_append": "p" * 2000},
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["ok"] is False, tool
+    assert data["error"]["code"] == "context_too_large"
+    assert data["error"]["details"]["limit_bytes"] == 1000
+
+
+async def test_consult_input_bound_sums_prompt_and_system_prompt_append(monkeypatch, tmp_path):
+    """Each field alone fits; together they exceed the operator bound."""
+    import claude_in_codex.server as srv
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_consult",
+            {
+                "prompt": "p" * 600,
+                "workspace_root": str(tmp_path),
+                "system_prompt_append": "s" * 600,
+            },
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["ok"] is False
+    assert data["error"]["code"] == "context_too_large"
+
+
 async def test_consult_blank_system_prompt_append_records_no_fingerprint(fake_claude, tmp_path):
     """Blank text composes to the bare guardrails, so meta must NOT attest a
     non-default prompt for what is really a default run."""
@@ -4525,7 +4608,7 @@ async def test_consult_fingerprint_covers_the_bytes_actually_sent(monkeypatch, t
 
 
 async def test_review_changes_records_system_prompt_append_fingerprint(fake_claude, git_repo):
-    """The parameter is on three tools; the audit trail must work on all of them."""
+    """The parameter is on four tools; the audit trail must work on all of them."""
     import hashlib
 
     async with Client(mcp) as client:
@@ -4648,7 +4731,14 @@ def test_build_meta_degrades_on_tampered_fingerprint_record(tampered, tmp_path):
     )
     record = {"job_id": "a" * 32, **jobs._extra_for(cfg, str(tmp_path))}
     record["config"]["system_prompt_append"] = tampered
-    assert jobs._build_meta(record).system_prompt_append is None
+    built = jobs._build_meta(record)
+    assert built.system_prompt_append is None
+    # An absent fingerprint on a run means "guardrails alone"; a malformed one
+    # means "unknown", and the difference must reach the caller.
+    assert jobs.MALFORMED_FINGERPRINT_WARNING in built.security_warnings
+    # And a clean record carries no such warning.
+    record["config"]["system_prompt_append"] = None
+    assert jobs.MALFORMED_FINGERPRINT_WARNING not in jobs._build_meta(record).security_warnings
 
 
 def test_system_prompt_append_description_does_not_overclaim_enforcement():

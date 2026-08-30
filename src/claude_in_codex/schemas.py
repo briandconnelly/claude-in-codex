@@ -255,7 +255,9 @@ class SystemPromptAppend(BaseModel):
     Present on every envelope that reports a Claude run: sync results, the
     async launch acknowledgement, and the meta rebuilt for claude_job_result and
     claude_job_consume_result. On those, absent means the guardrail prompt ran
-    alone. It is NOT a general "no persona was supplied" signal on envelopes that
+    alone — unless `security_warnings` reports a malformed on-disk fingerprint,
+    in which case the prompt used is unknown. It is NOT a general "no persona
+    was supplied" signal on envelopes that
     describe no run — argument errors, an empty-diff pass, and context-too-large
     rejections may omit it whether or not the call carried one, because nothing
     was sent to Claude for it to attest."""

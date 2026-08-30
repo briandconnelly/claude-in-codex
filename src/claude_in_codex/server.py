@@ -826,15 +826,19 @@ def _validate_system_prompt_append(text: str | None, meta) -> dict | None:
             "invalid_arguments",
             "system_prompt_append contains one of the server's caller-text framing "
             "markers, which would let it pose as server-authored instructions.",
-            "Remove the '--- BEGIN/END caller-supplied text ---' marker line from "
-            "system_prompt_append, then retry.",
+            "Remove the server's framing-marker lines from system_prompt_append: "
+            "'BEGIN caller-supplied text', 'caller text follows', or 'END "
+            "caller-supplied text' after a fence such as ---, ===, or ***; then retry.",
             meta,
             offending="system_prompt_append",
             details=ErrorDetails(reason="forged_framing_marker"),
         )
     size = len(text.encode())
     if size <= MAX_SYSTEM_PROMPT_APPEND_BYTES:
-        return None
+        # The fixed cap is a ceiling; the operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES
+        # bounds everything caller-authored that reaches Anthropic, and this text
+        # does. Check it here so every tool that accepts the parameter honours it.
+        return _validate_input_size({"system_prompt_append": text}, meta)
     return _err(
         "invalid_arguments",
         f"system_prompt_append is {size} bytes; the cap is {MAX_SYSTEM_PROMPT_APPEND_BYTES}.",
@@ -1267,7 +1271,9 @@ async def claude_consult(
         configured_budget=r.configured_budget,
         effective_budget=r.budget,
     )
-    too_large = _validate_input_size(payload, meta)
+    too_large = _validate_input_size(
+        {**payload, "system_prompt_append": r.system_prompt_append}, meta
+    )
     if too_large:
         return _result(too_large)
     out = await _execute("claude_consult", payload, r, cwd, workspace_source=ws_source)
@@ -2259,7 +2265,9 @@ async def claude_consult_async(
     legacy = await _legacy_keyed_job(cwd, idempotency_key)
     if legacy is not None:
         return _result(_legacy_key_error(legacy, cwd, meta))
-    too_large = _validate_input_size(payload, meta)
+    too_large = _validate_input_size(
+        {**payload, "system_prompt_append": r.system_prompt_append}, meta
+    )
     if too_large:
         return _result(too_large)
     cfg = JobConfig(
