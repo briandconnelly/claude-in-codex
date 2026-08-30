@@ -95,6 +95,18 @@ class ClaudeBackend:
                         f"{config.MAX_SYSTEM_PROMPT_APPEND_BYTES}."
                     ),
                 )
+            # The operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES bounds everything
+            # caller-authored that reaches Anthropic; every tool refuses a persona
+            # over it, so a direct adapter caller must not get to spend on one.
+            limit = config.max_input_bytes()
+            if size > limit:
+                return ClassifiedFailure(
+                    code="invalid_arguments",
+                    detail=(
+                        f"{_PERSONA_FLAG} text is {size} bytes; the operator input "
+                        f"bound (CLAUDE_IN_CODEX_MAX_INPUT_BYTES) is {limit}."
+                    ),
+                )
         effort = request.reasoning_effort
         if effort is not None and effort not in cli_contract.VALID_EFFORTS:
             return ClassifiedFailure(

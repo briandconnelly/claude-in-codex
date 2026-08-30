@@ -153,7 +153,8 @@ Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECOND
   `meta.system_prompt_append` records a SHA-256 and byte length of
   the text, never the text, so a result shows it ran under a non-default prompt — on sync results
   and on background-job results alike. A background job stores that same fingerprint on disk,
-  never your text. Neither `claude_adversarial_review` form accepts it.
+  never your text — though Claude's reply is stored until consumed or expired, and a reply can
+  repeat anything you sent. Neither `claude_adversarial_review` form accepts it.
 - One guarantee there is mechanical and one is not. Claude cannot gain a tool from this text:
   the allowlist rides the command line, not the prompt. Claude is only *instructed* not to let
   the text dictate a verdict. Treat `system_prompt_append` as a trust boundary you are widening

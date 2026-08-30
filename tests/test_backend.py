@@ -326,6 +326,26 @@ def test_backend_cap_counts_utf8_bytes_not_characters():
     assert failure.code == "invalid_arguments"
 
 
+def test_backend_rejects_persona_over_the_operator_input_bound(monkeypatch):
+    """Every tool refuses a persona over CLAUDE_IN_CODEX_MAX_INPUT_BYTES, so the
+    adapter boundary must too — a direct caller must not spend on one."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    request = RunRequest(
+        kind="consult",
+        prompt="q",
+        cwd="/tmp",
+        timeout_seconds=60,
+        extra_args=("--append-system-prompt", "p" * 2000),
+    )
+    failure = BACKEND.validate_request(request)
+    assert failure is not None
+    assert failure.code == "invalid_arguments"
+    assert "CLAUDE_IN_CODEX_MAX_INPUT_BYTES" in failure.detail
+    # And the same text is fine once the bound allows it.
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "4096")
+    assert BACKEND.validate_request(request) is None
+
+
 def test_backend_accepts_persona_at_the_cap():
     request = RunRequest(
         kind="consult",

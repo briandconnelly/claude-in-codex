@@ -33,7 +33,8 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   for `claude_job_result` and `claude_job_consume_result`. Absent means the
   guardrail prompt ran alone on every envelope that describes a run; envelopes
   that describe no run (argument errors, empty-diff pass, context-too-large) may
-  omit it either way. `JobConfig` persists the fingerprint, never the text, so a
+  omit it either way. `JobConfig` persists the fingerprint, never the text
+  (Claude's stored reply may still repeat any input), so a
   background job keeps prompt material off disk; a tampered on-disk fingerprint
   degrades to an absent attestation plus a `security_warnings` entry, so it is
   not mistaken for a default-prompt run and does not fail the status read.

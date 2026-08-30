@@ -24,8 +24,12 @@ worker's child inherits that pipe — the prompt never lands on disk or argv,
 same as 0.7. The SYSTEM prompt is a different matter and always has been: the
 guardrails, and any caller `system_prompt_append` text composed behind them,
 ride argv as the `--append-system-prompt` value, so they are visible to a
-process listing for the run's duration. The job record on disk stores only the
-caller text's FINGERPRINT (sha256 + byte length), never the text.
+process listing for the run's duration. The server writes only the caller
+text's FINGERPRINT (sha256 + byte length) to the job record, never the text
+itself — but Claude's own output is stored in the record until it is consumed
+or expires, and output can repeat any input, so a persona that asks Claude to
+echo a phrase puts that phrase on disk. The same holds for `prompt` and
+`context`. "Not written by the server" is the guarantee; "never on disk" is not.
 """
 
 from __future__ import annotations
