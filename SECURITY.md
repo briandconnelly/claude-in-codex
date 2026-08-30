@@ -43,8 +43,7 @@ listing on the host for the run's duration. Do not put secrets in
 `system_prompt_append`. The server writes only its SHA-256 and byte length to a
 job record, but the record also holds Claude's reply until it is consumed or
 expires, and a reply can repeat any input — this is true of `prompt` and
-`context` as well. That fingerprint attests what the server recorded, and
-that fingerprint attests what the server recorded: the state directory is
+`context` as well. That fingerprint attests what the server recorded: the state directory is
 ordinary local files, not a tamper-evident log, so a local process that can edit
 a record can also remove the fingerprint or the record itself.
 

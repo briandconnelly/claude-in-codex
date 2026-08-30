@@ -719,11 +719,14 @@ def _validate_input_size(fields: dict[str, str | None], meta: Meta) -> dict | No
     if total <= limit:
         return None
     largest = max(fields, key=lambda key: _utf8_len(fields[key]))
+    others = [k for k in fields if k != largest and fields[k]]
     return _err(
         "context_too_large",
         f"User-supplied text is {total} bytes, exceeding the {limit}-byte limit.",
-        "Shorten the prompt/evidence/context, split the request, or raise "
-        "CLAUDE_IN_CODEX_MAX_INPUT_BYTES if this workspace intentionally allows it.",
+        f"Shorten {largest} (the largest field"
+        + (f"; also counted: {', '.join(others)}" if others else "")
+        + "), split the request, or raise CLAUDE_IN_CODEX_MAX_INPUT_BYTES if this "
+        "workspace intentionally allows it.",
         meta,
         details=ErrorDetails(
             field=largest,
@@ -794,11 +797,12 @@ class Resolved:
 
 _SYSTEM_PROMPT_APPEND_DESCRIPTION = (
     "Text appended to the system prompt BEHIND this server's guardrails, which "
-    "always lead. Grants no tools (the allowlist is argv, not prompt); Claude is "
-    "instructed not to let it set a verdict. Treated as untrusted: never build it "
-    "from workspace content. Passed on the command line, so visible to local "
-    "process listings while the run is active: never put secrets here. Hashed "
-    f"into meta. Max {MAX_SYSTEM_PROMPT_APPEND_BYTES} bytes."
+    "always lead; omit it and the guardrails run alone (no caller section, no meta "
+    "fingerprint). Grants no tools (the allowlist is argv, not prompt); Claude is "
+    "instructed not to let it set a verdict. Untrusted: never build it from "
+    "workspace content. Rides the command line, visible to local process listings "
+    f"during the run: never put secrets here. Hashed into meta. Max "
+    f"{MAX_SYSTEM_PROMPT_APPEND_BYTES} bytes."
 )
 
 
