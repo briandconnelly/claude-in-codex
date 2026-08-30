@@ -36,16 +36,31 @@ from claude_in_codex.server import mcp
 # treatment Meta and ErrorInfo get above — spelling the caps out inline in all
 # four paid tools measured ~2x this.
 # Temporarily raised for the claude_ask/claude_review_dry_run deprecation window:
-# each alias re-advertises its primary's full schemas (~9KB total). Revert to
-# 56_300 when the aliases are removed in 0.9.0.
-WIRE_BUDGET_BYTES = 66_000
+# each alias re-advertises its primary's full schemas (~9KB total).
+#
+# Raised from 66_000 for the recoverable paid calls of #93: +13,718 bytes / +21%
+# over the 65,400 measured just before it. That buys claude_consult_async and
+# claude_adversarial_review_async, so no paid tool is blocking-only and no
+# cancelled or disconnected call loses work it already paid for. This is the
+# largest single raise this budget has taken and it was not free — the two
+# entries cost ~14KB because an *_async starter advertises the whole job-handle
+# union on top of the paid tool's own parameters.
+#
+# It was held to +21% by two cuts made in the same change, not by accepting the
+# first measurement: the long idempotency_key prose moved into
+# claude_capabilities.async_lifecycle (published once, ~1KB across three
+# starters), and claude_consult_async advertises JOB_START_SCHEMA rather than
+# JOB_STARTED_SCHEMA because it has no diff to find empty and so can never
+# answer with a SuccessResult (~3KB, and one fewer shape for the caller to
+# handle). Revert to 69_000 when the aliases are removed in 0.9.0.
+WIRE_BUDGET_BYTES = 80_700
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
 # against, and is raised in step with WIRE_BUDGET_BYTES (ceil(66,000/4)).
-TOKEN_PROXY_BUDGET = 16_500  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
+TOKEN_PROXY_BUDGET = 20_175  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
 
 
 def _token_proxy(wire_bytes: int) -> int:

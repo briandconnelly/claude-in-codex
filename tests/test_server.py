@@ -77,6 +77,8 @@ PAID_TOOLS = (
     "claude_review_changes",
     "claude_adversarial_review",
     "claude_review_changes_async",
+    "claude_consult_async",
+    "claude_adversarial_review_async",
 )
 
 
@@ -570,7 +572,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-36"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-37"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1242,13 +1244,15 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-36"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-37"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",
+        "claude_consult_async",
+        "claude_adversarial_review_async",
         # Deprecated alias of claude_consult; removal planned for 0.9.0.
         "claude_ask",
     }
@@ -1880,6 +1884,8 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
         ("claude_ask", {"prompt": "x"}),
         ("claude_adversarial_review", {"target": "x"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_consult_async", {"prompt": "x"}),
+        ("claude_adversarial_review_async", {"target": "x"}),
         ("claude_job_status", {"job_id": "d" * 32}),
         ("claude_job_result", {"job_id": "d" * 32}),
         ("claude_job_consume_result", {"job_id": "d" * 32}),
@@ -1960,6 +1966,7 @@ def _fake_ctx(**over):
         ("claude_review_changes", {"scope": "working_tree"}),
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
         ("claude_review_dry_run", {"scope": "working_tree"}),
     ],
 )
@@ -1985,6 +1992,7 @@ async def test_invalid_scope_from_gather_context(tool, args, monkeypatch, git_re
         ("claude_review_changes", {"scope": "working_tree"}),
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
         ("claude_review_dry_run", {"scope": "working_tree"}),
     ],
 )
@@ -2021,6 +2029,7 @@ async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_r
         ("claude_review_changes", {"scope": "working_tree"}),
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
         ("claude_review_dry_run", {"scope": "working_tree"}),
     ],
 )
@@ -2049,6 +2058,7 @@ async def test_git_environment_errors_from_gather_context(
         ("claude_review_changes", {"scope": "working_tree"}),
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
     ],
 )
 async def test_truncated_diff_is_context_too_large(tool, args, monkeypatch, git_repo, tmp_path):
@@ -3551,3 +3561,431 @@ async def test_an_expired_legacy_marker_stops_blocking_the_key(git_repo, monkeyp
         await client.call_tool(
             "claude_job_cancel", {"job_id": out["job_id"], "workspace_root": cwd}
         )
+
+
+# --------------------------------------------------------------- #93: no paid
+# call is blocking-only. Every paid tool now has a recoverable execution path,
+# so a cancelled or disconnected call no longer loses work it already paid for.
+
+
+def _fake_envelope(inner: dict, cost: float = 0.02) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps(inner),
+            "total_cost_usd": cost,
+            "usage": {"input_tokens": 5, "output_tokens": 1},
+        }
+    )
+
+
+_INNER = {
+    "summary": "the plan assumes a single writer",
+    "verdict": "concerns",
+    "confidence": "high",
+    "findings": [],
+    "questions": [],
+    "assumptions": [],
+}
+
+
+async def _drain(client, job_id, cwd, timeout=5.0):
+    """Poll one job to a terminal state and return its final status payload."""
+    deadline = time.time() + timeout
+    st = None
+    while time.time() < deadline:
+        st = structured(
+            await client.call_tool("claude_job_status", {"job_id": job_id, "workspace_root": cwd})
+        )
+        if st["status"] != "running":
+            return st
+        await anyio.sleep(0.05)
+    raise AssertionError(f"job {job_id} never left running: {st}")
+
+
+def _capture_prompts(monkeypatch) -> list[str]:
+    """Record the prompt each job would send, and answer with a fixed envelope."""
+    seen: list[str] = []
+
+    def fake_build_command(prompt, *a, **k):
+        seen.append(prompt)
+        return (["sh", "-c", "printf '%s' \"$0\"", _fake_envelope(_INNER)], [])
+
+    monkeypatch.setattr(claude_mod, "build_command", fake_build_command)
+    return seen
+
+
+async def test_every_paid_tool_has_a_recoverable_execution_path():
+    """#93's acceptance criterion, asserted rather than documented.
+
+    A blocking paid call that is cancelled or loses its connection loses the
+    spend; a job survives both. Every paid tool must therefore either BE an async
+    starter or have one, so a new paid tool cannot ship blocking-only by
+    omission. Deprecated aliases inherit their primary's async form.
+    """
+    data = _capabilities_payload()
+    starters = set(data["async_lifecycle"]["start_tools"])
+    aliases = {"claude_ask": "claude_consult"}
+    for tool in data["paid_tools"]:
+        canonical = aliases.get(tool, tool)
+        assert canonical in starters or f"{canonical}_async" in starters, (
+            f"{tool} is paid but has no async form: a cancelled or disconnected "
+            "call would lose the spend with no way to recover the result."
+        )
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_consult_async", {"prompt": "is this plan sound?"}),
+        ("claude_adversarial_review_async", {"target": "ship on Friday"}),
+    ],
+)
+async def test_paid_async_lifecycle_returns_the_blocking_tools_envelope(
+    monkeypatch, git_repo, tmp_path, tool, args
+):
+    """Launch -> poll -> result, end to end through the MCP surface.
+
+    The point of the fetched envelope's `tool` field: it names the tool whose
+    contract the result honors (claude_consult / claude_adversarial_review), not
+    the *_async starter, so a caller can hand the result to the same parser it
+    uses for the blocking form.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", _fake_envelope(_INNER)], []),
+    )
+    expected_tool = tool.removesuffix("_async")
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(tool, {**args, "workspace_root": str(git_repo)})
+        )
+        assert started["ok"] is True
+        assert started["status"] == "running"
+        # The handle names the job's own kind, not the starter: that is the tool
+        # whose envelope claude_job_result will return.
+        assert started["kind"] == expected_tool
+        assert started["poll_after_ms"] > 0
+        assert started["ttl_seconds"] > 0
+
+        job_id = started["job_id"]
+        assert (await _drain(client, job_id, str(git_repo)))["status"] == "done"
+
+        res = structured(
+            await client.call_tool(
+                "claude_job_result", {"job_id": job_id, "workspace_root": str(git_repo)}
+            )
+        )
+    assert res["ok"] is True
+    assert res["tool"] == expected_tool
+    assert res["verdict"] == "concerns"
+    assert res["meta"]["job_id"] == job_id
+
+
+async def test_consult_async_asks_the_question_not_a_diff_review(monkeypatch, git_repo, tmp_path):
+    """The starter must build claude_consult's prompt, not the review lead-in.
+
+    build_prompt is keyed by tool name and shared with the blocking path, so a
+    starter that passed the wrong name would quietly ask Claude to review a diff
+    that is not attached. build_command receives the finished prompt, so capturing
+    there reads exactly what streams to the worker's stdin.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    seen = _capture_prompts(monkeypatch)
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_consult_async",
+                {
+                    "prompt": "should we shard by tenant?",
+                    "context": "10k tenants",
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+        await _drain(client, started["job_id"], str(git_repo))
+    assert len(seen) == 1
+    assert "independent second opinion" in seen[0]
+    assert "should we shard by tenant?" in seen[0]
+    assert "10k tenants" in seen[0]
+    assert "Review the following code changes" not in seen[0]
+
+
+async def test_adversarial_async_attaches_the_diff(monkeypatch, git_repo, tmp_path):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    seen = _capture_prompts(monkeypatch)
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_adversarial_review_async",
+                {
+                    "target": "the subtraction is intentional",
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+        await _drain(client, started["job_id"], str(git_repo))
+    assert "the subtraction is intentional" in seen[0]
+    assert "Related changes" in seen[0]
+    assert "a - b" in seen[0]  # the gathered diff really was attached
+
+
+async def test_adversarial_async_empty_diff_skips_job_start(monkeypatch, git_repo, tmp_path):
+    """An empty attached diff costs nothing and starts no job.
+
+    Like claude_review_changes_async, the launch answers with a SuccessResult
+    rather than a job handle here. That third success shape is the known wart
+    issue #80 tracks; this pins the no-spend behavior so a fix there cannot
+    quietly start charging for empty diffs.
+    """
+    import subprocess as _sp
+
+    _sp.run(["git", "checkout", "--", "app.py"], cwd=git_repo, check=True)
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("job should not start")),
+    )
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_adversarial_review_async",
+                {
+                    "target": "nothing changed",
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["tool"] == "claude_adversarial_review"
+    assert data["verdict"] == "unknown"
+    assert "job_id" not in data
+
+
+async def test_consult_async_cannot_answer_with_a_result():
+    """claude_consult_async has no diff to find empty, so it never returns a
+    SuccessResult — and its advertised schema must not claim otherwise.
+
+    This is not only discovery-cost hygiene: a starter that advertises a branch
+    it cannot produce makes the caller write a dead branch and weakens the
+    remaining ones."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+
+    def branches(name):
+        return tools[name].outputSchema["anyOf"]
+
+    def has_result_branch(name):
+        # `verdict` appears only on the SuccessResult branch, and _slim strips the
+        # pydantic model titles, so the field is the durable discriminator.
+        return any("verdict" in b.get("properties", {}) for b in branches(name))
+
+    assert not has_result_branch("claude_consult_async")
+    assert has_result_branch("claude_review_changes_async"), (
+        "the diff-bearing starter still needs the empty-diff branch"
+    )
+    assert len(branches("claude_consult_async")) == len(branches("claude_review_changes_async")) - 1
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_consult_async", {"prompt": "sound?"}),
+        ("claude_adversarial_review_async", {"target": "ship it"}),
+    ],
+)
+async def test_async_starters_replay_a_matching_idempotency_key(monkeypatch, git_repo, tool, args):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    call = {**args, "workspace_root": str(git_repo), "idempotency_key": "k-1"}
+    async with Client(mcp) as client:
+        first = structured(await client.call_tool(tool, call))
+        second = structured(await client.call_tool(tool, call))
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": first["job_id"], "workspace_root": str(git_repo)}
+        )
+    assert first["ok"] is True
+    assert second["job_id"] == first["job_id"]
+    assert second["status"] == "running"
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_consult_async", {"prompt": "a"}),
+        ("claude_adversarial_review_async", {"target": "a"}),
+    ],
+)
+async def test_async_starters_conflict_on_a_reused_key_with_new_arguments(
+    monkeypatch, git_repo, tool, args
+):
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    field = next(iter(args))
+    base = {**args, "workspace_root": str(git_repo), "idempotency_key": "k-2"}
+    async with Client(mcp) as client:
+        first = structured(await client.call_tool(tool, base))
+        clash = structured(
+            await client.call_tool(tool, {**base, field: "something else"}, raise_on_error=False)
+        )
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": first["job_id"], "workspace_root": str(git_repo)}
+        )
+    assert clash["ok"] is False
+    assert clash["error"]["code"] == "idempotency_conflict"
+
+
+async def test_consult_async_caps_free_form_input_before_spending(monkeypatch, git_repo):
+    """The size cap runs before the job starts, like the blocking form's."""
+    # max_input_bytes() floors at 1_000, so that floor is the cap under test.
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("job should not start")),
+    )
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_consult_async",
+                {"prompt": "x" * 5_000, "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "context_too_large"
+
+
+@pytest.mark.parametrize(
+    ("args", "code"),
+    [
+        ({"paths": ["app.py"]}, "invalid_paths"),
+        ({"head": "HEAD"}, "invalid_head"),
+    ],
+)
+async def test_adversarial_async_rejects_diff_arguments_without_scope(git_repo, args, code):
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_adversarial_review_async",
+                {"target": "t", "workspace_root": str(git_repo), **args},
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == code
+    # The repair names the async tool the caller actually invoked.
+    assert "claude_adversarial_review_async" in json.dumps(out["error"])
+
+
+_NEW_STARTERS = [
+    ("claude_consult_async", {"prompt": "x"}),
+    ("claude_adversarial_review_async", {"target": "x"}),
+]
+
+
+@pytest.mark.parametrize(("tool", "args"), _NEW_STARTERS)
+async def test_async_starters_report_a_bad_env_config_mode(monkeypatch, git_repo, tool, args):
+    """The preflight config error fires before any job is started, and so before
+    any spend — the same ordering the blocking tools have."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("job should not start")),
+    )
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                tool, {**args, "workspace_root": str(git_repo)}, raise_on_error=False
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "unsupported_config_mode"
+
+
+@pytest.mark.parametrize(("tool", "args"), _NEW_STARTERS)
+async def test_async_starters_refuse_an_unverifiable_legacy_key(monkeypatch, git_repo, tool, args):
+    """A 0.7 marker records no argument digest, so replaying it could hand back a
+    paid answer to a question the caller did not ask. Every starter must refuse
+    it, not only the one that existed when the markers were written."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    cwd = str(git_repo)
+    cfg = jobs_mod.JobConfig(
+        kind="claude_consult",
+        config_mode="inherit",
+        access="toolless",
+        scope=None,
+        base=None,
+        head=None,
+        detail="summary",
+        timeout_seconds=1800,
+        workspace_source="cwd",
+        context_summary=None,
+    )
+    job_id, _ = jobs_mod.start_job(["sh", "-c", "sleep 30"], cwd, cfg)
+    marker = jobs_mod._reservation_path(cwd, "legacy-key")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"job_id": job_id, "created_epoch": time.time()}))
+    try:
+        async with Client(mcp) as client:
+            out = structured(
+                await client.call_tool(
+                    tool,
+                    {**args, "workspace_root": cwd, "idempotency_key": "legacy-key"},
+                    raise_on_error=False,
+                )
+            )
+    finally:
+        jobs_mod.cancel(cwd, job_id)
+    assert out["ok"] is False
+    assert out["error"]["code"] == "idempotency_conflict"
+    assert out["error"]["action"]["tool"] == "claude_job_status"
+    assert out["error"]["action"]["arguments"]["job_id"] == job_id
+
+
+async def test_adversarial_async_rejects_an_escaping_path(git_repo):
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_adversarial_review_async",
+                {
+                    "target": "x",
+                    "scope": "working_tree",
+                    "paths": ["../secret"],
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "invalid_paths"
+    assert out["error"]["details"]["field"] == "paths"
+
+
+async def test_adversarial_async_caps_free_form_input_before_spending(monkeypatch, git_repo):
+    # max_input_bytes() floors at 1_000, so that floor is the cap under test.
+    monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("job should not start")),
+    )
+    async with Client(mcp) as client:
+        out = structured(
+            await client.call_tool(
+                "claude_adversarial_review_async",
+                {"target": "x" * 5_000, "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "context_too_large"

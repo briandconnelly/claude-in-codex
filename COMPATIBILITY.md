@@ -104,6 +104,38 @@ the CLI is unavailable, and fails the build on a drift exit.
 | Entry point `claude-in-codex-mcp` | `pyproject.toml [project.scripts]` | |
 | MCP roots as `file://` URIs | `server.py` `_file_roots` | already tolerant; falls back to server cwd |
 
+### Long-running calls: named job tools, not MCP tasks
+
+The server negotiates MCP 2025-11-25, which defines native tasks, and FastMCP
+3.4.7 can register a tool as task-capable. This server deliberately does not,
+and advertises neither a server `tasks` capability nor per-tool
+`execution.taskSupport`.
+
+Two reasons, in order of weight:
+
+1. **Durability.** A paid call is the thing being made recoverable, so the
+   handle has to outlive the process that issued it. `claude_job_*` is backed by
+   an on-disk record per workspace, with a lock held by the worker, atomic
+   result publication, TTL reaping, and restart recovery. FastMCP's task store
+   is in-process: a server restart loses the handle, and with it a Claude run
+   that has already spent money. Adopting native tasks for paid calls would
+   trade a stronger guarantee for a weaker one.
+2. **Client support.** The Codex CLI (0.151.0, the target host) is not known to
+   drive `tasks/*` requests or to surface progress notifications for tool calls.
+   An advertised capability no client exercises is discovery cost with no
+   recipient — and, worse, a claim this repository would then owe a test.
+
+The compatibility strategy is therefore: **every paid tool has a blocking form
+and a `claude_*_async` form**, and the async lifecycle is published structurally
+in `claude_capabilities.async_lifecycle` so an agent can drive it without
+parsing prose. Nothing here forecloses native tasks later; adding them would be
+an additive capability alongside `claude_job_*`, not a replacement, and it
+should wait until a target client actually consumes it.
+
+Progress notifications are likewise not sent. A `claude` run reports nothing
+usable between start and its final envelope, so a progress stream would carry
+no information the job's `status` and `elapsed_ms` do not already give a poller.
+
 ## Versioning & release (lockstep)
 
 The bundled `.mcp.json` pins the server to a **versioned release tag**

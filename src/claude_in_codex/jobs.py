@@ -77,8 +77,13 @@ _LEGACY_STDERR_WITHHELD = "legacy job diagnostics withheld because they predate 
 # New records' sanitized child stderr. The store owns <job_dir>/stderr.log for
 # the worker's OWN diagnostics, so the redacted claude stream needs its own file.
 _CLAUDE_STDERR_FILE = "claude-stderr.log"
-# The store's idempotency index keys on (tool, key); one tool starts keyed jobs.
-_IDEMPOTENT_TOOL = "claude_review_changes_async"
+# The store's idempotency index keys on (tool, key). All three *_async starters
+# share ONE namespace, so a key is unique per workspace rather than per tool: the
+# same key reused across two different starters is an idempotency_conflict (the
+# arg_hash cannot match), never a cross-tool replay of a run the caller did not
+# ask for. The value is frozen at the original name because changing it would
+# orphan every live reservation on upgrade.
+_IDEMPOTENCY_NAMESPACE = "claude_review_changes_async"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -403,7 +408,7 @@ def start_job_idempotent(
             _worker_factory(cmd, cwd, config_mode=cfg.config_mode),
             cwd,
             kind=cfg.kind,
-            tool=_IDEMPOTENT_TOOL,
+            tool=_IDEMPOTENCY_NAMESPACE,
             key=key,
             arg_hash=arg_hash_for(cmd, stdin_text),
             extra=_extra_for(cfg, cwd),

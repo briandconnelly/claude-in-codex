@@ -7,6 +7,61 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Every paid tool now has a recoverable execution path. `claude_consult` and
+  `claude_adversarial_review` could block for up to the full timeout with no way
+  to get the answer back: a cancelled call, a dropped connection, or a client
+  timeout lost work that had already been paid for, because the result lived only
+  in the reply that never arrived. `claude_consult_async` and
+  `claude_adversarial_review_async` launch the same calls as background jobs and
+  return a `job_id`, so the existing `claude_job_status`/`claude_job_result`/
+  `claude_job_consume_result`/`claude_job_cancel`/`claude_job_list` lifecycle
+  covers all three paid verbs rather than diff review alone. Bumps the fingerprint
+  to `claude-in-codex/0.1/schema-37`: two new tools, and the capability payload's
+  `paid_tools`, `tool_details`, `async_lifecycle.start_tools`, scope, egress, and
+  annotations prose all move with them.
+
+  `kind` on the job handle names the tool whose envelope `claude_job_result` will
+  return (`claude_consult`, `claude_review_changes`, `claude_adversarial_review`),
+  not the `*_async` starter that began it, so a background result parses with the
+  same code as the blocking one.
+
+  The `*_async` tools take no `timeout_seconds`: a job is bounded by the job
+  deadline, and `meta.timeout_seconds` reports that deadline rather than the
+  synchronous default.
+
+- `claude_consult_async` advertises `JOB_START_SCHEMA`, not `JOB_STARTED_SCHEMA`.
+  A diff-bearing starter answers an empty diff with a `SuccessResult` instead of
+  a job handle; a consult has no diff to find empty and can never produce that
+  shape. Advertising it anyway would cost ~3KB of every session's discovery
+  budget and hand the caller a branch that is dead by construction.
+
+- The `idempotency_key` replay/conflict contract is published once in
+  `claude_capabilities.async_lifecycle` instead of being re-advertised in full by
+  every `*_async` starter — the treatment `detail` got in #94. The per-tool
+  description keeps the rule a caller needs before calling (dedupe is on the key
+  AND the effective arguments) and points at the lifecycle for the three
+  `idempotency_*` outcomes.
+
+- The discovery-cost budget rises from 66,000 to 80,700 bytes. This is the
+  largest raise it has taken, and it is the price of the two tools above: an
+  `*_async` entry carries the whole job-handle union on top of its own
+  parameters. The two cuts named above held it to +21%. Reverting the deprecated
+  aliases in 0.9.0 reclaims ~9.8KB, so that revert target moves from 56,300 to
+  69,000.
+
+- `COMPATIBILITY.md` records why the server publishes named job tools rather than
+  MCP 2025-11-25 native tasks, though it negotiates that version and FastMCP
+  supports them: FastMCP's task store is in-process, so a restart would lose a
+  handle to a run that has already spent money, while the `claude_job_*` records
+  are on disk and survive one. The target Codex CLI is also not known to drive
+  `tasks/*` or to surface tool progress. Native tasks stay additive-later, not
+  a replacement.
+
+- The three `*_async` starters share one launcher. Idempotency-outcome mapping,
+  launch-failure classification, and the job handle were about to be written
+  three times; `_launch_job` owns the launch, and each tool keeps only its own
+  argument validation, context gathering, and prompt.
+
 - Git calls no longer inherit `GIT_*` environment variables. `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their relatives override git's
   repository discovery, so a server launched from a git hook — or from any
