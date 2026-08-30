@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Annotated, Literal, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    TypeAdapter,
+    model_validator,
+)
+
+from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-37"
+FINGERPRINT = "claude-in-codex/0.1/schema-38"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -24,6 +35,7 @@ FINGERPRINT_COVERS = [
     "async-lifecycle descriptor",
     "config_mode/access/scope/detail/effort value sets",
     "detail-level field density, output bounds, and the truncation contract",
+    "caller-supplied system-prompt text (parameter, cap, and the meta fingerprint)",
     "capability summary and capabilities payload",
 ]
 
@@ -240,6 +252,42 @@ class ContextSummary(BaseModel):
     lines_removed: int = 0
 
 
+class SystemPromptAppend(BaseModel):
+    """Fingerprint of caller-supplied text folded into the system prompt.
+
+    Echoed so a reader of a result knows it was produced under a non-default
+    system prompt, and can tell two runs apart, WITHOUT the text itself being
+    replayed into the envelope. The text is never carried here or stored; the
+    background-job record persists this fingerprint, not the prose.
+
+    Present on every envelope that reports a Claude run: sync results, the
+    async launch acknowledgement, and the meta rebuilt for claude_job_result and
+    claude_job_consume_result. On those, absent means the guardrail prompt ran
+    alone — unless `security_warnings` reports a malformed on-disk fingerprint,
+    in which case the prompt used is unknown. For a background job this attests
+    what the server RECORDED: the job record is ordinary local state, not
+    tamper-evident, so a process that can edit it can also remove the
+    fingerprint (or the whole record). It is NOT a general "no persona
+    was supplied" signal on envelopes that
+    describe no run — argument errors, an empty-diff pass, and context-too-large
+    rejections may omit it whether or not the call carried one, because nothing
+    was sent to Claude for it to attest."""
+
+    model_config = ConfigDict(extra="forbid")
+    # Constrained so a tampered or hand-written on-disk record cannot be replayed
+    # as an audit fingerprint: `jobs._fingerprint_from` relies on validation here
+    # to degrade impossible values to an absent attestation.
+    # Strict types: lax mode would coerce "7", 7.0, or true into a byte count
+    # and a non-str digest, hiding a corrupt record behind a valid-looking value.
+    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: StrictInt = Field(ge=1, le=MAX_SYSTEM_PROMPT_APPEND_BYTES)
+
+    @classmethod
+    def of(cls, text: str) -> SystemPromptAppend:
+        raw = text.encode()
+        return cls(sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+
+
 class Meta(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cwd: str
@@ -278,6 +326,12 @@ class Meta(BaseModel):
     redacted_paths: list[str] = Field(default_factory=list)
     cost_usd: float | None = None
     usage: Usage | None = None
+    # Set when the caller supplied system_prompt_append. On an envelope that
+    # describes a run, None means the guardrail prompt ran alone; envelopes that
+    # describe no run (argument errors, empty diff, context too large) may omit
+    # it either way — see SystemPromptAppend. The text is fingerprinted, never
+    # echoed.
+    system_prompt_append: SystemPromptAppend | None = None
     job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
     fingerprint: str = FINGERPRINT
@@ -760,7 +814,8 @@ _META_STUB = {
         "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
         "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
-        "usage, job_id, request_id, fingerprint. Full contract: claude_capabilities."
+        "usage, system_prompt_append, job_id, request_id, fingerprint. "
+        "Full contract: claude_capabilities."
     ),
 }
 

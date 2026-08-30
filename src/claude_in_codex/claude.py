@@ -16,8 +16,8 @@ from anyio.to_thread import run_sync
 
 from claude_in_codex import cli_contract, preflight
 from claude_in_codex.config import (
-    INDEPENDENT_CRITIC_PROMPT,
     access_flags,
+    compose_system_prompt,
     config_mode_flags,
     is_env_placeholder,
 )
@@ -88,6 +88,7 @@ def build_command(
     model: str | None,
     max_budget_usd: float,
     effort: str | None = None,
+    system_prompt_append: str | None = None,
     flag_support: FlagSupport | None = None,
 ) -> tuple[list[str], list[str]]:
     """Build the `claude` invocation. Returns (cmd, dropped_optional_flags).
@@ -103,7 +104,10 @@ def build_command(
     tokens = [cli_contract.CLAUDE_BIN, *cli_contract.CORE_INVOCATION, "--no-chrome"]
     tokens += config_mode_flags(config_mode)
     tokens += access_flags(access)
-    tokens += ["--append-system-prompt", INDEPENDENT_CRITIC_PROMPT]
+    # One flag, never two: the guardrails and any caller persona are composed into a
+    # single value so the ordering (guardrails first) is a property of the string
+    # rather than of how the CLI happens to merge repeated flags.
+    tokens += ["--append-system-prompt", compose_system_prompt(system_prompt_append)]
     tokens += ["--max-budget-usd", f"{max_budget_usd}"]
     if effort and effort in cli_contract.VALID_EFFORTS:
         tokens += ["--effort", effort]

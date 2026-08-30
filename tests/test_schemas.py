@@ -1,3 +1,6 @@
+import hashlib
+
+from claude_in_codex import schemas
 from claude_in_codex.schemas import (
     FINGERPRINT,
     RESULT_SCHEMA,
@@ -93,7 +96,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "claude-in-codex/0.1/schema-37"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-38"
 
 
 def test_meta_carries_head_and_diff_range():
@@ -236,3 +239,29 @@ def test_explicit_action_is_never_overwritten():
         action=RepairAction(next_step="call_tool", tool="claude_job_list"),
     )
     assert info.action.tool == "claude_job_list"
+
+
+def test_system_prompt_append_meta_records_hash_and_length():
+    fp = schemas.SystemPromptAppend.of("Only auth findings.")
+    assert fp.bytes == len(b"Only auth findings.")
+    assert fp.sha256 == hashlib.sha256(b"Only auth findings.").hexdigest()
+
+
+def test_meta_omits_system_prompt_append_by_default():
+    meta = schemas.Meta(
+        cwd="/w", config_mode="inherit", access="toolless", timeout_seconds=1, elapsed_ms=0
+    )
+    assert meta.system_prompt_append is None
+
+
+def test_meta_carries_system_prompt_append_fingerprint():
+    meta = schemas.Meta(
+        cwd="/w",
+        config_mode="inherit",
+        access="toolless",
+        timeout_seconds=1,
+        elapsed_ms=0,
+        system_prompt_append=schemas.SystemPromptAppend.of("persona"),
+    )
+    assert meta.system_prompt_append is not None
+    assert meta.system_prompt_append.bytes == 7

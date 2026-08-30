@@ -84,3 +84,19 @@ def test_forbidden_phrases_are_still_justified():
     # Review-only: the access flags grant at most Read/Grep/Glob — nothing writes.
     assert "--tools" in cli_contract.ALWAYS_SEND_FLAGS
     assert cli_contract.PONTONIER_CONTRACT.backend_id == "claude"
+
+
+def test_extra_args_policy_declares_the_form_the_backend_accepts():
+    """The declarative half must match the behavior half. An empty policy means
+    'every extra arg is refused loudly', which stopped being true when the
+    backend began accepting a persona descriptor."""
+    from claude_in_codex.backend import _PERSONA_FLAG
+
+    policy = cli_contract.PONTONIER_CONTRACT.extra_args
+    assert policy.allowed_option_forms == (_PERSONA_FLAG,)
+
+
+def test_extra_args_policy_reserves_first_class_parameter_keys():
+    """extra_args must not be able to shadow parameters the tools own."""
+    reserved = cli_contract.PONTONIER_CONTRACT.extra_args.reserved_keys
+    assert {"model", "effort"} <= reserved

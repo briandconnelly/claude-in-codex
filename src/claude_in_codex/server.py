@@ -30,19 +30,23 @@ from claude_in_codex.claude_models import read_model_catalog
 from claude_in_codex.config import (
     ENV_PLACEHOLDER_REPAIR,
     MAX_BUDGET_USD,
+    MAX_SYSTEM_PROMPT_APPEND_BYTES,
     MAX_TIMEOUT_SECONDS,
     MIN_BUDGET_USD,
     MIN_TIMEOUT_SECONDS,
     VALID_EFFORTS,
     api_key_present,
+    argv_unsafe_reason,
     bare_available,
     clamp_budget,
     clamp_timeout,
+    contains_framing_marker,
     defaults,
     hook_security_warnings,
     hooks_disabled_available,
     is_env_placeholder,
     max_input_bytes,
+    normalize_system_prompt_append,
     placeholder_env_vars,
     safe_available,
     sanitize_effort,
@@ -102,6 +106,7 @@ from claude_in_codex.schemas import (
     Scope,
     StatusResult,
     SuccessResult,
+    SystemPromptAppend,
     ToolCapability,
     Verdict,
     branch_range,
@@ -126,6 +131,8 @@ CAPABILITY_SUMMARY = (
     "toolless default; readonly lets Claude read files, bypassing diff redaction. "
     "Tool semantic and argument-validation failures return isError:true with an "
     "ok:false envelope (code/message/repair) in structuredContent. "
+    "system_prompt_append adds caller text behind the always-leading guardrails; "
+    "grants no tools; hashed into meta. "
     "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
@@ -260,6 +267,7 @@ def _meta(
     security_warnings: list[str] | None = None,
     *,
     head: str | None = None,
+    system_prompt_append: str | None = None,
 ) -> Meta:
     # head is keyword-only so the many positional _meta(...) call sites that pass
     # base positionally stay untouched; only branch-scope call sites set it.
@@ -284,6 +292,9 @@ def _meta(
         requested_max_budget_usd=requested_budget,
         configured_max_budget_usd=configured_budget,
         effective_max_budget_usd=effective_budget,
+        system_prompt_append=(
+            SystemPromptAppend.of(system_prompt_append) if system_prompt_append else None
+        ),
         redacted_paths=redacted_paths or [],
         compat_warnings=compat_warnings or [],
         security_warnings=security_warnings or [],
@@ -708,11 +719,14 @@ def _validate_input_size(fields: dict[str, str | None], meta: Meta) -> dict | No
     if total <= limit:
         return None
     largest = max(fields, key=lambda key: _utf8_len(fields[key]))
+    others = [k for k in fields if k != largest and fields[k]]
     return _err(
         "context_too_large",
         f"User-supplied text is {total} bytes, exceeding the {limit}-byte limit.",
-        "Shorten the prompt/evidence/context, split the request, or raise "
-        "CLAUDE_IN_CODEX_MAX_INPUT_BYTES if this workspace intentionally allows it.",
+        f"Shorten {largest} (the largest field"
+        + (f"; also counted: {', '.join(others)}" if others else "")
+        + "), split the request, or raise CLAUDE_IN_CODEX_MAX_INPUT_BYTES if this "
+        "workspace intentionally allows it.",
         meta,
         details=ErrorDetails(
             field=largest,
@@ -778,6 +792,65 @@ class Resolved:
     timeout: int
     detail: str
     effort: str
+    system_prompt_append: str | None = None
+
+
+_SYSTEM_PROMPT_APPEND_DESCRIPTION = (
+    "Text appended to the system prompt BEHIND this server's guardrails, which "
+    "always lead; omit it and the guardrails run alone (no caller section, no meta "
+    "fingerprint). Grants no tools (the allowlist is argv, not prompt); Claude is "
+    "instructed not to let it set a verdict. Untrusted: never build it from "
+    "workspace content. Rides the command line, visible to local process listings "
+    f"during the run: never put secrets here. Hashed into meta. Max "
+    f"{MAX_SYSTEM_PROMPT_APPEND_BYTES} bytes."
+)
+
+
+def _validate_system_prompt_append(text: str | None, meta) -> dict | None:
+    """Reject unusable text BEFORE any spend: argv-unsafe bytes, forged framing
+    markers, then size.
+
+    Size is measured in bytes, not characters, so multi-byte prose cannot slip past
+    a character-length check."""
+    if text is None:
+        return None
+    unsafe = argv_unsafe_reason(text)
+    if unsafe is not None:
+        return _err(
+            "invalid_arguments",
+            f"system_prompt_append {unsafe}; the text is passed on the command line "
+            "and cannot carry it.",
+            "Remove NUL bytes and unpaired surrogates from system_prompt_append, then retry.",
+            meta,
+            offending="system_prompt_append",
+            details=ErrorDetails(reason="argv_unsafe_text"),
+        )
+    if contains_framing_marker(text):
+        return _err(
+            "invalid_arguments",
+            "system_prompt_append contains one of the server's caller-text framing "
+            "markers, which would let it pose as server-authored instructions.",
+            "Remove the server's framing-marker lines from system_prompt_append: "
+            "'BEGIN caller-supplied text', 'caller text follows', or 'END "
+            "caller-supplied text' after a fence such as ---, ===, or ***; then retry.",
+            meta,
+            offending="system_prompt_append",
+            details=ErrorDetails(reason="forged_framing_marker"),
+        )
+    size = len(text.encode())
+    if size <= MAX_SYSTEM_PROMPT_APPEND_BYTES:
+        # The fixed cap is a ceiling; the operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES
+        # bounds everything caller-authored that reaches Anthropic, and this text
+        # does. Check it here so every tool that accepts the parameter honours it.
+        return _validate_input_size({"system_prompt_append": text}, meta)
+    return _err(
+        "invalid_arguments",
+        f"system_prompt_append is {size} bytes; the cap is {MAX_SYSTEM_PROMPT_APPEND_BYTES}.",
+        "Shorten system_prompt_append to a persona or focus directive, then retry.",
+        meta,
+        offending="system_prompt_append",
+        details=ErrorDetails(limit_bytes=MAX_SYSTEM_PROMPT_APPEND_BYTES, actual_bytes=size),
+    )
 
 
 def _resolve(
@@ -794,6 +867,7 @@ def _resolve(
     workspace_source=None,
     effort=None,
     head: str | None = None,
+    system_prompt_append: str | None = None,
 ):
     """Resolve env defaults, clamp environment values, and validate explicit values.
 
@@ -890,6 +964,36 @@ def _resolve(
             allowed_values=["toolless", "readonly"],
         )
 
+    # Normalize BEFORE validating and storing: the cap, the meta fingerprint, and
+    # the bytes that reach Claude must all describe the same string, and blank text
+    # composes to the bare guardrails so it must not attest a non-default prompt.
+    system_prompt_append = normalize_system_prompt_append(system_prompt_append)
+    # Caller-supplied system-prompt text crosses into the system turn, so it is
+    # capped separately from the input-size check and rejected before any spend.
+    # This runs AFTER config_mode/access validation so the error meta reports the
+    # caller's real, validated mode rather than a default stand-in.
+    append_err = _validate_system_prompt_append(
+        system_prompt_append,
+        _meta(
+            cwd,
+            cm,
+            ac,
+            timeout,
+            0,
+            None,
+            scope,
+            base,
+            paths,
+            workspace_source=workspace_source,
+            requested_budget=requested_budget,
+            configured_budget=configured_budget,
+            effective_budget=budget,
+            head=head,
+        ),
+    )
+    if append_err:
+        return None, append_err
+
     if cm == "safe":
         fs = preflight.flag_support()
         if not safe_available(fs.help_parsed, fs.supported):
@@ -953,6 +1057,7 @@ def _resolve(
         timeout,
         det,
         eff,
+        system_prompt_append,
     ), None
 
 
@@ -1015,6 +1120,12 @@ def _run_request(kind: str, prompt: str, cwd: str, r: Resolved) -> RunRequest:
         budget_usd=r.budget,
         config_mode=r.config_mode,
         access=r.access,
+        # RunRequest is frozen at contract_api_version = 1 with no field for
+        # system-prompt text; backend.ClaudeBackend folds this descriptor into
+        # the composed prompt rather than appending a second flag to argv.
+        extra_args=(
+            ("--append-system-prompt", r.system_prompt_append) if r.system_prompt_append else ()
+        ),
     )
 
 
@@ -1068,6 +1179,7 @@ async def _execute(
         compat_warnings=dropped,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         head=head,
+        system_prompt_append=r.system_prompt_append,
     )
     if run.exit_code != 0 or run.timed_out:
         # A non-zero exit can still carry a cost-bearing JSON envelope (e.g.
@@ -1117,6 +1229,9 @@ async def claude_consult(
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
+    system_prompt_append: Annotated[
+        str | None, Field(description=_SYSTEM_PROMPT_APPEND_DESCRIPTION)
+    ] = None,
     detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
@@ -1143,6 +1258,7 @@ async def claude_consult(
         cwd,
         workspace_source=ws_source,
         effort=effort,
+        system_prompt_append=system_prompt_append,
     )
     if err:
         return _result(err)
@@ -1159,7 +1275,9 @@ async def claude_consult(
         configured_budget=r.configured_budget,
         effective_budget=r.budget,
     )
-    too_large = _validate_input_size(payload, meta)
+    too_large = _validate_input_size(
+        {**payload, "system_prompt_append": r.system_prompt_append}, meta
+    )
     if too_large:
         return _result(too_large)
     out = await _execute("claude_consult", payload, r, cwd, workspace_source=ws_source)
@@ -1230,6 +1348,9 @@ async def claude_review_changes(
     timeout_seconds: Annotated[
         int | None, Field(description="Sync call timeout; omit for configured default.")
     ] = None,
+    system_prompt_append: Annotated[
+        str | None, Field(description=_SYSTEM_PROMPT_APPEND_DESCRIPTION)
+    ] = None,
     detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     ctx: Context | None = None,
 ) -> ToolResult:
@@ -1261,6 +1382,7 @@ async def claude_review_changes(
         workspace_source=ws_source,
         effort=effort,
         head=head,
+        system_prompt_append=system_prompt_append,
     )
     if err:
         return _result(err)
@@ -1284,6 +1406,14 @@ async def claude_review_changes(
         return _result(
             _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
         )
+    # Everything caller-authored that reaches Anthropic counts against the
+    # operator's bound, summed: focus and the persona each fitting alone is not
+    # enough. Checked before any diff gathering, so it costs nothing to refuse.
+    too_large = _validate_input_size(
+        {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
+    )
+    if too_large:
+        return _result(too_large)
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
@@ -1871,6 +2001,9 @@ async def claude_review_changes_async(
         float | None,
         Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
     ] = None,
+    system_prompt_append: Annotated[
+        str | None, Field(description=_SYSTEM_PROMPT_APPEND_DESCRIPTION)
+    ] = None,
     detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     idempotency_key: Annotated[
         str | None,
@@ -1905,6 +2038,7 @@ async def claude_review_changes_async(
         workspace_source=ws_source,
         effort=effort,
         head=head,
+        system_prompt_append=system_prompt_append,
     )
     if err:
         return _result(err)
@@ -1926,6 +2060,7 @@ async def claude_review_changes_async(
         configured_budget=r.configured_budget,
         effective_budget=r.budget,
         head=head,
+        system_prompt_append=r.system_prompt_append,
     )
     legacy_job = await _legacy_keyed_job(cwd, idempotency_key)
     if legacy_job is not None:
@@ -1936,6 +2071,14 @@ async def claude_review_changes_async(
         return _result(
             _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
         )
+    # Everything caller-authored that reaches Anthropic counts against the
+    # operator's bound, summed: focus and the persona each fitting alone is not
+    # enough. Checked before any diff gathering, so it costs nothing to refuse.
+    too_large = _validate_input_size(
+        {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
+    )
+    if too_large:
+        return _result(too_large)
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
@@ -2023,6 +2166,9 @@ async def claude_review_changes_async(
         paths=effective_paths,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        system_prompt_append=(
+            SystemPromptAppend.of(r.system_prompt_append) if r.system_prompt_append else None
+        ),
         idempotency_key=idempotency_key,
     )
     return _result(
@@ -2050,6 +2196,7 @@ async def claude_review_changes_async(
                 compat_warnings=dropped,
                 security_warnings=hook_security_warnings(cwd, r.config_mode),
                 head=head,
+                system_prompt_append=r.system_prompt_append,
             ),
             idempotency_key=idempotency_key,
             job_timeout=job_timeout,
@@ -2086,6 +2233,9 @@ async def claude_consult_async(
     ] = None,
     detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     idempotency_key: Annotated[str | None, Field(description=_IDEMPOTENCY_KEY_DESCRIPTION)] = None,
+    system_prompt_append: Annotated[
+        str | None, Field(description=_SYSTEM_PROMPT_APPEND_DESCRIPTION)
+    ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
     """Ask claude_consult's question in the background and return a job_id.
@@ -2111,6 +2261,7 @@ async def claude_consult_async(
         cwd,
         workspace_source=ws_source,
         effort=effort,
+        system_prompt_append=system_prompt_append,
     )
     if err:
         return _result(err)
@@ -2129,11 +2280,14 @@ async def claude_consult_async(
         requested_budget=r.requested_budget,
         configured_budget=r.configured_budget,
         effective_budget=r.budget,
+        system_prompt_append=r.system_prompt_append,
     )
     legacy = await _legacy_keyed_job(cwd, idempotency_key)
     if legacy is not None:
         return _result(_legacy_key_error(legacy, cwd, meta))
-    too_large = _validate_input_size(payload, meta)
+    too_large = _validate_input_size(
+        {**payload, "system_prompt_append": r.system_prompt_append}, meta
+    )
     if too_large:
         return _result(too_large)
     cfg = JobConfig(
@@ -2151,6 +2305,9 @@ async def claude_consult_async(
         configured_max_budget_usd=r.configured_budget,
         effective_max_budget_usd=r.budget,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
+        system_prompt_append=(
+            SystemPromptAppend.of(r.system_prompt_append) if r.system_prompt_append else None
+        ),
         idempotency_key=idempotency_key,
     )
     return _result(
@@ -2173,6 +2330,7 @@ async def claude_consult_async(
                 effective_budget=r.budget,
                 compat_warnings=dropped,
                 security_warnings=hook_security_warnings(cwd, r.config_mode),
+                system_prompt_append=r.system_prompt_append,
             ),
             idempotency_key=idempotency_key,
             job_timeout=job_timeout,
@@ -3419,6 +3577,7 @@ def _capabilities_payload() -> dict:
                 optional=[
                     "context",
                     "workspace_root",
+                    "system_prompt_append",
                     *sync_execution_knobs,
                 ],
             ),
@@ -3432,6 +3591,7 @@ def _capabilities_payload() -> dict:
                 optional=[
                     "context",
                     "workspace_root",
+                    "system_prompt_append",
                     *sync_execution_knobs,
                 ],
             ),
@@ -3449,6 +3609,7 @@ def _capabilities_payload() -> dict:
                     "focus",
                     "paths",
                     "workspace_root",
+                    "system_prompt_append",
                     *sync_execution_knobs,
                 ],
             ),
@@ -3484,6 +3645,7 @@ def _capabilities_payload() -> dict:
                     "paths",
                     "workspace_root",
                     "idempotency_key",
+                    "system_prompt_append",
                     *execution_knobs,
                 ],
             ),
@@ -3498,6 +3660,7 @@ def _capabilities_payload() -> dict:
                     "context",
                     "workspace_root",
                     "idempotency_key",
+                    "system_prompt_append",
                     *execution_knobs,
                 ],
             ),
@@ -3622,8 +3785,9 @@ def _capabilities_payload() -> dict:
             "Best-effort secret redaction is applied to the server-gathered git diff before "
             "it is sent AND to the returned model output relayed back (summary, findings, "
             "questions, assumptions, next_steps, raw response text, and error messages). It "
-            "does NOT cover your free-form inputs (prompt, context, target, evidence, focus), "
-            "which are sent verbatim, nor files Claude reads directly from the workspace "
+            "does NOT cover your free-form inputs (prompt, context, target, evidence, focus, "
+            "system_prompt_append), which are sent verbatim, nor files Claude reads directly "
+            "from the workspace "
             "under access=readonly, whose contents the `claude` CLI sends to Anthropic "
             "outside this redaction path. Use access=toolless and config_mode=safe/bare for "
             "sensitive workspaces; redaction is defense-in-depth, not a guarantee."
