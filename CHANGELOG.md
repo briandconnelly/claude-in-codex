@@ -206,6 +206,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   updates only the numbers fails until the reasoning moves with them. (Raised by
   Copilot's review of #129.)
 
+- The live integration suite covers the async launch path. Its three existing
+  tests call the CLI in-process, so every one of them would have passed
+  unchanged no matter what this PR did to `_launch_job` — a green gate over a
+  diff it does not cover. `test_consult_async_live_roundtrip` runs a real
+  detached `claude` through the store: argv construction, the spawned worker,
+  the prompt streaming to its stdin, the child's envelope landing in the record,
+  and `claude_job_result` rendering it back, asserting a non-zero `cost_usd` so
+  a run that never happened cannot pass.
+
 - The three `*_async` starters share one launcher. Idempotency-outcome mapping,
   launch-failure classification, and the job handle were about to be written
   three times; `_launch_job` owns the launch, and each tool keeps only its own
