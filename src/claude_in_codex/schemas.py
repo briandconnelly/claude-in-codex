@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-36"
+FINGERPRINT = "claude-in-codex/0.1/schema-37"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -917,9 +917,14 @@ def _object_union_schema(adapter: TypeAdapter) -> dict:
 RESULT_SCHEMA = _slim(_object_union_schema(TypeAdapter(SuccessResult)))
 STATUS_SCHEMA = _slim(StatusResult.model_json_schema())
 CAPABILITIES_SCHEMA = _slim(CapabilitiesResult.model_json_schema())
-# A failed *_async launch returns the error envelope; an empty diff returns a
-# SuccessResult without starting a job; an idempotency_key match returns the
-# existing job's JobStatus instead of a new JobStarted.
+# A failed *_async launch returns the error envelope; an idempotency_key match
+# returns the existing job's JobStatus instead of a new JobStarted. Advertised by
+# a starter that has no diff to find empty, so it can never answer with a result.
+JOB_START_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStarted | JobStatus)))
+# The same, plus the SuccessResult an empty diff returns without starting a job.
+# Only the diff-bearing starters advertise it: carrying the result branch on a
+# starter that cannot produce one costs ~3KB of discovery and lies about the
+# shapes the caller must handle.
 JOB_STARTED_SCHEMA = _slim(
     _object_union_schema(TypeAdapter(JobStarted | JobStatus | SuccessResult))
 )

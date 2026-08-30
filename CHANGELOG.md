@@ -7,6 +7,219 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Every paid tool now has a recoverable execution path. `claude_consult` and
+  `claude_adversarial_review` could block for up to the full timeout with no way
+  to get the answer back: a cancelled call, a dropped connection, or a client
+  timeout lost work that had already been paid for, because the result lived only
+  in the reply that never arrived. `claude_consult_async` and
+  `claude_adversarial_review_async` launch the same calls as background jobs and
+  return a `job_id`, so the existing `claude_job_status`/`claude_job_result`/
+  `claude_job_consume_result`/`claude_job_cancel`/`claude_job_list` lifecycle
+  covers all three paid verbs rather than diff review alone. Bumps the fingerprint
+  to `claude-in-codex/0.1/schema-37`: two new tools, and the capability payload's
+  `paid_tools`, `tool_details`, `async_lifecycle.start_tools`, scope, egress, and
+  annotations prose all move with them.
+
+  `kind` on the job handle names the tool whose envelope `claude_job_result` will
+  return (`claude_consult`, `claude_review_changes`, `claude_adversarial_review`),
+  not the `*_async` starter that began it, so a background result parses with the
+  same code as the blocking one.
+
+  The `*_async` tools take no `timeout_seconds`: a job is bounded by the job
+  deadline, and `meta.timeout_seconds` reports that deadline rather than the
+  synchronous default.
+
+- `claude_consult_async` advertises `JOB_START_SCHEMA`, not `JOB_STARTED_SCHEMA`.
+  A diff-bearing starter answers an empty diff with a `SuccessResult` instead of
+  a job handle; a consult has no diff to find empty and can never produce that
+  shape. Advertising it anyway would cost ~3KB of every session's discovery
+  budget and hand the caller a branch that is dead by construction.
+
+- The `idempotency_key` replay/conflict contract is published once in
+  `claude_capabilities.async_lifecycle` instead of being re-advertised in full by
+  every `*_async` starter — the treatment `detail` got in #94. The per-tool
+  description keeps the rule a caller needs before calling (dedupe is on the key
+  AND the effective arguments) and points at the lifecycle for the three
+  `idempotency_*` outcomes.
+
+- The discovery-cost budget rises from 66,000 to 80,700 bytes. This is the
+  largest raise it has taken, and it is the price of the two tools above: an
+  `*_async` entry carries the whole job-handle union on top of its own
+  parameters. The two cuts named above held it to +21%. Reverting the deprecated
+  aliases in 0.9.0 reclaims ~9.8KB, so that revert target moves from 56,300 to
+  69,000.
+
+- `COMPATIBILITY.md` records why the server publishes named job tools rather than
+  MCP 2025-11-25 native tasks, though it negotiates that version and FastMCP
+  supports them: FastMCP's task store is in-process, so a restart would lose a
+  handle to a run that has already spent money, while the `claude_job_*` records
+  are on disk and survive one. The target Codex CLI is also not known to drive
+  `tasks/*` or to surface tool progress. Native tasks stay additive-later, not
+  a replacement.
+
+- `idempotency_key` publishes what its "same effective arguments" rule excludes.
+  The digest is taken over `(argv, prompt)`, and `detail` reaches neither: it
+  selects how a stored result is rendered, not what Claude is asked or paid to
+  do. So a keyed retry that changes only `detail` replays rather than
+  conflicting. That is the right behavior and now says so — the record keeps the
+  raw envelope, so the replayed job can be re-read at any density through
+  `claude_job_result` for free, and treating `detail` as effective would force a
+  second PAID run to obtain a rendering that costs nothing. Documented at
+  `arg_hash_for`, published in `claude_capabilities.async_lifecycle`, and pinned
+  by a test, so it is a contract rather than an accident of what reaches argv.
+  Amends the unreleased `claude-in-codex/0.1/schema-37`: the contract digest
+  moves, and the published `FINGERPRINT` string is unchanged. (Raised by
+  Copilot's review of #129.)
+
+- `CAPABILITY_SUMMARY`, the README, and the shipped skill no longer promise a
+  job handle unconditionally. Two claims were wrong in the same way — they
+  generalized over `paid_tools`, which still contains the deprecated
+  `claude_ask`, and over launches, which return the result itself rather than a
+  `job_id` when a diff-bearing `*_async` call finds an empty diff. An agent
+  reading either could reach for a `claude_ask_async` that does not exist, or
+  poll a handle it was never given. All three now say the aliases have no async
+  form and tell the caller to branch on `job_id`. Amends the unreleased
+  `claude-in-codex/0.1/schema-37` for the summary text. (Raised by Copilot's
+  review of #129.)
+
+- The shipped skill's async guardrail is three rules instead of one bundle:
+  prefer `_async`, pass `idempotency_key`, cancel what you abandon. An agent
+  checks obligations one at a time. (Raised by Copilot's review of #129.)
+
+- An unwritable job-state directory no longer reports `claude_not_found`. A
+  launch raises OSError from two unrelated sources — the `claude` executable and
+  the state directory — and the branch matched the bare `FileNotFoundError` /
+  `PermissionError` types, so both answered "Install Claude Code and ensure
+  `claude` is on PATH". A caller whose state directory was read-only was sent to
+  reinstall a CLI that was already there and working, while the very next branch
+  already carried the right repair. `jobs` now raises a marked
+  `ClaudeExecutableError` (keeping the Popen exception types for callers that
+  match on them), so the executable's failures keep `claude_not_found` — now
+  distinguishing "not on PATH" from "found but not executable", with chmod as the
+  repair for the second — and everything else falls through to the
+  state-directory repair. Both sides are tested. (Raised by Copilot's review of
+  #129.)
+
+- The `claude_job_*` tools no longer describe themselves as diff-review-only.
+  The lifecycle serves three starters now, but its own `tools/list` descriptions
+  still said to use `claude_job_status` "after claude_review_changes_async",
+  promised `claude_job_result` would return "the claude_review_changes
+  envelope", and called every job a review job. A client that reads tool
+  descriptions rather than calling `claude_capabilities` — which is most of them
+  — was never told the two new starters use the same lifecycle. The descriptions
+  and the matching `tool_details` now speak of any `*_async` job, and
+  `claude_job_result` promises the envelope of the tool named by the job's
+  `kind`. (Raised by Copilot's review of #129.)
+
+- `annotations_policy` and the `async_lifecycle` notes drop their remaining
+  universal claims over `paid_tools`, which still contains the deprecated
+  `claude_ask`. `annotations_policy` had been missed entirely in the first pass
+  at this — the edit was written but silently did not apply — so its paid-tool
+  list still ended at `claude_review_changes_async`. `COMPATIBILITY.md`'s
+  compatibility-strategy paragraph had the same defect. (Raised by Copilot's
+  review of #129.)
+
+- The cross-starter idempotency invariant is tested rather than only asserted in
+  a comment. All three starters share one namespace in the store's index, and
+  `_IDEMPOTENCY_NAMESPACE` claims that reusing a key across two of them
+  conflicts rather than replaying the first tool's job — but the digest carries
+  only `(argv, prompt)`, not the job kind, and nothing exercised the claim. A
+  cross-tool replay would be this key's worst failure: handing back a paid answer
+  to a question the caller never asked. It does conflict; now proven. (Raised by
+  Copilot's review of #129.)
+
+- A keyed `*_async` retry can no longer report "no changes" over a job that is
+  still running and spending. The empty-diff branch returns before any launch,
+  so it never reached the idempotency index and `idempotency_key` was simply
+  ignored on that path. The sequence is ordinary — and is precisely what the
+  shipped guidance now tells an agent to do: launch with a key, lose the
+  connection, commit the change while waiting, retry with the same arguments.
+  The retry answered `verdict: pass`, "No changes in scope; skipped Claude
+  call", with no `job_id` and no hint that a paid job existed; the job kept
+  running and kept spending, recoverable only if the agent independently thought
+  to call `claude_job_list`. A key that already holds a job is now honored even
+  when the current call would not start one: the launch reports
+  `idempotency_conflict` and names that job in `action.arguments`. Conflict is
+  not a rule invented for this branch — the digest covers the gathered diff, so a
+  retry whose diff merely CHANGED already conflicted; this makes a diff that
+  changed to nothing behave the same way instead of reporting success. An empty
+  diff with no key, or with a key holding nothing, still skips the spend exactly
+  as before. Pre-existing for `claude_review_changes_async`, but this PR doubled
+  the surface and added the guidance that walks into it. (Raised by an
+  independent review of #129.)
+
+- The `claude_not_found` catalog entry describes both of its causes. The
+  executable split earlier in this train gave the code a second meaning, "found
+  but not executable", while `error_catalog` still published only "not on PATH"
+  — the one place an agent looks up what a code means would have had it tell a
+  user to reinstall a CLI that was already installed. (Raised by an independent
+  review of #129.)
+
+- `tool_details` gets the same review-only prose pin that `tools/list` already
+  had. Both halves were corrected together, but only one was tested, and this
+  train has already had a prose edit silently fail to apply. `claude_job_result`
+  also now advertises the `detail` parameter it accepts, which the new
+  idempotency guidance tells callers to reach for. (Raised by an independent
+  review of #129.)
+
+- A `claude` on PATH without its execute bit no longer reports "not found". The
+  executable split earlier in this train promised a chmod repair, but
+  `shutil.which()` tests `X_OK` and so answers `None` for BOTH "absent" and "on
+  PATH but not executable" — and the bare name is what production passes
+  (`cli_contract.CLAUDE_BIN`). The `ClaudeExecutableNotRunnable` branch was
+  therefore unreachable in every real launch, and the chmod repair could never
+  be the one a caller actually saw. The test that "proved" the distinction used
+  an absolute path, a shape production never sends: a check that could not have
+  failed. `_check_executable` now scans PATH for a readable but non-executable
+  candidate before classifying, and the new test uses the bare name with an
+  isolated PATH. (Raised by Copilot's review of #129.)
+
+- The empty-diff idempotency check is published as a check, not a guarantee. It
+  reads the key; it does not serialize on it, so a peer launch that has gathered
+  a non-empty diff but has not yet reserved the key stays invisible and an
+  empty-diff caller can still answer "no changes" moments before that peer
+  spawns. Locking cannot close this: the race is read-before-write, and no
+  atomicity on the read can observe a reservation that does not exist yet. Doing
+  so needs the empty-diff outcome to TAKE the reservation, which needs a
+  reserve-without-spawn primitive the store does not expose — tracked in #131.
+  `claude_capabilities.async_lifecycle` now says so plainly and names
+  `claude_job_list` as the authority, so the contract does not claim a guarantee
+  it cannot keep. (Raised by Copilot's review of #129.)
+
+- The held-key conflict no longer offers a repair that cannot work. It said
+  "pass a new idempotency_key to launch a fresh run", but the diff on that
+  branch is still empty, so the same call under a fresh key takes the empty-diff
+  shortcut again and launches nothing — verified. A repair a caller can follow
+  and get nowhere is worse than none: it costs a round trip and teaches them the
+  key is broken. It now points at `claude_job_status` first and says plainly
+  that a new key alone will not start a run while the diff is empty, naming
+  scope/base as the thing to change. The test follows both routes and asserts
+  the dead end is a dead end and the named route reaches a job. (Raised by
+  Copilot's review of #129.)
+
+- The discovery-budget rationale names the budgets in force. Two derived-value
+  references were left at the pre-#93 numbers when the ceiling was raised —
+  `ceil(66,000/4)` and "16,500 == 66,000/4" — because comments are not executed
+  and nothing checked them. That is the third prose edit in this train to drift
+  or silently fail to apply, so `test_the_budget_derivations_in_this_file_are_not_stale`
+  now pins the rationale to the constants it explains, and a future raise that
+  updates only the numbers fails until the reasoning moves with them. (Raised by
+  Copilot's review of #129.)
+
+- The live integration suite covers the async launch path. Its three existing
+  tests call the CLI in-process, so every one of them would have passed
+  unchanged no matter what this PR did to `_launch_job` — a green gate over a
+  diff it does not cover. `test_consult_async_live_roundtrip` runs a real
+  detached `claude` through the store: argv construction, the spawned worker,
+  the prompt streaming to its stdin, the child's envelope landing in the record,
+  and `claude_job_result` rendering it back, asserting a non-zero `cost_usd` so
+  a run that never happened cannot pass.
+
+- The three `*_async` starters share one launcher. Idempotency-outcome mapping,
+  launch-failure classification, and the job handle were about to be written
+  three times; `_launch_job` owns the launch, and each tool keeps only its own
+  argument validation, context gathering, and prompt.
+
 - Git calls no longer inherit `GIT_*` environment variables. `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their relatives override git's
   repository discovery, so a server launched from a git hook — or from any

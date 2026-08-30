@@ -8,7 +8,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Annotated, Literal, cast, get_args
+from typing import TYPE_CHECKING, Annotated, Literal, cast, get_args
 from urllib.parse import unquote, urlparse
 
 from anyio.to_thread import run_sync
@@ -70,6 +70,7 @@ from claude_in_codex.schemas import (
     FINGERPRINT,
     FINGERPRINT_COVERS,
     JOB_LIST_SCHEMA,
+    JOB_START_SCHEMA,
     JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
     MODEL_CATALOG_SCHEMA,
@@ -107,6 +108,9 @@ from claude_in_codex.schemas import (
     workspace_warning_for,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 CAPABILITY_SUMMARY = (
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. The server grants no Bash/write "
@@ -114,8 +118,8 @@ CAPABILITY_SUMMARY = (
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
     "config_mode=bare disable hooks. Paid tools send context to Anthropic; call "
     "claude_status before spending. Use claude_models to discover valid model slugs. "
-    "claude_review_changes blocks; "
-    "claude_review_changes_async runs in background with poll/result/cancel; "
+    "Paid tools have claude_*_async forms (deprecated aliases do not): a job_id to "
+    "poll/result/cancel, absent on an empty diff. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
     "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
@@ -148,6 +152,18 @@ _DETAIL_DESCRIPTION = (
     "Field density; summary (default) is a bounded strict subset of full, dropping "
     "only raw_response.text and context_summary. Caps and truncation semantics: "
     "claude_capabilities.detail_modes."
+)
+
+# The full replay/conflict/in-progress contract lives in
+# claude_capabilities.async_lifecycle, published once instead of re-advertised by
+# every *_async starter (the treatment `detail` got in #94).
+_IDEMPOTENCY_KEY_DESCRIPTION = (
+    "Optional client-chosen key making launch retry-safe (atomic per workspace via "
+    "an on-disk reservation): a job matching this key AND the same effective "
+    "arguments (within the job TTL) has its status returned instead of starting a "
+    "duplicate paid job. `detail` is not an effective argument (re-render a stored "
+    "result for free instead). Replay, conflict, and in-progress rules: "
+    "claude_capabilities.async_lifecycle."
 )
 
 _JOB_DETAIL_DESCRIPTION = (
@@ -1587,6 +1603,13 @@ async def claude_adversarial_review(
     return _result(out)
 
 
+async def _job_held_by_key(cwd: str, idempotency_key: str | None) -> str | None:
+    """The job this key already holds, or None when there is no key or no job."""
+    if not idempotency_key:
+        return None
+    return await run_sync(lambda: jobs.find_live_job_for_key(cwd, idempotency_key))
+
+
 async def _legacy_keyed_job(cwd: str, idempotency_key: str | None) -> str | None:
     """The job_id a legacy 0.7 ``idem-*.json`` marker reserved for this key, else None.
 
@@ -1622,6 +1645,191 @@ async def _legacy_keyed_job(cwd: str, idempotency_key: str | None) -> str | None
     if await run_sync(lambda: jobs.status(cwd, held)) is None:
         return None
     return held
+
+
+def _key_holds_job_error(job_id: str, cwd: str, meta: Meta) -> dict:
+    """Refuse a keyed launch whose diff went empty while its job is still held.
+
+    The empty-diff branch returns before any launch, so it never reaches the
+    idempotency index. Left alone, a keyed retry after the diff was committed
+    away answers "No changes in scope; skipped Claude call" with verdict=pass —
+    a clean bill of health — while the paid job that key reserved is still
+    running and still spending, recoverable only if the caller independently
+    thinks to call claude_job_list.
+
+    Conflict is not a rule invented for this branch: the digest covers the
+    gathered diff, so a retry whose diff merely CHANGED already conflicts. This
+    makes a diff that changed to nothing behave the same way instead of
+    reporting success.
+    """
+    return _err(
+        "idempotency_conflict",
+        "This idempotency_key already holds a background job. The diff is now empty, "
+        "so this call cannot carry the same effective arguments that job was started "
+        "with — and that job may still be running and spending.",
+        # NOT "pass a new idempotency_key": the diff is still empty, so the same
+        # call under a fresh key takes the empty-diff shortcut again and launches
+        # nothing. A repair that cannot work is worse than none — it costs the
+        # caller a round trip and teaches them the key is broken.
+        "Read the existing job with claude_job_status. A new idempotency_key alone "
+        "will not start a run while the diff is empty: change scope/base so there "
+        "are changes to review first.",
+        meta,
+        offending="idempotency_key",
+        action=RepairAction(
+            next_step="call_tool",
+            tool="claude_job_status",
+            arguments={"job_id": job_id, "workspace_root": cwd},
+        ),
+    )
+
+
+def _legacy_key_error(job_id: str, cwd: str, meta: Meta) -> dict:
+    """Refuse an unverifiable 0.7 idempotency marker. See _legacy_keyed_job."""
+    return _err(
+        "idempotency_conflict",
+        "This idempotency_key belongs to a job started by an earlier version, "
+        "which recorded no argument digest, so a replay cannot be verified "
+        "against the arguments you passed.",
+        "Read the existing job with claude_job_status, or pass a new "
+        "idempotency_key to launch a fresh run.",
+        meta,
+        offending="idempotency_key",
+        action=RepairAction(
+            next_step="call_tool",
+            tool="claude_job_status",
+            arguments={"job_id": job_id, "workspace_root": cwd},
+        ),
+    )
+
+
+async def _launch_job(
+    *,
+    prompt: str,
+    cwd: str,
+    r: Resolved,
+    cfg: JobConfig,
+    meta: Meta,
+    started_meta: Callable[[list[str]], Meta],
+    idempotency_key: str | None,
+    job_timeout: int,
+) -> dict:
+    """Start one detached paid job and render its JobStarted (or ok:false) envelope.
+
+    Shared by every ``*_async`` starter, so the three tools cannot drift apart on
+    idempotency outcomes, launch-failure mapping, or the handle they hand back.
+    Everything tool-specific — argument validation, diff gathering, the prompt,
+    and the JobConfig — is the caller's; this owns only the launch.
+
+    Two metas, deliberately. `meta` is the preflight envelope every failure branch
+    reports against, built before argv exists. `started_meta` rebuilds it with the
+    help-gated flags `prepare()` dropped, which are knowable only once argv is
+    built and belong only on the success handle.
+    """
+    # The detached job needs only argv (the prompt streams to the worker's stdin via
+    # the job store, never disk). prepare() may close before the job starts because
+    # this backend stages no file artifacts — documented on ClaudeBackend.prepare.
+    async with BACKEND.prepare(_run_request(kind_for_tool(cfg.kind), prompt, cwd, r)) as prepared:
+        cmd, dropped = list(prepared.argv), list(prepared.dropped_flags)
+    try:
+        if idempotency_key:
+            outcome = await run_sync(
+                lambda: jobs.start_job_idempotent(cmd, cwd, cfg, prompt, key=idempotency_key)
+            )
+            outcome_kind = outcome["kind"]
+            if outcome_kind == "created":
+                job_id, started_at = outcome["job_id"], outcome["started_at"]
+            elif outcome_kind == "replay":
+                data = await run_sync(lambda: jobs.status(cwd, outcome["job_id"]))
+                if data is not None:
+                    return data
+                return _err(
+                    "internal_error",
+                    "idempotency_key replay points at a job that has no record.",
+                    "Retry, or omit idempotency_key to force a new launch.",
+                    meta,
+                    offending="idempotency_key",
+                    retryable=True,
+                )
+            elif outcome_kind == "conflict":
+                return _err(
+                    "idempotency_conflict",
+                    "This idempotency_key was already used with different effective arguments.",
+                    "Pass a new idempotency_key, or repeat the original arguments to "
+                    "replay the existing job.",
+                    meta,
+                    offending="idempotency_key",
+                )
+            elif outcome_kind == "unavailable":
+                return _err(
+                    "idempotency_result_unavailable",
+                    "A prior run for this idempotency_key completed, but its result "
+                    "is no longer retained (consumed or expired).",
+                    "Retry with a new idempotency_key to launch a fresh run.",
+                    meta,
+                    offending="idempotency_key",
+                )
+            elif outcome_kind == "in_progress":
+                return _err(
+                    "idempotency_in_progress",
+                    "A concurrent launch for this idempotency_key is still being coordinated.",
+                    "Retry the same call after a short delay; the winner's job will be replayed.",
+                    meta,
+                    offending="idempotency_key",
+                    retryable=True,
+                )
+            else:  # io_error, and any outcome a future store adds
+                # NOT idempotency_in_progress: the index failed to read or write,
+                # which establishes nothing about a concurrent launch. Promising
+                # that "the winner's job will be replayed" would invent a cause
+                # and can loop a caller against a persistently unwritable state
+                # directory.
+                return _err(
+                    "internal_error",
+                    "The keyed launch could not be coordinated: the idempotency index "
+                    "could not be read or written.",
+                    "Retry the same call; if it persists, check that the job state "
+                    "directory (CLAUDE_IN_CODEX_STATE_DIR) exists and is writable.",
+                    meta,
+                    offending="idempotency_key",
+                    retryable=True,
+                )
+        else:
+            job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
+    except jobs.ClaudeExecutableError as exc:
+        # Only `claude` itself lands here. Everything else a launch can fail on —
+        # the job-state directory above all — falls through to the OSError branch,
+        # whose repair points at that directory. Matching on the bare
+        # FileNotFoundError/PermissionError types conflated the two and told a
+        # caller with an unwritable state directory to install a CLI they had.
+        missing = not isinstance(exc, jobs.ClaudeExecutableNotRunnable)
+        return _err(
+            "claude_not_found",
+            "The `claude` CLI was not found on PATH."
+            if missing
+            else "The `claude` CLI was found but is not executable.",
+            "Install Claude Code and ensure `claude` is on PATH."
+            if missing
+            else "Make `claude` executable (chmod +x) and retry.",
+            meta,
+        )
+    except OSError as e:
+        return _err(
+            "internal_error",
+            f"Failed to start async job: {e}",
+            "Check the workspace/job-state directory permissions and retry.",
+            meta,
+        )
+    started = JobStarted(
+        job_id=job_id,
+        kind=cfg.kind,
+        started_at=started_at,
+        deadline_seconds=job_timeout,
+        poll_after_ms=jobs.poll_after_ms(),
+        ttl_seconds=jobs.ttl_seconds(),
+        meta=started_meta(dropped),
+    )
+    return started.model_dump(mode="json", exclude_none=True)
 
 
 @mcp.tool(
@@ -1666,19 +1874,7 @@ async def claude_review_changes_async(
     detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
     idempotency_key: Annotated[
         str | None,
-        Field(
-            description="Optional client-chosen key making launch retry-safe "
-            "(atomic per workspace via an on-disk reservation): a job matching "
-            "this key AND the same effective arguments (within the job TTL) has "
-            "its status returned instead of starting a duplicate paid job. "
-            "After a dropped connection, retry with the SAME arguments, or "
-            "check claude_job_list before re-launching. Reusing the key with "
-            "different arguments is idempotency_conflict, not a replay. "
-            "idempotency_in_progress means a concurrent launch is still being "
-            "coordinated: retry the SAME call. idempotency_result_unavailable "
-            "means the prior run completed but its result is gone: retrying the "
-            "same call cannot help, so launch again with a NEW key."
-        ),
+        Field(description=_IDEMPOTENCY_KEY_DESCRIPTION),
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
@@ -1735,23 +1931,7 @@ async def claude_review_changes_async(
     if legacy_job is not None:
         # Cheap early return, before any diff gathering — see _legacy_keyed_job
         # for why an unverifiable legacy marker is refused rather than replayed.
-        return _result(
-            _err(
-                "idempotency_conflict",
-                "This idempotency_key belongs to a job started by an earlier version, "
-                "which recorded no argument digest, so a replay cannot be verified "
-                "against the arguments you passed.",
-                "Read the existing job with claude_job_status, or pass a new "
-                "idempotency_key to launch a fresh run.",
-                meta,
-                offending="idempotency_key",
-                action=RepairAction(
-                    next_step="call_tool",
-                    tool="claude_job_status",
-                    arguments={"job_id": legacy_job, "workspace_root": cwd},
-                ),
-            )
-        )
+        return _result(_legacy_key_error(legacy_job, cwd, meta))
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
@@ -1813,6 +1993,9 @@ async def claude_review_changes_async(
         head=head,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
+        held = await _job_held_by_key(cwd, idempotency_key)
+        if held is not None:
+            return _result(_key_holds_job_error(held, cwd, meta))
         return _result(
             _empty_diff_result(
                 "claude_review_changes", meta, ctx_data.summary, effective_paths, detail=r.detail
@@ -1823,11 +2006,6 @@ async def claude_review_changes_async(
         {"scope": scope, "base": base, "head": head, "focus": focus, "paths": effective_paths},
         ctx_data.text,
     )
-    # The detached job needs only argv (the prompt streams to the worker's stdin via
-    # the job store, never disk). prepare() may close before the job starts because
-    # this backend stages no file artifacts — documented on ClaudeBackend.prepare.
-    async with BACKEND.prepare(_run_request("review_changes", prompt, cwd, r)) as prepared:
-        cmd, dropped = list(prepared.argv), list(prepared.dropped_flags)
     cfg = JobConfig(
         kind="claude_review_changes",
         config_mode=r.config_mode,
@@ -1847,108 +2025,243 @@ async def claude_review_changes_async(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         idempotency_key=idempotency_key,
     )
-    try:
-        if idempotency_key:
-            outcome = await run_sync(
-                lambda: jobs.start_job_idempotent(cmd, cwd, cfg, prompt, key=idempotency_key)
-            )
-            outcome_kind = outcome["kind"]
-            if outcome_kind == "created":
-                job_id, started_at = outcome["job_id"], outcome["started_at"]
-            elif outcome_kind == "replay":
-                data = await run_sync(lambda: jobs.status(cwd, outcome["job_id"]))
-                if data is not None:
-                    return _result(data)
-                return _result(
-                    _err(
-                        "internal_error",
-                        "idempotency_key replay points at a job that has no record.",
-                        "Retry, or omit idempotency_key to force a new launch.",
-                        meta,
-                        offending="idempotency_key",
-                        retryable=True,
-                    )
-                )
-            elif outcome_kind == "conflict":
-                return _result(
-                    _err(
-                        "idempotency_conflict",
-                        "This idempotency_key was already used with different effective arguments.",
-                        "Pass a new idempotency_key, or repeat the original arguments to "
-                        "replay the existing job.",
-                        meta,
-                        offending="idempotency_key",
-                    )
-                )
-            elif outcome_kind == "unavailable":
-                return _result(
-                    _err(
-                        "idempotency_result_unavailable",
-                        "A prior run for this idempotency_key completed, but its result "
-                        "is no longer retained (consumed or expired).",
-                        "Retry with a new idempotency_key to launch a fresh run.",
-                        meta,
-                        offending="idempotency_key",
-                    )
-                )
-            elif outcome_kind == "in_progress":
-                return _result(
-                    _err(
-                        "idempotency_in_progress",
-                        "A concurrent launch for this idempotency_key is still being coordinated.",
-                        "Retry the same call after a short delay; the winner's job will "
-                        "be replayed.",
-                        meta,
-                        offending="idempotency_key",
-                        retryable=True,
-                    )
-                )
-            else:  # io_error, and any outcome a future store adds
-                # NOT idempotency_in_progress: the index failed to read or write,
-                # which establishes nothing about a concurrent launch. Promising
-                # that "the winner's job will be replayed" would invent a cause
-                # and can loop a caller against a persistently unwritable state
-                # directory.
-                return _result(
-                    _err(
-                        "internal_error",
-                        "The keyed launch could not be coordinated: the idempotency index "
-                        "could not be read or written.",
-                        "Retry the same call; if it persists, check that the job state "
-                        "directory (CLAUDE_IN_CODEX_STATE_DIR) exists and is writable.",
-                        meta,
-                        offending="idempotency_key",
-                        retryable=True,
-                    )
-                )
-        else:
-            job_id, started_at = await run_sync(lambda: jobs.start_job(cmd, cwd, cfg, prompt))
-    except (FileNotFoundError, PermissionError):
-        return _result(
-            _err(
-                "claude_not_found",
-                "The `claude` CLI was not found on PATH.",
-                "Install Claude Code and ensure `claude` is on PATH.",
-                meta,
-            )
+    return _result(
+        await _launch_job(
+            prompt=prompt,
+            cwd=cwd,
+            r=r,
+            cfg=cfg,
+            meta=meta,
+            started_meta=lambda dropped: _meta(
+                cwd,
+                r.config_mode,
+                r.access,
+                job_timeout,
+                0,
+                None,
+                scope,
+                base,
+                effective_paths,
+                workspace_source=ws_source,
+                requested_budget=r.requested_budget,
+                configured_budget=r.configured_budget,
+                effective_budget=r.budget,
+                redacted_paths=ctx_data.redacted_paths,
+                compat_warnings=dropped,
+                security_warnings=hook_security_warnings(cwd, r.config_mode),
+                head=head,
+            ),
+            idempotency_key=idempotency_key,
+            job_timeout=job_timeout,
         )
-    except OSError as e:
-        return _result(
-            _err(
-                "internal_error",
-                f"Failed to start async job: {e}",
-                "Check the workspace/job-state directory permissions and retry.",
-                meta,
-            )
+    )
+
+
+@mcp.tool(
+    annotations=_ASYNC_START_ANNOTATIONS,
+    title="Ask Claude (background)",
+    output_schema=JOB_START_SCHEMA,
+)
+async def claude_consult_async(
+    prompt: Annotated[str, Field(description="The question to ask Claude.")],
+    context: Annotated[str | None, Field(description="Extra context, passed verbatim.")] = None,
+    workspace_root: Annotated[
+        str | None,
+        Field(
+            description="Absolute path to the repo/workspace to operate in. If omitted, "
+            "the server uses the client's first MCP root, else its own cwd."
+        ),
+    ] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
+    access: Annotated[Access | None, Field(description="toolless|readonly")] = None,
+    model: Annotated[
+        str | None, Field(description="Claude model override; omit for configured default.")
+    ] = None,
+    effort: Annotated[
+        Effort | None, Field(description="Reasoning effort: low|medium|high|xhigh|max.")
+    ] = None,
+    max_budget_usd: Annotated[
+        float | None,
+        Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
+    ] = None,
+    detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
+    idempotency_key: Annotated[str | None, Field(description=_IDEMPOTENCY_KEY_DESCRIPTION)] = None,
+    ctx: Context | None = None,
+) -> ToolResult:
+    """Ask claude_consult's question in the background and return a job_id.
+
+    Paid; sends context to Anthropic; outlives a dropped connection;
+    idempotency_key avoids duplicate-launch spend. The server grants no
+    Bash/write tools; workspace hooks may run shell in config_mode=inherit or
+    config_mode=scoped. config_mode=safe and config_mode=bare disable hooks.
+
+    Egress: prompt/context and access=readonly reads are verbatim; reply
+    redaction is best effort.
+    """
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
+    if ws_err:
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
+    r, err = _resolve(
+        config_mode,
+        access,
+        model,
+        max_budget_usd,
+        None,
+        detail,
+        cwd,
+        workspace_source=ws_source,
+        effort=effort,
+    )
+    if err:
+        return _result(err)
+    # A background job is bounded by its wall-clock deadline, not the synchronous
+    # timeout_seconds; report that everywhere so meta stays consistent with the job.
+    job_timeout = jobs.max_seconds()
+    payload = {"prompt": prompt, "context": context}
+    meta = _meta(
+        cwd,
+        r.config_mode,
+        r.access,
+        job_timeout,
+        0,
+        None,
+        workspace_source=ws_source,
+        requested_budget=r.requested_budget,
+        configured_budget=r.configured_budget,
+        effective_budget=r.budget,
+    )
+    legacy = await _legacy_keyed_job(cwd, idempotency_key)
+    if legacy is not None:
+        return _result(_legacy_key_error(legacy, cwd, meta))
+    too_large = _validate_input_size(payload, meta)
+    if too_large:
+        return _result(too_large)
+    cfg = JobConfig(
+        kind="claude_consult",
+        config_mode=r.config_mode,
+        access=r.access,
+        scope=None,
+        base=None,
+        head=None,
+        detail=r.detail,
+        timeout_seconds=job_timeout,
+        workspace_source=ws_source,
+        context_summary=None,
+        requested_max_budget_usd=r.requested_budget,
+        configured_max_budget_usd=r.configured_budget,
+        effective_max_budget_usd=r.budget,
+        security_warnings=hook_security_warnings(cwd, r.config_mode),
+        idempotency_key=idempotency_key,
+    )
+    return _result(
+        await _launch_job(
+            prompt=build_prompt("claude_consult", payload, ""),
+            cwd=cwd,
+            r=r,
+            cfg=cfg,
+            meta=meta,
+            started_meta=lambda dropped: _meta(
+                cwd,
+                r.config_mode,
+                r.access,
+                job_timeout,
+                0,
+                None,
+                workspace_source=ws_source,
+                requested_budget=r.requested_budget,
+                configured_budget=r.configured_budget,
+                effective_budget=r.budget,
+                compat_warnings=dropped,
+                security_warnings=hook_security_warnings(cwd, r.config_mode),
+            ),
+            idempotency_key=idempotency_key,
+            job_timeout=job_timeout,
         )
-    started = JobStarted(
-        job_id=job_id,
-        kind="claude_review_changes",
-        started_at=started_at,
-        deadline_seconds=job_timeout,
-        poll_after_ms=jobs.poll_after_ms(),
-        ttl_seconds=jobs.ttl_seconds(),
-        meta=_meta(
+    )
+
+
+@mcp.tool(
+    annotations=_ASYNC_START_ANNOTATIONS,
+    title="Adversarial review with Claude (background)",
+    output_schema=JOB_STARTED_SCHEMA,
+)
+async def claude_adversarial_review_async(
+    target: Annotated[str, Field(description="The plan/claim/decision to attack.")],
+    evidence: Annotated[str | None, Field(description="Supporting evidence.")] = None,
+    scope: Annotated[
+        Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
+    ] = None,
+    base: Annotated[str, Field(description="Base ref for branch diff when scope=branch.")] = "main",
+    head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional plain repo-relative paths for the attached server-provided diff. "
+                "Requires scope; no exclude/pathspec magic; shell-style wildcards "
+                "(*, ?, []) still glob recursively. []/omitted means unfiltered."
+            )
+        ),
+    ] = None,
+    workspace_root: Annotated[
+        str | None,
+        Field(
+            description="Absolute path to the repo/workspace to operate in. If omitted, "
+            "the server uses the client's first MCP root, else its own cwd."
+        ),
+    ] = None,
+    config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
+    access: Annotated[Access | None, Field(description="toolless|readonly")] = None,
+    model: Annotated[
+        str | None, Field(description="Claude model override; omit for configured default.")
+    ] = None,
+    effort: Annotated[
+        Effort | None, Field(description="Reasoning effort: low|medium|high|xhigh|max.")
+    ] = None,
+    max_budget_usd: Annotated[
+        float | None,
+        Field(ge=MIN_BUDGET_USD, le=MAX_BUDGET_USD, description=_BUDGET_DESCRIPTION),
+    ] = None,
+    detail: Annotated[Detail, Field(description=_DETAIL_DESCRIPTION)] = "summary",
+    idempotency_key: Annotated[str | None, Field(description=_IDEMPOTENCY_KEY_DESCRIPTION)] = None,
+    ctx: Context | None = None,
+) -> ToolResult:
+    """Attack a plan or decision in the background and return a job_id.
+
+    Paid; sends context to Anthropic; outlives a dropped connection; empty diffs
+    skip spend; idempotency_key avoids duplicate spend. Grants no Bash/write
+    tools; workspace hooks may run shell in config_mode=inherit or
+    config_mode=scoped. config_mode=safe and config_mode=bare disable hooks.
+
+    Egress: best effort for gathered diff/output, not free-form inputs or
+    access=readonly reads.
+    """
+    cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
+    if ws_err:
+        return _result(_workspace_error(ws_err, workspace_root, ws_roots))
+    r, err = _resolve(
+        config_mode,
+        access,
+        model,
+        max_budget_usd,
+        None,
+        detail,
+        cwd,
+        scope=scope,
+        base=base,
+        paths=paths,
+        workspace_source=ws_source,
+        effort=effort,
+        head=head,
+    )
+    if err:
+        return _result(err)
+    job_timeout = jobs.max_seconds()
+    payload_text = {"target": target, "evidence": evidence}
+    payload: dict[str, object] = dict(payload_text)
+
+    def build_meta(**overrides) -> Meta:
+        return _meta(
             cwd,
             r.config_mode,
             r.access,
@@ -1957,18 +2270,131 @@ async def claude_review_changes_async(
             None,
             scope,
             base,
-            effective_paths,
+            overrides.pop("paths", paths),
             workspace_source=ws_source,
             requested_budget=r.requested_budget,
             configured_budget=r.configured_budget,
             effective_budget=r.budget,
-            redacted_paths=ctx_data.redacted_paths,
-            compat_warnings=dropped,
-            security_warnings=hook_security_warnings(cwd, r.config_mode),
             head=head,
-        ),
+            **overrides,
+        )
+
+    meta = build_meta()
+    legacy = await _legacy_keyed_job(cwd, idempotency_key)
+    if legacy is not None:
+        return _result(_legacy_key_error(legacy, cwd, meta))
+    if paths and not scope:
+        return _result(
+            _invalid_paths_error(meta, "paths requires scope on claude_adversarial_review_async.")
+        )
+    if head is not None and scope != "branch":
+        return _result(
+            _invalid_head_error(
+                meta, "head requires scope=branch on claude_adversarial_review_async."
+            )
+        )
+    too_large = _validate_input_size(payload_text, meta)
+    if too_large:
+        return _result(too_large)
+    context_text = ""
+    context_summary = None
+    redacted_paths: list[str] = []
+    effective_paths = None
+    if scope:
+        effective_paths, paths_err = _resolve_paths(paths, meta)
+        if paths_err:
+            return _result(paths_err)
+        meta = build_meta(paths=effective_paths)
+        try:
+            ctx_data = await run_sync(
+                lambda: gather_context(
+                    cwd, scope=scope, base=base, paths=effective_paths, head=head
+                )
+            )
+        except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
+            return _result(
+                _context_error_result(
+                    exc, meta, scope=scope, base=base, head=head, scope_optional=True
+                )
+            )
+        if ctx_data.truncated:
+            meta = build_meta(
+                paths=effective_paths,
+                truncated=True,
+                hint=ctx_data.truncation_hint,
+                redacted_paths=ctx_data.redacted_paths,
+            )
+            return _result(
+                _err(
+                    "context_too_large",
+                    "The attached diff is too large to review safely.",
+                    ctx_data.truncation_hint or "Narrow the scope.",
+                    meta,
+                    details=_oversized_diff_details(ctx_data),
+                    action=RepairAction(next_step="retry_with_changes"),
+                )
+            )
+        meta = build_meta(paths=effective_paths, redacted_paths=ctx_data.redacted_paths)
+        if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
+            held = await _job_held_by_key(cwd, idempotency_key)
+            if held is not None:
+                return _result(_key_holds_job_error(held, cwd, meta))
+            # No diff to attack: return the same free result the synchronous tool
+            # returns rather than paying for a job. The launch envelope is a
+            # SuccessResult here, not a job handle — see #80.
+            return _result(
+                _empty_diff_result(
+                    "claude_adversarial_review",
+                    meta,
+                    ctx_data.summary,
+                    effective_paths,
+                    verdict="unknown",
+                    confidence="low",
+                    detail=r.detail,
+                )
+            )
+        context_text, context_summary = ctx_data.text, ctx_data.summary
+        redacted_paths = ctx_data.redacted_paths
+        payload["paths"] = effective_paths
+        payload["scope"] = scope
+        payload["base"] = base
+        payload["head"] = head
+    cfg = JobConfig(
+        kind="claude_adversarial_review",
+        config_mode=r.config_mode,
+        access=r.access,
+        scope=scope,
+        base=base if scope else None,
+        head=head,
+        detail=r.detail,
+        timeout_seconds=job_timeout,
+        workspace_source=ws_source,
+        context_summary=context_summary,
+        requested_max_budget_usd=r.requested_budget,
+        configured_max_budget_usd=r.configured_budget,
+        effective_max_budget_usd=r.budget,
+        paths=effective_paths,
+        redacted_paths=redacted_paths,
+        security_warnings=hook_security_warnings(cwd, r.config_mode),
+        idempotency_key=idempotency_key,
     )
-    return _result(started.model_dump(mode="json", exclude_none=True))
+    return _result(
+        await _launch_job(
+            prompt=build_prompt("claude_adversarial_review", payload, context_text),
+            cwd=cwd,
+            r=r,
+            cfg=cfg,
+            meta=meta,
+            started_meta=lambda dropped: build_meta(
+                paths=effective_paths,
+                redacted_paths=redacted_paths,
+                compat_warnings=dropped,
+                security_warnings=hook_security_warnings(cwd, r.config_mode),
+            ),
+            idempotency_key=idempotency_key,
+            job_timeout=job_timeout,
+        )
+    )
 
 
 @mcp.tool(
@@ -1987,12 +2413,12 @@ async def claude_job_status(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Check a background review job without fetching the full result. Polling
+    """Check a background job without fetching the full result. Polling
     performs lazy maintenance: an overdue job is killed and marked timeout, and
     TTL-expired records are deleted; a terminal job's stored result is never
     altered.
 
-    Use after claude_review_changes_async. Returns status, elapsed time,
+    Use after any *_async starter. Returns status, elapsed time,
     result_available, polling hints, and cost when available. If
     result_available is true, call claude_job_result.
     """
@@ -2023,13 +2449,14 @@ async def claude_job_result(
     detail: Annotated[Detail | None, Field(description=_JOB_DETAIL_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Fetch a finished background review without deleting the job record.
-    Polling lazily reaps: an overdue job is killed and marked timeout, and
+    """Fetch a finished job's result without deleting the record.
+
+    Polling lazily reaps: overdue jobs are killed and marked timeout and
     TTL-expired records deleted; a terminal result is never altered.
 
     Use when claude_job_status reports result_available=true. Returns the
-    claude_review_changes envelope with meta.job_id set. Free: detail="full"
-    re-renders it, recovering a truncated summary without spending.
+    envelope of the tool named by the job's `kind`, with meta.job_id set. Free:
+    detail="full" re-renders it, recovering a truncated summary without spend.
     claude_job_consume_result deletes.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
@@ -2059,7 +2486,7 @@ async def claude_job_consume_result(
     detail: Annotated[Detail | None, Field(description=_JOB_DETAIL_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Fetch a finished background review and delete the stored job record.
+    """Fetch a finished background job's result and delete the stored job record.
 
     Use only when you no longer need to poll or re-read the job. Returns the
     claude_job_result envelope, then deletes completed job state. Non-done jobs
@@ -2092,9 +2519,9 @@ async def claude_job_cancel(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Cancel a running background review job.
+    """Cancel a running background job.
 
-    Use to stop a job from claude_review_changes_async. Terminates the Claude
+    Use to stop a job from any *_async starter. Terminates the Claude
     process and marks the job cancelled; cancelled jobs cannot be resumed.
     Already-terminal jobs are returned unchanged.
     """
@@ -2266,7 +2693,7 @@ async def claude_job_list(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """List the background review jobs known for this workspace, newest first.
+    """List the background jobs known for this workspace, newest first.
 
     Use to recover job_ids lost across context compaction or interruption. Returns
     each job's id, kind, status, start time, result_available, expiry, and cost when
@@ -2560,13 +2987,21 @@ _PAID_PREFLIGHT_ERRORS = [
     *_ARG_ERRORS,
     *_WORKSPACE_ERRORS,
     *_CONFIG_ERRORS,
-    # The only launch failure the starter reports itself: the executable is
-    # missing, so no job is ever spawned.
+    # The only launch failure the starter reports itself: `claude` is missing or
+    # not executable, so no job is ever spawned. Every other launch OSError (the
+    # job-state directory above all) is internal_error — see ClaudeExecutableError.
     "claude_not_found",
     *_INTERNAL_ERRORS,
 ]
 _PAID_SYNC_ERRORS = [*_PAID_PREFLIGHT_ERRORS, *_CLAUDE_ERRORS]
 _JOB_LIFECYCLE_ERRORS = [*_ARG_ERRORS, *_WORKSPACE_ERRORS, *_JOB_LOOKUP_ERRORS]
+# Keyed-launch coordination outcomes from the idempotency index. Shared by every
+# *_async starter, so a new one cannot quietly advertise a narrower set.
+_IDEMPOTENCY_ERRORS = [
+    "idempotency_conflict",
+    "idempotency_result_unavailable",
+    "idempotency_in_progress",
+]
 
 _TOOL_ERROR_CODES: dict[str, list[str]] = {
     # No arguments and no workspace, so no ok:false envelope is possible. These
@@ -2585,13 +3020,13 @@ _TOOL_ERROR_CODES: dict[str, list[str]] = {
     "claude_review_changes": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
     "claude_adversarial_review": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
     # Preflight only: a started job's own failures arrive via claude_job_result.
-    "claude_review_changes_async": [
+    "claude_review_changes_async": [*_PAID_PREFLIGHT_ERRORS, *_GIT_ERRORS, *_IDEMPOTENCY_ERRORS],
+    # No diff gathering: context_too_large here is the user-supplied-text cap.
+    "claude_consult_async": [*_PAID_PREFLIGHT_ERRORS, "context_too_large", *_IDEMPOTENCY_ERRORS],
+    "claude_adversarial_review_async": [
         *_PAID_PREFLIGHT_ERRORS,
         *_GIT_ERRORS,
-        # Keyed-launch coordination outcomes from the idempotency index.
-        "idempotency_conflict",
-        "idempotency_result_unavailable",
-        "idempotency_in_progress",
+        *_IDEMPOTENCY_ERRORS,
     ],
     "claude_job_status": _JOB_LIFECYCLE_ERRORS,
     "claude_job_cancel": _JOB_LIFECYCLE_ERRORS,
@@ -2617,7 +3052,12 @@ _TOOL_ERROR_CODES: dict[str, list[str]] = {
 # the same table the error envelope itself uses, so the published default and the
 # emitted default cannot disagree.
 _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
-    ("claude_not_found", "The `claude` executable is not on PATH.", False, []),
+    (
+        "claude_not_found",
+        "The `claude` executable is not on PATH, or is present but not executable.",
+        False,
+        [],
+    ),
     (
         "claude_auth_required",
         "claude is installed but not logged in for the resolved config_mode.",
@@ -2824,7 +3264,11 @@ _DETAIL_MODES = DetailModes(
 )
 
 _ASYNC_LIFECYCLE = AsyncLifecycle(
-    start_tools=["claude_review_changes_async"],
+    start_tools=[
+        "claude_review_changes_async",
+        "claude_consult_async",
+        "claude_adversarial_review_async",
+    ],
     status_tool="claude_job_status",
     result_tool="claude_job_result",
     consume_tool="claude_job_consume_result",
@@ -2849,6 +3293,39 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "claude_job_cancel is the only way to stop it early.",
         "An expired record is deleted, so it reports job_not_found rather than a "
         "distinct expired state.",
+        "start_tools is the complete list: claude_consult, claude_review_changes, "
+        "and claude_adversarial_review each have one, and the deprecated "
+        "claude_ask alias has none (use claude_consult_async). No canonical paid "
+        "call therefore has to be made blocking. Prefer the *_async form whenever "
+        "the run may outlive the caller's patience: a blocking call that is "
+        "cancelled or loses its connection loses the work it already paid for, "
+        "and a job does not.",
+        "kind names the tool whose envelope claude_job_result will return "
+        "(claude_consult, claude_review_changes, or claude_adversarial_review), "
+        "not the *_async tool that started it.",
+        "idempotency_key dedupes on (key, effective arguments) atomically per "
+        "workspace via an on-disk reservation. After a dropped connection, retry "
+        "with the SAME arguments, or check claude_job_list before re-launching.",
+        "A key that already holds a job is honored even when the current call would "
+        "not start one: a diff-bearing starter whose diff has since gone empty "
+        "reports idempotency_conflict naming that job, rather than a no-changes "
+        "result that would hide a run still spending. This is checked, not "
+        "serialized: a peer launch under the same key that has not yet reserved it "
+        "is not yet visible, so do not treat a no-changes result as proof that no "
+        "job exists — claude_job_list is the authority.",
+        "The effective arguments are the ones that change what Claude is asked and "
+        "paid to do. `detail` is NOT one of them: the raw envelope is stored, so a "
+        "replay can still be read at any density by passing `detail` to "
+        "claude_job_result, for free. Retrying a key with only `detail` changed is "
+        "therefore a replay, not a conflict — conflicting would force a second paid "
+        "run to obtain a rendering that is already free.",
+        "Reusing an idempotency_key with different effective arguments is "
+        "idempotency_conflict, not a replay.",
+        "idempotency_in_progress means a concurrent launch is still being "
+        "coordinated: retry the SAME call.",
+        "idempotency_result_unavailable means the prior run completed but its "
+        "result is gone: retrying the same call cannot help, so launch again with "
+        "a NEW key.",
     ],
 )
 
@@ -2889,6 +3366,8 @@ def _capabilities_payload() -> dict:
             "claude_review_changes",
             "claude_adversarial_review",
             "claude_review_changes_async",
+            "claude_consult_async",
+            "claude_adversarial_review_async",
             # Deprecated alias of claude_consult; removal planned for 0.9.0.
             "claude_ask",
         ],
@@ -3004,13 +3483,47 @@ def _capabilities_payload() -> dict:
                     "focus",
                     "paths",
                     "workspace_root",
+                    "idempotency_key",
+                    *execution_knobs,
+                ],
+            ),
+            tool_detail(
+                "claude_consult_async",
+                "paid",
+                "Ask for a second opinion in the background when the answer may "
+                "outlive the caller's patience or the connection.",
+                "job_id, status, polling hint, deadline, TTL, and resolved meta",
+                required=["prompt"],
+                optional=[
+                    "context",
+                    "workspace_root",
+                    "idempotency_key",
+                    *execution_knobs,
+                ],
+            ),
+            tool_detail(
+                "claude_adversarial_review_async",
+                "paid",
+                "Pressure-test a plan in the background; optionally attach a diff "
+                "(scope=branch attaches base...head, head defaults to HEAD).",
+                "job_id, status, polling hint, deadline, TTL, and resolved meta; an "
+                "empty attached diff returns a result without spending instead",
+                required=["target"],
+                optional=[
+                    "evidence",
+                    "scope",
+                    "base",
+                    "head",
+                    "paths",
+                    "workspace_root",
+                    "idempotency_key",
                     *execution_knobs,
                 ],
             ),
             tool_detail(
                 "claude_job_status",
                 "free",
-                "Poll a background job without fetching the full result.",
+                "Poll a background job from any *_async starter without fetching the full result.",
                 "job state, result_available, elapsed time, expiry, cost when terminal",
                 required=["job_id"],
                 optional=["workspace_root"],
@@ -3019,9 +3532,9 @@ def _capabilities_payload() -> dict:
                 "claude_job_result",
                 "free",
                 "Fetch a finished background job result without deleting it.",
-                "same structured envelope as claude_review_changes, with meta.job_id",
+                "the envelope of the tool named by the job's kind, with meta.job_id",
                 required=["job_id"],
-                optional=["workspace_root"],
+                optional=["workspace_root", "detail"],
             ),
             tool_detail(
                 "claude_job_consume_result",
@@ -3034,7 +3547,7 @@ def _capabilities_payload() -> dict:
             tool_detail(
                 "claude_job_cancel",
                 "free",
-                "Cancel a running background review job.",
+                "Cancel a running background job from any *_async starter.",
                 "job status after cancellation or terminal-state refresh",
                 required=["job_id"],
                 optional=["workspace_root"],
@@ -3061,7 +3574,8 @@ def _capabilities_payload() -> dict:
             "independent code review of a git diff",
             "adversarial review of a plan/claim",
             "a free-form independent second opinion",
-            "background diff review with poll/result/cancel for long runs",
+            "background diff review, second opinion, or adversarial review with "
+            "poll/result/cancel for long runs",
             "a free dry-run preview of workspace, diff size, and redaction before paying",
         ],
         negative_scope=[
@@ -3103,7 +3617,8 @@ def _capabilities_payload() -> dict:
         detail_modes=_DETAIL_MODES,
         data_egress=(
             "Paid tools (claude_consult, claude_review_changes, claude_adversarial_review, "
-            "claude_review_changes_async) send context to Anthropic via the `claude` CLI. "
+            "and their claude_*_async forms) send context to Anthropic via the `claude` "
+            "CLI. "
             "Best-effort secret redaction is applied to the server-gathered git diff before "
             "it is sent AND to the returned model output relayed back (summary, findings, "
             "questions, assumptions, next_steps, raw response text, and error messages). It "
@@ -3125,10 +3640,11 @@ def _capabilities_payload() -> dict:
         ),
         annotations_policy=(
             "Static annotations represent the worst case across config modes. "
-            "readOnlyHint tracks observable effects: paid tools (claude_consult, "
-            "claude_review_changes, claude_adversarial_review, "
-            "claude_review_changes_async) spend money and send context to "
-            "Anthropic, so they are not read-only; their destructiveHint is true "
+            "readOnlyHint tracks observable effects: the paid tools (claude_consult, "
+            "claude_review_changes, claude_adversarial_review, each of their "
+            "claude_*_async forms, and the deprecated claude_ask) spend money and "
+            "send context to Anthropic, so they are not read-only; their "
+            "destructiveHint is true "
             "because config_mode=inherit or config_mode=scoped may execute "
             "workspace hooks with arbitrary shell commands, while config_mode=safe "
             "and config_mode=bare disable hooks; claude_job_status/"

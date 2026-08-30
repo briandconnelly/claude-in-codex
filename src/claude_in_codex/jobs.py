@@ -77,8 +77,13 @@ _LEGACY_STDERR_WITHHELD = "legacy job diagnostics withheld because they predate 
 # New records' sanitized child stderr. The store owns <job_dir>/stderr.log for
 # the worker's OWN diagnostics, so the redacted claude stream needs its own file.
 _CLAUDE_STDERR_FILE = "claude-stderr.log"
-# The store's idempotency index keys on (tool, key); one tool starts keyed jobs.
-_IDEMPOTENT_TOOL = "claude_review_changes_async"
+# The store's idempotency index keys on (tool, key). All three *_async starters
+# share ONE namespace, so a key is unique per workspace rather than per tool: the
+# same key reused across two different starters is an idempotency_conflict (the
+# arg_hash cannot match), never a cross-tool replay of a run the caller did not
+# ask for. The value is frozen at the original name because changing it would
+# orphan every live reservation on upgrade.
+_IDEMPOTENCY_NAMESPACE = "claude_review_changes_async"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -331,8 +336,52 @@ def _worker_factory(cmd: list[str], workspace: str, *, config_mode: str):
     return factory
 
 
+class ClaudeExecutableError(OSError):
+    """Marker: the launch failed on `claude` itself, not on the job-state directory.
+
+    A launch can raise OSError from either, and the two need opposite repairs.
+    Without this marker the server matched on FileNotFoundError/PermissionError
+    and reported "install Claude Code" for BOTH — so an unwritable state
+    directory sent the caller to reinstall a CLI that was already there. The two
+    concrete classes keep Popen's exception types (see _check_executable), so
+    callers matching those still match.
+    """
+
+
+class ClaudeExecutableMissing(ClaudeExecutableError, FileNotFoundError):
+    """`claude` is not on PATH, or the named path does not exist."""
+
+
+class ClaudeExecutableNotRunnable(ClaudeExecutableError, PermissionError):
+    """`claude` exists but is not executable."""
+
+
+def _on_path_but_not_executable(name: str) -> bool:
+    """True when some PATH entry holds `name` as a file that cannot be executed.
+
+    Only consulted once shutil.which() has already answered None, to tell its two
+    causes apart; a readable candidate that merely lacks the execute bit is a
+    chmod away from working, which is a different repair from "install it".
+    """
+    for entry in os.get_exec_path():
+        candidate = Path(entry) / name
+        try:
+            if candidate.is_file() and not os.access(candidate, os.X_OK):
+                return True
+        except OSError:  # unreadable PATH entry: not our candidate, keep looking
+            continue
+    return False
+
+
 def _check_executable(cmd: list[str], cwd: str) -> None:
-    """Preserve Popen's immediate missing/non-executable command failure."""
+    """Preserve Popen's immediate missing/non-executable command failure.
+
+    The raised types stay FileNotFoundError/PermissionError for fidelity; the
+    ClaudeExecutableError mixin only adds the provenance the server needs to
+    pick a repair. An empty argv is deliberately NOT marked: that is a bug in
+    this process, not a missing CLI, and it should reach the caller as
+    internal_error rather than as advice to install something.
+    """
     if not cmd:
         raise FileNotFoundError("job command is empty")
     executable = cmd[0]
@@ -341,11 +390,18 @@ def _check_executable(cmd: list[str], cwd: str) -> None:
         if not path.is_absolute():
             path = Path(cwd) / path
         if not path.is_file():
-            raise FileNotFoundError(executable)
+            raise ClaudeExecutableMissing(executable)
         if not os.access(path, os.X_OK):
-            raise PermissionError(executable)
+            raise ClaudeExecutableNotRunnable(executable)
     elif shutil.which(executable) is None:
-        raise FileNotFoundError(executable)
+        # shutil.which() tests X_OK, so it answers None for "absent" AND for "on
+        # PATH but not executable". The bare name is what production passes
+        # (cli_contract.CLAUDE_BIN), so collapsing the two here would leave
+        # ClaudeExecutableNotRunnable unreachable in every real launch, and the
+        # chmod repair would never be the one a caller actually sees.
+        if _on_path_but_not_executable(executable):
+            raise ClaudeExecutableNotRunnable(executable)
+        raise ClaudeExecutableMissing(executable)
 
 
 def start_job(
@@ -380,6 +436,16 @@ def arg_hash_for(cmd: list[str], prompt: str | None) -> str:
 
     Volatile bookkeeping (timeouts, workspace provenance, redaction counts) is
     excluded by construction: it appears in neither argv nor the prompt.
+
+    `detail` is excluded the same way, and that exclusion is deliberate rather
+    than incidental. It selects how a stored result is RENDERED, not what Claude
+    is asked or paid to do, and the record keeps the raw envelope — so a replayed
+    job can still be read at any density by passing `detail` to claude_job_result,
+    for free. Treating it as an effective argument would turn a free re-render
+    into an idempotency_conflict and push the caller into a second paid run to get
+    a rendering they could already have. Published in
+    claude_capabilities.async_lifecycle and pinned by a test, so it is a contract,
+    not an accident of what happens to reach argv.
     """
     material = json.dumps({"argv": list(cmd), "prompt": prompt}, sort_keys=True)
     return hashlib.sha256(material.encode()).hexdigest()
@@ -403,7 +469,7 @@ def start_job_idempotent(
             _worker_factory(cmd, cwd, config_mode=cfg.config_mode),
             cwd,
             kind=cfg.kind,
-            tool=_IDEMPOTENT_TOOL,
+            tool=_IDEMPOTENCY_NAMESPACE,
             key=key,
             arg_hash=arg_hash_for(cmd, stdin_text),
             extra=_extra_for(cfg, cwd),
@@ -445,6 +511,42 @@ def find_by_idempotency_key(cwd: str, key: str) -> str | None:
     except ValueError:
         return None
     return str(held)
+
+
+def find_live_job_for_key(cwd: str, key: str) -> str | None:
+    """The job_id an existing record reserved for this idempotency_key, or None.
+
+    Advisory, and deliberately NOT the dedupe path: start_job_idempotent still
+    owns the atomic (key, arg_hash) reservation, and nothing here should be used
+    to decide whether to spawn.
+
+    It exists for the one caller that must answer "does this key already hold a
+    paid job?" WITHOUT being able to build the prompt the digest needs — the
+    empty-diff branch, which returns before any launch is attempted. Without it
+    a keyed retry whose diff has since gone empty reports "no changes" while the
+    job that key reserved keeps running and keeps spending.
+
+    KNOWN LIMIT, and not one that locking fixes. A concurrent launch that has
+    gathered a non-empty diff but has not yet reserved the key is invisible here,
+    so an empty-diff caller can still answer "no changes" moments before that
+    peer spawns. The race is read-before-write: no atomicity on THIS read can
+    observe a reservation that does not exist yet. Closing it needs the empty-diff
+    outcome to TAKE the reservation, so the two serialize on the key — which needs
+    a reserve-without-spawn primitive the store does not expose (see #131). What
+    this does cover is the sequential case the published retry guidance actually
+    describes: launch, lose the connection, commit, retry.
+    """
+    with _JOBS_LOCK:
+        for sd in _store().list_jobs(cwd):
+            job_id = sd.get("job_id", "")
+            try:
+                jd = _job_dir(cwd, job_id)
+            except ValueError:
+                continue
+            meta = _read_meta(jd)
+            if meta is not None and _record_extra(meta).get("idempotency_key") == key:
+                return job_id
+    return None
 
 
 def _reap_stale_markers(cwd: str) -> None:
