@@ -256,7 +256,10 @@ class SystemPromptAppend(BaseModel):
     async launch acknowledgement, and the meta rebuilt for claude_job_result and
     claude_job_consume_result. On those, absent means the guardrail prompt ran
     alone — unless `security_warnings` reports a malformed on-disk fingerprint,
-    in which case the prompt used is unknown. It is NOT a general "no persona
+    in which case the prompt used is unknown. For a background job this attests
+    what the server RECORDED: the job record is ordinary local state, not
+    tamper-evident, so a process that can edit it can also remove the
+    fingerprint (or the whole record). It is NOT a general "no persona
     was supplied" signal on envelopes that
     describe no run — argument errors, an empty-diff pass, and context-too-large
     rejections may omit it whether or not the call carried one, because nothing

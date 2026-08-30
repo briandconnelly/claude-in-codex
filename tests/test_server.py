@@ -4533,28 +4533,39 @@ async def test_system_prompt_append_honours_operator_input_bound(monkeypatch, gi
     assert data["error"]["details"]["limit_bytes"] == 1000
 
 
-async def test_consult_input_bound_sums_prompt_and_system_prompt_append(monkeypatch, tmp_path):
-    """Each field alone fits; together they exceed the operator bound."""
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_consult", {"prompt": "p" * 600}),
+        ("claude_consult_async", {"prompt": "p" * 600}),
+        ("claude_review_changes", {"scope": "working_tree", "focus": "f" * 600}),
+        ("claude_review_changes_async", {"scope": "working_tree", "focus": "f" * 600}),
+    ],
+)
+async def test_input_bound_sums_free_text_with_system_prompt_append(
+    monkeypatch, git_repo, tool, args
+):
+    """Each field alone fits the operator bound; together they exceed it. The
+    review tools sum `focus` with the persona, the consult tools sum `prompt`."""
     import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
         raise AssertionError("paid call should not run")
 
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "exit 1"], []))
     monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_consult",
-            {
-                "prompt": "p" * 600,
-                "workspace_root": str(tmp_path),
-                "system_prompt_append": "s" * 600,
-            },
+            tool,
+            {**args, "workspace_root": str(git_repo), "system_prompt_append": "s" * 600},
             raise_on_error=False,
         )
     data = structured(result)
-    assert data["ok"] is False
+    assert data["ok"] is False, tool
     assert data["error"]["code"] == "context_too_large"
+    assert data["error"]["details"]["limit_bytes"] == 1000
 
 
 async def test_consult_blank_system_prompt_append_records_no_fingerprint(fake_claude, tmp_path):

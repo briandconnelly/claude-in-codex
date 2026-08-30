@@ -26,7 +26,8 @@ git diff before that diff is sent to Claude, and it scrubs the returned model
 output relayed back to the caller (summary, findings, questions, assumptions,
 next_steps, the `detail=full` raw response text, and model-derived error
 messages). It does **not** cover your free-form inputs (`prompt`, `context`,
-`target`, `evidence`, `focus`), which are sent verbatim; nor files Claude reads
+`target`, `evidence`, `focus`, `system_prompt_append`), which are sent verbatim;
+nor files Claude reads
 directly from the workspace under `access=readonly`, whose contents the `claude`
 CLI sends to Anthropic outside this redaction path. Because the output redactor
 sees each returned field independently, a key block split across separate fields
@@ -39,7 +40,10 @@ The system prompt rides argv. The server streams the user prompt to the
 guardrails and any caller `system_prompt_append` text composed behind them are
 passed as the `--append-system-prompt` value, so they are visible to a process
 listing on the host for the run's duration. Do not put secrets in
-`system_prompt_append`. Job records store only its SHA-256 and byte length.
+`system_prompt_append`. Job records store only its SHA-256 and byte length, and
+that fingerprint attests what the server recorded: the state directory is
+ordinary local files, not a tamper-evident log, so a local process that can edit
+a record can also remove the fingerprint or the record itself.
 
 The tool allowlist does not govern Claude Code hooks. In `config_mode=inherit`
 or `scoped`, workspace `.claude/settings*.json` hooks may run shell before or

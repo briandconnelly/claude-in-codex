@@ -1402,6 +1402,14 @@ async def claude_review_changes(
         return _result(
             _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
         )
+    # Everything caller-authored that reaches Anthropic counts against the
+    # operator's bound, summed: focus and the persona each fitting alone is not
+    # enough. Checked before any diff gathering, so it costs nothing to refuse.
+    too_large = _validate_input_size(
+        {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
+    )
+    if too_large:
+        return _result(too_large)
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
@@ -2059,6 +2067,14 @@ async def claude_review_changes_async(
         return _result(
             _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
         )
+    # Everything caller-authored that reaches Anthropic counts against the
+    # operator's bound, summed: focus and the persona each fitting alone is not
+    # enough. Checked before any diff gathering, so it costs nothing to refuse.
+    too_large = _validate_input_size(
+        {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
+    )
+    if too_large:
+        return _result(too_large)
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
@@ -3765,8 +3781,9 @@ def _capabilities_payload() -> dict:
             "Best-effort secret redaction is applied to the server-gathered git diff before "
             "it is sent AND to the returned model output relayed back (summary, findings, "
             "questions, assumptions, next_steps, raw response text, and error messages). It "
-            "does NOT cover your free-form inputs (prompt, context, target, evidence, focus), "
-            "which are sent verbatim, nor files Claude reads directly from the workspace "
+            "does NOT cover your free-form inputs (prompt, context, target, evidence, focus, "
+            "system_prompt_append), which are sent verbatim, nor files Claude reads directly "
+            "from the workspace "
             "under access=readonly, whose contents the `claude` CLI sends to Anthropic "
             "outside this redaction path. Use access=toolless and config_mode=safe/bare for "
             "sensitive workspaces; redaction is defense-in-depth, not a guarantee."
