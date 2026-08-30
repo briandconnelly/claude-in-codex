@@ -55,9 +55,6 @@ class ClaudeBackend:
     """The behavior half of the Claude contract (facts live on PONTONIER_CONTRACT)."""
 
     def validate_request(self, request: RunRequest) -> ClassifiedFailure | None:
-        # Upstream rejects a bad --effort at arg-parse (loud, zero spend), and this
-        # server also enforces VALID_EFFORTS at its boundary; mirror that boundary
-        # here so a direct adapter caller cannot send a value the tools would refuse.
         # extra_args is the operator channel, and this backend's ExtraArgsPolicy
         # declares no allowed option form: every descriptor is refused loudly
         # rather than silently dropped.
@@ -115,6 +112,9 @@ class ClaudeBackend:
                         f"bound (CLAUDE_IN_CODEX_MAX_INPUT_BYTES) is {limit}."
                     ),
                 )
+        # Upstream rejects a bad --effort at arg-parse (loud, zero spend), and this
+        # server also enforces VALID_EFFORTS at its boundary; mirror that boundary
+        # here so a direct adapter caller cannot send a value the tools would refuse.
         effort = request.reasoning_effort
         if effort is not None and effort not in cli_contract.VALID_EFFORTS:
             return ClassifiedFailure(
