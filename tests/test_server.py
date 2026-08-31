@@ -5092,10 +5092,12 @@ def no_git(*args, **kwargs):
 
 @pytest.mark.parametrize("tool", ["claude_review_changes", "claude_review_changes_async"])
 async def test_review_rejects_focus_forging_a_framing_marker(monkeypatch, git_repo, tool):
-    """`focus` is delimited with the same markers as `system_prompt_append` (#135), so
-    it needs the same forgery guard: a forged close would let the rest of the string
-    read as server-authored prompt. Refused before any spend, and before the diff is
-    gathered."""
+    """`focus` is delimited by its own marker family (#135), so like
+    `system_prompt_append` it needs a forgery guard: a forged close would let the rest
+    of the string read as server-authored prompt. This covers the focus family; the
+    cross-family case -- one channel forging the OTHER's markers -- is
+    `test_review_rejects_focus_forging_an_append_marker` and its mirror. Refused before
+    any spend, and before the diff is gathered."""
     import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
