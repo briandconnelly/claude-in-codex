@@ -17,9 +17,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   appears, at lower severity, so "do not report X" is the wrong phrasing), and a
   verdict-setting append is refused aloud, spending output on the refusal. It also
   warns that a verdict under a narrowed focus is not a full-review verdict. The four
-  `system_prompt_append` guardrail bullets shrink to two: the marker-refusal reason
-  code and the fingerprint-storage rationale are self-describing at runtime and
-  documented for humans in the README.
+  `system_prompt_append` guardrail bullets become three, and the channel-choice bullet
+  moves to the new section: the marker-refusal reason code is self-describing at
+  runtime and documented for humans in the README. The job-record caveat stays — a
+  stored reply can repeat appended text, so "only the fingerprint is stored" needs its
+  qualification.
 
 - `claude_consult`, `claude_consult_async`, `claude_review_changes`, and
   `claude_review_changes_async` accept `system_prompt_append`: caller-supplied
