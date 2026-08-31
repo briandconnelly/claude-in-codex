@@ -5336,8 +5336,9 @@ async def test_review_changes_omits_focus_meta_when_unused(fake_claude, git_repo
 
 
 async def test_review_changes_empty_diff_omits_focus_meta(monkeypatch, git_repo):
-    """An empty-diff pass reviewed nothing, so it was not narrowed by anything.
-    meta.focus attests what reached Claude; nothing did."""
+    """An empty-diff pass reviewed nothing, so it was not narrowed by anything. The
+    envelope describes no run, so there is nothing for meta.focus to have been launched
+    under; it is omitted like every other no-run envelope."""
     import subprocess as _sp
 
     import claude_in_codex.server as srv
@@ -5408,8 +5409,9 @@ async def test_job_result_meta_carries_focus_through_the_real_store(
 async def test_review_changes_omits_meta_focus_for_an_empty_focus(fake_claude, git_repo):
     """`build_prompt` skips a FALSY focus (normalize.py: `if payload.get("focus")`), so ""
     narrows nothing and never reaches Claude. Echoing it anyway would put meta.focus in the
-    envelope -- "" survives exclude_none -- while the contract says present means "this text
-    was sent to Claude". meta.focus must track that same truthiness, not the raw argument.
+    envelope -- "" survives exclude_none -- while the contract says present means "the run
+    was launched under this focus", and no run is launched under an empty one. meta.focus
+    must track that same truthiness, not the raw argument.
 
     Whitespace-only focus is deliberately NOT covered here: "   " is truthy, so it IS sent,
     and echoing it is correct."""
