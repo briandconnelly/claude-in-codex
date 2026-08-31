@@ -30,6 +30,7 @@ from claude_in_codex.claude_models import read_model_catalog
 from claude_in_codex.config import (
     ENV_PLACEHOLDER_REPAIR,
     MAX_BUDGET_USD,
+    MAX_FOCUS_BYTES,
     MAX_SYSTEM_PROMPT_APPEND_BYTES,
     MAX_TIMEOUT_SECONDS,
     MIN_BUDGET_USD,
@@ -853,6 +854,56 @@ def _validate_system_prompt_append(text: str | None, meta) -> dict | None:
     )
 
 
+def _validate_focus(text: str | None, meta) -> dict | None:
+    """Reject `focus` text that forges the server's caller-text framing markers.
+
+    `focus` is delimited (`config.compose_focus`), so like `system_prompt_append` it
+    needs a forgery guard: without one a caller could stage a fake close and have the
+    rest of its string read as server-authored prompt. Both marker families are
+    reserved on both channels, so the check is the same call.
+
+    One check the append needs is absent on purpose: there is no `argv_unsafe_reason`
+    check, because the prompt reaches Claude over stdin, not argv, so a NUL or a lone
+    surrogate is not the fatal argv error it is for the system prompt.
+
+    Size is measured in bytes, not characters, so multi-byte prose cannot slip past a
+    character-length check, and through `_utf8_len` rather than a bare `.encode()`:
+    a lone surrogate is schema-valid JSON that strict UTF-8 refuses to encode, so
+    measuring it strictly would raise here and escape the structured error contract.
+    Counting it as its replacement is enough for a ceiling. (Such text still fails
+    later, unstructured, when the prompt is written to the runner's stdin -- that is
+    true of `prompt`, `context`, `target`, and `evidence` too, and is not this
+    function's to fix.) Both bounds apply: this fixed per-field ceiling here, and the
+    operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES over the summed caller text at the call
+    site."""
+    if text is None:
+        return None
+    if contains_framing_marker(text):
+        return _err(
+            "invalid_arguments",
+            "focus contains one of the server's caller-text framing markers, which "
+            "would let it pose as server-authored instructions.",
+            "Remove the server's framing-marker lines from focus: 'BEGIN/END "
+            "caller-supplied focus', 'BEGIN/END caller-supplied text', or 'caller "
+            "text follows' after a fence such as ---, ===, or ***; then retry.",
+            meta,
+            offending="focus",
+            details=ErrorDetails(reason="forged_framing_marker"),
+        )
+    size = _utf8_len(text)
+    if size <= MAX_FOCUS_BYTES:
+        return None
+    return _err(
+        "invalid_arguments",
+        f"focus is {size} bytes; the cap is {MAX_FOCUS_BYTES}.",
+        "Shorten focus to a topic such as 'security' or 'tests'; put longer "
+        "instructions in system_prompt_append, or the material to review in the diff.",
+        meta,
+        offending="focus",
+        details=ErrorDetails(limit_bytes=MAX_FOCUS_BYTES, actual_bytes=size),
+    )
+
+
 def _resolve(
     config_mode,
     access,
@@ -1407,6 +1458,9 @@ async def claude_review_changes(
     # Everything caller-authored that reaches Anthropic counts against the
     # operator's bound, summed: focus and the persona each fitting alone is not
     # enough. Checked before any diff gathering, so it costs nothing to refuse.
+    forged_focus = _validate_focus(focus, meta)
+    if forged_focus:
+        return _result(forged_focus)
     too_large = _validate_input_size(
         {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
     )
@@ -2072,6 +2126,9 @@ async def claude_review_changes_async(
     # Everything caller-authored that reaches Anthropic counts against the
     # operator's bound, summed: focus and the persona each fitting alone is not
     # enough. Checked before any diff gathering, so it costs nothing to refuse.
+    forged_focus = _validate_focus(focus, meta)
+    if forged_focus:
+        return _result(forged_focus)
     too_large = _validate_input_size(
         {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
     )

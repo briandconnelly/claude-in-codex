@@ -161,6 +161,16 @@ Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECOND
   — it is the one way caller text reaches the system turn — and never build it from untrusted
   workspace content. Note that the system prompt rides the command line, so your text is visible
   to a process listing on that machine for the duration of the run.
+- `focus` (on `claude_review_changes` and `claude_review_changes_async`) narrows a review to a
+  topic. Your text stays in the user turn, and the server no longer restates it in its own
+  voice: it is delimited by markers of its own, announced as caller-supplied and untrusted, and
+  followed by a sentence saying it may not limit the review's scope, remove a finding, relax a
+  rule, or set the verdict. The guardrail prompt names `focus` alongside the diff as untrusted
+  data. It is capped at 4096 bytes and rejected before any spend, and, like the append, text
+  carrying one of the server's framing marker lines is refused — each channel reserves both
+  families, so neither can forge the other's delimiters. The framing makes an injected directive
+  visible as caller text; it does not make Claude incapable of following one, so never build
+  `focus` from untrusted workspace content.
 
 If a requested diff scope has no changes, the review tools return a passing result without
 invoking Claude.
