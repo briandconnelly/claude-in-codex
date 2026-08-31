@@ -1416,3 +1416,79 @@ def test_a_bare_name_on_path_without_the_execute_bit_is_not_reported_as_missing(
     monkeypatch.setenv("PATH", str(bin_dir))
     with pytest.raises(PermissionError):
         jobs._check_executable(["claude"], str(tmp_path))
+
+
+# ------------------------------------------------------- meta.focus (#136), job records
+def test_legacy_record_without_focus_warns_that_narrowing_is_unknown(tmp_path, monkeypatch):
+    """A record written before focus was persisted has no `focus` key. Reading that
+    absence as "unfocused" would report a possibly-narrowed pass as a full-review pass
+    -- the exact failure #136 exists to close. Job records outlive a server upgrade by
+    up to the TTL, so this window is real."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    cwd = str(tmp_path)
+    job_id = "c3" * 16
+    _legacy_record(cwd, job_id)
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert "focus" not in payload["meta"]
+    assert any("focus" in w for w in payload["meta"]["security_warnings"]), payload["meta"][
+        "security_warnings"
+    ]
+
+
+def test_record_with_an_explicit_null_focus_is_reported_as_unfocused(tmp_path, monkeypatch):
+    """Positive control for the test above: a CURRENT record that stored focus=None
+    was genuinely unfocused, so it must NOT carry the unknown-narrowing warning.
+    Without this, a warning on every record would satisfy the legacy test and say
+    nothing."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    cwd = str(tmp_path)
+    job_id = "c4" * 16
+    jd = _legacy_record(cwd, job_id)
+    meta = json.loads((jd / "meta.json").read_text())
+    meta["config"]["focus"] = None
+    jobs._write_meta(jd, meta)
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert "focus" not in payload["meta"]
+    assert not any("focus" in w for w in payload["meta"]["security_warnings"])
+
+
+def test_legacy_consult_record_is_not_warned_about_an_impossible_focus(tmp_path, monkeypatch):
+    """`focus` exists only on the review tools. Warning that a legacy CONSULT record's
+    narrowing is unknown claims a doubt that cannot arise, and a warning that fires where
+    it cannot matter trains a reader to skip the one that does."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    cwd = str(tmp_path)
+    job_id = "c5" * 16
+    jd = _legacy_record(cwd, job_id)
+    meta = json.loads((jd / "meta.json").read_text())
+    meta["kind"] = "claude_consult"
+    jobs._write_meta(jd, meta)
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert not any("focus" in w for w in payload["meta"]["security_warnings"]), payload["meta"][
+        "security_warnings"
+    ]
+
+
+def test_terminal_record_rebuilds_meta_focus_for_a_result_read_later(tmp_path, monkeypatch):
+    """The scenario #136 exists for, end to end on the read side: a FINISHED review is
+    rendered from its record with no live call to remember. The stored focus must come
+    back beside the verdict, or the reader cannot tell that `pass` is scoped."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    cwd = str(tmp_path)
+    job_id = "c6" * 16
+    jd = _legacy_record(cwd, job_id)
+    meta = json.loads((jd / "meta.json").read_text())
+    meta["config"]["focus"] = "security"
+    jobs._write_meta(jd, meta)
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["verdict"] == "pass"
+    assert payload["meta"]["focus"] == "security"
+    assert not any("focus" in w for w in payload["meta"]["security_warnings"])

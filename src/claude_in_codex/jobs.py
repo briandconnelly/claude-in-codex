@@ -280,6 +280,13 @@ class JobConfig:
     # material in the on-disk job record, which is exactly what
     # --no-session-persistence exists to prevent.
     system_prompt_append: SystemPromptAppend | None = None
+    # The caller's `focus` text, stored VERBATIM (unlike system_prompt_append, which
+    # is fingerprinted). A job result read in a later session must be able to report
+    # that its verdict covers this focus only, and a digest cannot name the topic.
+    # This is caller-authored prose on disk -- the same class of data as `paths`,
+    # which the record already stores -- and it is bounded by the boundary's
+    # MAX_FOCUS_BYTES cap. It is never system-prompt material and never argv.
+    focus: str | None = None
     idempotency_key: str | None = None
 
 
@@ -308,6 +315,9 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
             "system_prompt_append": (
                 cfg.system_prompt_append.model_dump() if cfg.system_prompt_append else None
             ),
+            # Always written, even when None, so _build_meta can tell a record that
+            # was genuinely unfocused from one written before focus was persisted.
+            "focus": cfg.focus or None,
         },
         "context_summary": summary,
     }
@@ -634,6 +644,15 @@ def _build_meta(meta: dict) -> Meta:
     security_warnings = list(c.get("security_warnings") or [])
     if fp_warning:
         security_warnings.append(fp_warning)
+    # Key ABSENT means the record predates focus persistence, so whether the review
+    # was narrowed is unknowable; key present and None means it genuinely was not.
+    # Collapsing the two would report a possibly-narrowed pass as a full-review pass.
+    # Gated on the kind that HAS a focus parameter: consult and adversarial review
+    # could never be narrowed, so warning about them raises a doubt that cannot arise,
+    # and a warning that fires where it cannot matter is one a reader learns to skip.
+    focus = c.get("focus")
+    if "focus" not in c and meta.get("kind") in _FOCUSABLE_KINDS:
+        security_warnings.append(UNKNOWN_FOCUS_WARNING)
     source = c.get("workspace_source")
     scope = c.get("scope")
     # Recompute diff_range from the stored base+head inputs so it cannot drift from
@@ -660,9 +679,20 @@ def _build_meta(meta: dict) -> Meta:
         security_warnings=security_warnings,
         elapsed_ms=_elapsed_ms(meta),
         system_prompt_append=fingerprint,
+        focus=focus,
         job_id=meta.get("job_id"),
     )
 
+
+# The tools that accept a `focus`; the others cannot be narrowed, so an absent focus
+# on their records is not an ambiguity.
+_FOCUSABLE_KINDS = {"claude_review_changes"}
+
+UNKNOWN_FOCUS_WARNING = (
+    "This job record predates focus recording, so meta cannot attest whether the "
+    "review was narrowed by a focus; treat the absent focus as unknown, not as a "
+    "full-review verdict."
+)
 
 MALFORMED_FINGERPRINT_WARNING = (
     "The job record's system_prompt_append fingerprint is malformed, so meta "

@@ -269,6 +269,7 @@ def _meta(
     *,
     head: str | None = None,
     system_prompt_append: str | None = None,
+    focus: str | None = None,
 ) -> Meta:
     # head is keyword-only so the many positional _meta(...) call sites that pass
     # base positionally stay untouched; only branch-scope call sites set it.
@@ -296,6 +297,11 @@ def _meta(
         system_prompt_append=(
             SystemPromptAppend.of(system_prompt_append) if system_prompt_append else None
         ),
+        # `or None` tracks build_prompt's own truthiness test (`if payload.get("focus")`),
+        # so an empty focus -- which is skipped there and so never reaches Claude -- does
+        # not appear in meta as though it had been sent. "" would otherwise survive
+        # exclude_none and read as a narrowing that never happened.
+        focus=focus or None,
         redacted_paths=redacted_paths or [],
         compat_warnings=compat_warnings or [],
         security_warnings=security_warnings or [],
@@ -1191,6 +1197,7 @@ async def _execute(
     workspace_source=None,
     redacted_paths: list[str] | None = None,
     head: str | None = None,
+    focus: str | None = None,
 ) -> dict:
     prompt = build_prompt(tool, payload, context_text)
     # Staged through the ClaudeBackend adapter (the freeze-window re-plumb): argv,
@@ -1229,6 +1236,7 @@ async def _execute(
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         head=head,
         system_prompt_append=r.system_prompt_append,
+        focus=focus,
     )
     if run.exit_code != 0 or run.timed_out:
         # A non-zero exit can still carry a cost-bearing JSON envelope (e.g.
@@ -1542,6 +1550,7 @@ async def claude_review_changes(
         workspace_source=ws_source,
         head=head,
         redacted_paths=ctx_data.redacted_paths,
+        focus=focus,
     )
     return _result(out)
 
@@ -2224,6 +2233,7 @@ async def claude_review_changes_async(
         system_prompt_append=(
             SystemPromptAppend.of(r.system_prompt_append) if r.system_prompt_append else None
         ),
+        focus=focus,
         idempotency_key=idempotency_key,
     )
     return _result(
@@ -2252,6 +2262,7 @@ async def claude_review_changes_async(
                 security_warnings=hook_security_warnings(cwd, r.config_mode),
                 head=head,
                 system_prompt_append=r.system_prompt_append,
+                focus=focus,
             ),
             idempotency_key=idempotency_key,
             job_timeout=job_timeout,

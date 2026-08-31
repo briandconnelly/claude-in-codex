@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-38"
+FINGERPRINT = "claude-in-codex/0.1/schema-39"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -332,6 +332,22 @@ class Meta(BaseModel):
     # it either way — see SystemPromptAppend. The text is fingerprinted, never
     # echoed.
     system_prompt_append: SystemPromptAppend | None = None
+    # The `focus` text that narrowed a review, echoed VERBATIM rather than
+    # fingerprinted: a consumer must be able to tell a user WHAT the verdict was
+    # narrowed to, and a digest cannot say that. Caller-authored and untrusted --
+    # bounded by MAX_FOCUS_BYTES and refused at the boundary if it forges the
+    # server's framing markers, but never treated as instructions.
+    #
+    # Present means EXACTLY "this text was sent to Claude", so a verdict beside it
+    # covers that focus only and is not a full-review verdict. Absent means the
+    # narrowing is not applied or not known -- never "this was a full review".
+    # Envelopes that describe no run omit it whether or not the call carried one:
+    # argument errors (a refused focus is never echoed back), the empty-diff pass,
+    # and context-too-large. A run that started and then failed keeps it, because
+    # that focus did reach Claude. On a rebuilt job meta, a record predating focus
+    # persistence reports UNKNOWN_FOCUS_WARNING in security_warnings rather than
+    # letting the absence read as unfocused.
+    focus: str | None = None
     job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
     fingerprint: str = FINGERPRINT
@@ -814,7 +830,7 @@ _META_STUB = {
         "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
         "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
-        "usage, system_prompt_append, job_id, request_id, fingerprint. "
+        "usage, system_prompt_append, focus, job_id, request_id, fingerprint. "
         "Full contract: claude_capabilities."
     ),
 }

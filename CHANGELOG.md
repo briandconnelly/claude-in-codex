@@ -7,6 +7,35 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- `meta.focus` now records the `focus` a review ran under, so a narrowed verdict is no
+  longer indistinguishable from a full-review one. `meta.system_prompt_append` already
+  did this for the other steering channel; `focus` narrows a review just as effectively
+  and recorded nothing, so two `claude_review_changes` calls on the same diff — one
+  unfocused, one `focus="security"` — returned envelopes identical in every field a
+  consumer could use to tell them apart. The shipped skill's rule ("never report a
+  focused `pass` as a full-review pass") depended entirely on the calling agent
+  remembering what it asked for, which is exactly what a `job_id` result rendered in a
+  later session cannot do.
+  The text is echoed VERBATIM rather than fingerprinted: a digest can say a review was
+  narrowed but not to WHAT, and naming the topic is the half a consumer needs to qualify
+  the verdict to its user. It stays caller-authored untrusted data — already capped at
+  4096 bytes and refused if it forges the server's framing markers.
+  Present means exactly "this text was sent to Claude". Envelopes describing no run omit
+  it whether or not the call carried one: argument errors (a refused `focus` is never
+  echoed back), the empty-diff pass, and context-too-large. A run that started and then
+  failed keeps it. Background jobs persist the text in the job record and rebuild it in
+  `claude_job_result` / `claude_job_consume_result`; a record written before this change
+  reports the ambiguity in `meta.security_warnings` rather than letting an absent `focus`
+  read as an unfocused review.
+  An empty `focus` is skipped when the prompt is built, so it is treated as no focus here
+  too rather than appearing as a narrowing that never happened.
+  `SECURITY.md` now states that a background review's `focus` is written to the job record
+  verbatim and unredacted until the result is consumed or expires. That is a stronger claim
+  than the existing one about replies — a reply MAY repeat an input; `focus` is stored every
+  time, by design — so it gets its own disclosure and a "keep secrets out of `focus`" line
+  in the shipped skill.
+  Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-39`.
+
 - `focus` is now framed and bounded like `system_prompt_append`. It was the one
   caller-supplied field the guardrails never declared untrusted, and the server composed
   it into its OWN sentence ("Focus especially on: ..."), so a focus string derived from an
