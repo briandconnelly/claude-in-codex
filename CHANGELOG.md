@@ -7,6 +7,20 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- The shipped skill gains a `Steering a call` section, and documents `focus` for the
+  first time. `focus` has always been on `claude_review_changes`/`_async`, but no
+  shipped guidance mentioned it, so an agent wanting a topical review reached for
+  `system_prompt_append` — putting caller text in the system turn — when `focus` says
+  the same thing in the user turn. The section routes between them, and records two
+  behaviors confirmed against the live CLI rather than inferred from the framing text:
+  an append shifts emphasis but does NOT suppress (a deprioritized finding still
+  appears, at lower severity, so "do not report X" is the wrong phrasing), and a
+  verdict-setting append is refused aloud, spending output on the refusal. It also
+  warns that a verdict under a narrowed focus is not a full-review verdict. The four
+  `system_prompt_append` guardrail bullets shrink to two: the marker-refusal reason
+  code and the fingerprint-storage rationale are self-describing at runtime and
+  documented for humans in the README.
+
 - `claude_consult`, `claude_consult_async`, `claude_review_changes`, and
   `claude_review_changes_async` accept `system_prompt_append`: caller-supplied
   persona or focus text folded

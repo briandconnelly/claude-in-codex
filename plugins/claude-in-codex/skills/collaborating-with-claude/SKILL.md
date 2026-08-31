@@ -35,6 +35,18 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 - `claude_job_list` — free list of this workspace's background jobs (id, status, cost), newest first. Use it to recover a `job_id` lost across context compaction or interruption.
 - `claude_capabilities` — free capability contract: tool inventory, compact per-tool routing metadata, scope, prerequisites, and the fingerprint to pin.
 
+## Steering a call
+
+- Omit `system_prompt_append` on most calls. The guardrails run alone and are the tuned default.
+- To narrow a diff review to a topic, use `focus` on `claude_review_changes` / `claude_review_changes_async` (e.g. `security`, `tests`). It is simpler than `system_prompt_append` and does not put your text in the system turn.
+- Use `system_prompt_append` for what `focus` cannot say — reviewer expertise, output calibration, a weighting fact — and on `claude_consult`, which has no `focus`. Claude is instructed to honor it as focus, tone, or emphasis only.
+- Directives that work: `"Prioritize concurrency: lock ordering, shared state, and async cancellation paths. Deprioritize style and naming."` / `"Review as a cryptography specialist; measure against RFC 8446."` / `"Report only findings you would block a merge on, one line of evidence each."`
+- It shifts emphasis; it does NOT suppress. Write "deprioritize X", never "do not report X" — deprioritized findings still appear, at lower severity.
+- A verdict under a narrowed focus covers that focus only. Never report a focused `pass` to your user as a full-review pass.
+- Directives that waste spend: setting the verdict, relaxing or restating the guardrails, asking for tool use ("run the tests"), or carrying the question or diff. The guardrails outrank the first two, no tool rides the prompt, and task content belongs in `prompt`/`context`.
+- Navigation hints ("start from `src/auth/`") do nothing under the default `access=toolless`, where Claude has no `Read` tool.
+- Prefer `system_prompt_append` over pasting a persona into `prompt`/`context`: that text lands in the untrusted-data tier Claude is told not to obey.
+
 ## Reading results
 
 - The result is structured: `ok`, `verdict` (pass/concerns/fail/unknown), `confidence`, and `findings` with `file`/`line`/`evidence`.
@@ -57,7 +69,6 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 - When client MCP roots are available, explicit `workspace_root` values must be inside one of those roots; omit `workspace_root` to use the first root.
 - Cap cost/time with `max_budget_usd` and `timeout_seconds` for large reviews.
 - Reviews run at `effort=xhigh` by default for depth. Lower `effort` to `high`/`medium` to save cost on routine changes; raise to `max` for the most subtle ones.
-- `system_prompt_append` semantics (on `claude_consult`, `claude_consult_async`, `claude_review_changes`, `claude_review_changes_async`; NOT either `claude_adversarial_review` form): puts a persona or focus directive into Claude's system prompt, behind the server's guardrails, which always lead. Omit it and the guardrails run alone. It grants NO tools — that guarantee is mechanical, the allowlist rides argv — but Claude is only INSTRUCTED not to let it set a verdict. Capped at 4096 bytes and counted against `CLAUDE_IN_CODEX_MAX_INPUT_BYTES`; text containing the server's framing markers is refused (`details.reason = "forged_framing_marker"`), which makes it harder to pose as server-authored. `meta.system_prompt_append` hashes the text, on sync and background-job results alike, so a result shows it ran under a non-default prompt; a job record stores that fingerprint, never your text (Claude's reply is stored until consumed or expired, and a reply can repeat anything you sent).
-- Prefer `system_prompt_append` over pasting a persona into `prompt`/`context`: that text lands in the untrusted-data tier Claude is told not to obey.
+- `system_prompt_append` is accepted on `claude_consult`, `claude_review_changes`, and their `_async` forms; NOT on either `claude_adversarial_review` form, whose fixed stance is the product. It rides behind the guardrails, which always lead. It grants NO tools — that guarantee is mechanical, the allowlist rides argv — but Claude is only INSTRUCTED not to let it set a verdict. Capped at 4096 bytes; text carrying the server's framing markers is refused. `meta.system_prompt_append` hashes the text so a result shows it ran under a non-default prompt.
 - NEVER build `system_prompt_append` from untrusted workspace content. It is the one path from a caller argument into the system turn.
 - NEVER put secrets in `system_prompt_append`. The composed system prompt rides the `claude` command line, so the plaintext is visible to local process listings for the whole run; only the fingerprint is stored afterwards.
