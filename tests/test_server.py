@@ -4054,6 +4054,75 @@ async def test_a_keyed_retry_that_changes_only_detail_replays(monkeypatch, git_r
     assert len(rerendered["summary"]) == 400
 
 
+async def test_a_keyed_retry_that_changes_only_system_prompt_append_conflicts(
+    monkeypatch, git_repo, tmp_path
+):
+    """The persona IS an effective argument, and this pins that.
+
+    The mirror of the `detail` test above: `detail` only re-renders a stored
+    answer, but `system_prompt_append` changes what Claude is asked — and paid —
+    to do, so two keyed launches differing only in the persona must NOT replay
+    each other. A replay there would hand back an answer produced under a
+    DIFFERENT system prompt than the one the caller asked for, and bill nothing
+    to reveal it.
+
+    The property holds by construction — `arg_hash_for` hashes (argv, prompt) and
+    the persona rides argv inside the composed `--append-system-prompt` value —
+    but "by construction" is exactly what breaks silently when the carrier moves,
+    which is what #132 just did to it. Hence a test.
+
+    The spy keeps the REAL composed argv in the hashed command while spawning
+    something harmless: stubbing `build_command` with a constant (as the other
+    async tests do) would make both launches hash alike and quietly assert
+    nothing.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    real_build = claude_mod.build_command
+
+    def spy(*args, **kwargs):
+        cmd, dropped = real_build(*args, **kwargs)
+        # `sh -c 'sleep 30' <argv...>`: the sleep is what runs, and the real argv
+        # rides along as positional parameters so the digest still covers it.
+        return (["sh", "-c", "sleep 30", *cmd], dropped)
+
+    monkeypatch.setattr(claude_mod, "build_command", spy)
+    base = {"prompt": "q", "workspace_root": str(git_repo), "idempotency_key": "persona-key"}
+    started: list[str] = []
+    try:
+        async with Client(mcp) as client:
+            first = structured(
+                await client.call_tool(
+                    "claude_consult_async",
+                    {**base, "system_prompt_append": "Only auth findings."},
+                )
+            )
+            assert first["ok"] is True
+            started.append(first["job_id"])
+            different = structured(
+                await client.call_tool(
+                    "claude_consult_async",
+                    {**base, "system_prompt_append": "Only performance findings."},
+                    raise_on_error=False,
+                )
+            )
+            same = structured(
+                await client.call_tool(
+                    "claude_consult_async",
+                    {**base, "system_prompt_append": "Only auth findings."},
+                    raise_on_error=False,
+                )
+            )
+    finally:
+        for job_id in started:
+            jobs_mod.cancel(str(git_repo), job_id)
+    assert different["ok"] is False, "a changed persona must not replay the first job's answer"
+    assert different["error"]["code"] == "idempotency_conflict"
+    # The control that earns the assertion above: the SAME persona still replays,
+    # so the conflict is the persona changing and not merely a keyed relaunch.
+    assert same["ok"] is True, "an unchanged persona must still replay"
+    assert same["job_id"] == first["job_id"]
+
+
 async def test_capability_summary_does_not_promise_an_alias_async_form():
     """CAPABILITY_SUMMARY is first-read instruction text, so a universal claim in
     it sends agents to tools that do not exist. `paid_tools` includes the
@@ -4675,6 +4744,36 @@ async def test_async_launch_meta_records_system_prompt_append(monkeypatch, git_r
     fp = structured(result)["meta"]["system_prompt_append"]
     assert fp["sha256"] == hashlib.sha256(b"persona").hexdigest()
     assert fp["bytes"] == 7
+
+
+async def test_async_launch_argv_carries_the_composed_system_prompt(monkeypatch, git_repo):
+    """The async starter builds its argv through a SECOND _run_request/prepare()
+    call site, so the persona must be proven to reach the detached worker's argv
+    — folded behind the guardrails into one flag, as on the sync path."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.config import compose_system_prompt
+
+    seen = {}
+
+    def start_job(cmd, *a, **k):
+        seen["cmd"] = list(cmd)
+        return ("0" * 32, "2026-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(srv.jobs, "start_job", start_job)
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "claude_review_changes_async",
+            {
+                "scope": "working_tree",
+                "workspace_root": str(git_repo),
+                "system_prompt_append": "Only auth findings.",
+            },
+        )
+    cmd = seen["cmd"]
+    assert cmd.count("--append-system-prompt") == 1
+    assert cmd[cmd.index("--append-system-prompt") + 1] == compose_system_prompt(
+        "Only auth findings."
+    )
 
 
 async def test_job_meta_rebuild_carries_system_prompt_append(tmp_path):
