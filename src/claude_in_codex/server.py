@@ -867,9 +867,15 @@ def _validate_focus(text: str | None, meta) -> dict | None:
     surrogate is not the fatal argv error it is for the system prompt.
 
     Size is measured in bytes, not characters, so multi-byte prose cannot slip past a
-    character-length check. Both bounds apply: this fixed per-field ceiling here, and
-    the operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES over the summed caller text at the
-    call site."""
+    character-length check, and through `_utf8_len` rather than a bare `.encode()`:
+    a lone surrogate is schema-valid JSON that strict UTF-8 refuses to encode, so
+    measuring it strictly would raise here and escape the structured error contract.
+    Counting it as its replacement is enough for a ceiling. (Such text still fails
+    later, unstructured, when the prompt is written to the runner's stdin -- that is
+    true of `prompt`, `context`, `target`, and `evidence` too, and is not this
+    function's to fix.) Both bounds apply: this fixed per-field ceiling here, and the
+    operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES over the summed caller text at the call
+    site."""
     if text is None:
         return None
     if contains_framing_marker(text):
@@ -884,7 +890,7 @@ def _validate_focus(text: str | None, meta) -> dict | None:
             offending="focus",
             details=ErrorDetails(reason="forged_framing_marker"),
         )
-    size = len(text.encode())
+    size = _utf8_len(text)
     if size <= MAX_FOCUS_BYTES:
         return None
     return _err(

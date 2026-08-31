@@ -5083,6 +5083,13 @@ async def test_composed_prompt_has_exactly_one_caller_section(monkeypatch, tmp_p
     assert sent.count("--- END caller-supplied text ---") == 1
 
 
+def no_git(*args, **kwargs):
+    """Refusing `focus` must precede the diff gathering, not merely the paid call.
+    Stubbing only the runner would leave these tests green if `_validate_focus` moved
+    below `gather_context`, so the git work is booby-trapped too."""
+    raise AssertionError("diff must not be gathered for a refused focus")
+
+
 @pytest.mark.parametrize("tool", ["claude_review_changes", "claude_review_changes_async"])
 async def test_review_rejects_focus_forging_a_framing_marker(monkeypatch, git_repo, tool):
     """`focus` is delimited with the same markers as `system_prompt_append` (#135), so
@@ -5095,6 +5102,7 @@ async def test_review_rejects_focus_forging_a_framing_marker(monkeypatch, git_re
         raise AssertionError("paid call should not run")
 
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    monkeypatch.setattr(srv, "gather_context", no_git)
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -5171,6 +5179,7 @@ async def test_review_rejects_focus_over_the_byte_cap(monkeypatch, git_repo, too
         raise AssertionError("paid call should not run")
 
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    monkeypatch.setattr(srv, "gather_context", no_git)
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -5260,3 +5269,34 @@ async def test_system_prompt_append_rejects_a_forged_focus_marker(monkeypatch, t
     assert data["ok"] is False
     assert data["error"]["details"]["field"] == "system_prompt_append"
     assert data["error"]["details"]["reason"] == "forged_framing_marker"
+
+
+@pytest.mark.parametrize(
+    ("label", "focus"),
+    [("short", json.loads('"security\\ud800"')), ("oversized", json.loads('"\\ud800"') * 5000)],
+)
+def test_focus_cap_measures_unencodable_text_without_raising(label, focus):
+    """A lone surrogate is schema-valid JSON that strict UTF-8 refuses to encode.
+    Measuring the cap with a bare `.encode()` raised here and escaped the structured
+    error contract entirely; `_utf8_len` counts the replacement instead.
+
+    Such text still fails later, unstructured, when the prompt is written to the
+    runner's stdin -- that is equally true of `prompt`/`context`/`target`/`evidence`
+    and is not this guard's to fix. What is fixed is that the CAP no longer adds an
+    earlier crash of its own."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.config import MAX_FOCUS_BYTES
+
+    meta = srv.Meta(
+        cwd="/repo",
+        config_mode="inherit",
+        access="toolless",
+        timeout_seconds=180,
+        elapsed_ms=0,
+        fingerprint=srv.FINGERPRINT,
+    )
+    result = srv._validate_focus(focus, meta)
+    if label == "short":
+        assert result is None
+    else:
+        assert result["error"]["details"]["limit_bytes"] == MAX_FOCUS_BYTES
