@@ -7,6 +7,7 @@ from typing import Any, Literal, cast
 
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
+from claude_in_codex.config import compose_focus
 from claude_in_codex.context import redact_text, sanitize_echo_prose
 from claude_in_codex.schemas import (
     OUTPUT_BOUNDS,
@@ -108,7 +109,7 @@ def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
     _, diff_range = branch_range(payload.get("scope"), payload.get("base"), payload.get("head"))
     if tool == "claude_review_changes":
         if payload.get("focus"):
-            parts.append(f"Focus especially on: {payload['focus']}.")
+            parts.append(compose_focus(payload["focus"]))
         scope_note = f"scope={payload.get('scope')}"
         if diff_range:
             scope_note += f", range={diff_range}"
