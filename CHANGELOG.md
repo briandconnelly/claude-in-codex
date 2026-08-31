@@ -13,9 +13,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `system_prompt_append` — putting caller text in the system turn — when `focus` says
   the same thing in the user turn. The section routes between them, and records two
   behaviors confirmed against the live CLI rather than inferred from the framing text:
-  an append shifts emphasis but does NOT suppress (a deprioritized finding still
-  appears, at lower severity, so "do not report X" is the wrong phrasing), and a
-  verdict-setting append is refused aloud, spending output on the refusal. It also
+  an append is emphasis, not a filter, so "do not report X" is the wrong phrasing —
+  and neither demotion nor removal can be relied on, which is why the skill says to
+  rely on neither; and a verdict-setting append is refused aloud and buys nothing. It also
   warns that a verdict under a narrowed focus is not a full-review verdict. The four
   `system_prompt_append` guardrail bullets become three, and the channel-choice bullet
   moves to the new section: the marker-refusal reason code is self-describing at
