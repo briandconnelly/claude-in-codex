@@ -1492,3 +1492,45 @@ def test_terminal_record_rebuilds_meta_focus_for_a_result_read_later(tmp_path, m
     assert payload["verdict"] == "pass"
     assert payload["meta"]["focus"] == "security"
     assert not any("focus" in w for w in payload["meta"]["security_warnings"])
+
+
+def test_tampered_focus_in_a_record_degrades_instead_of_raising(tmp_path, monkeypatch):
+    """The record is a file another process wrote and anyone can edit. A non-string
+    `focus` must not turn claude_job_result into an unstructured exception -- the same
+    reason _fingerprint_from degrades a malformed persona fingerprint. An unreadable
+    focus is "unknown", which is precisely NOT "this was a full review"."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    cwd = str(tmp_path)
+    job_id = "d1" * 16
+    jd = _legacy_record(cwd, job_id)
+    meta = json.loads((jd / "meta.json").read_text())
+    meta["config"]["focus"] = ["security"]
+    jobs._write_meta(jd, meta)
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["ok"] is True
+    assert "focus" not in payload["meta"]
+    assert any("focus" in w for w in payload["meta"]["security_warnings"]), payload["meta"][
+        "security_warnings"
+    ]
+
+
+def test_a_lifecycle_envelope_carries_focus_without_attesting_delivery(tmp_path, monkeypatch):
+    """_job_error rebuilds meta for every non-done state, so `job_failed` -- including a
+    job whose child never started -- reports the focus. That is why the documented
+    contract is "the run was launched under this focus", not "the text reached Claude":
+    presence bounds a verdict, and these envelopes have none."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    cwd = str(tmp_path)
+    job_id = "d3" * 16
+    jd = _legacy_record(cwd, job_id, state="incomplete")
+    meta = json.loads((jd / "meta.json").read_text())
+    meta["config"]["focus"] = "security"
+    jobs._write_meta(jd, meta)
+
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["ok"] is False
+    assert "verdict" not in payload
+    assert payload["meta"]["focus"] == "security"

@@ -650,9 +650,9 @@ def _build_meta(meta: dict) -> Meta:
     # Gated on the kind that HAS a focus parameter: consult and adversarial review
     # could never be narrowed, so warning about them raises a doubt that cannot arise,
     # and a warning that fires where it cannot matter is one a reader learns to skip.
-    focus = c.get("focus")
-    if "focus" not in c and meta.get("kind") in _FOCUSABLE_KINDS:
-        security_warnings.append(UNKNOWN_FOCUS_WARNING)
+    focus, focus_warning = _focus_from(c, meta.get("kind"))
+    if focus_warning:
+        security_warnings.append(focus_warning)
     source = c.get("workspace_source")
     scope = c.get("scope")
     # Recompute diff_range from the stored base+head inputs so it cannot drift from
@@ -687,6 +687,38 @@ def _build_meta(meta: dict) -> Meta:
 # The tools that accept a `focus`; the others cannot be narrowed, so an absent focus
 # on their records is not an ambiguity.
 _FOCUSABLE_KINDS = {"claude_review_changes"}
+
+
+def _focus_from(config: dict, kind: object) -> tuple[str | None, str | None]:
+    """Rebuild the review's focus from an on-disk record.
+
+    Returns (focus, warning). Three cases have to stay distinct, because collapsing
+    any two of them reports a narrowed verdict as a full-review one:
+
+    * key ABSENT -- the record predates focus persistence, so the narrowing is
+      unknowable. Only ambiguous for a kind that HAS a focus parameter: consult and
+      adversarial review could never be narrowed, and a warning that fires where it
+      cannot matter is one a reader learns to skip.
+    * key present and None -- the review genuinely ran unfocused.
+    * key present and not a string -- the record is tampered, truncated, or
+      hand-written. Like a malformed persona fingerprint (`_fingerprint_from`), this
+      must degrade to "unknown" rather than turn a result read into an unstructured
+      exception; the record is an ordinary local file that any process can edit.
+    """
+    if "focus" not in config:
+        return None, UNKNOWN_FOCUS_WARNING if kind in _FOCUSABLE_KINDS else None
+    raw = config["focus"]
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, MALFORMED_FOCUS_WARNING
+    return raw or None, None
+
+
+MALFORMED_FOCUS_WARNING = (
+    "The job record's focus is malformed, so meta cannot attest what this review was "
+    "narrowed to; treat the absent focus as unknown, not as a full-review verdict."
+)
 
 UNKNOWN_FOCUS_WARNING = (
     "This job record predates focus recording, so meta cannot attest whether the "

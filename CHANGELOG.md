@@ -30,10 +30,20 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   An empty `focus` is skipped when the prompt is built, so it is treated as no focus here
   too rather than appearing as a narrowing that never happened.
   `SECURITY.md` now states that a background review's `focus` is written to the job record
-  verbatim and unredacted until the result is consumed or expires. That is a stronger claim
-  than the existing one about replies — a reply MAY repeat an input; `focus` is stored every
-  time, by design — so it gets its own disclosure and a "keep secrets out of `focus`" line
-  in the shipped skill.
+  verbatim and unredacted. That is a stronger claim than the existing one about replies —
+  a reply MAY repeat an input; `focus` is stored every time, by design — so it gets its own
+  disclosure and a "keep secrets out of `focus`" line in the shipped skill. Both say that
+  removal is best-effort: consuming a result asks the store to discard the record and does
+  not fail when the delete does not, so the TTL, not the consume call, is the retention
+  window.
+  `claude_capabilities` gains `meta_focus`, publishing what presence and absence attest.
+  The rule is safety-relevant, so a bare MCP client that never loaded the shipped skill
+  must still be able to learn it; it is published there rather than in the per-tool `meta`
+  stub because that description is repeated in all 14 output schemas and `tools/list` had
+  137 bytes of headroom against its discovery budget.
+  A malformed `focus` in a tampered or hand-written job record now degrades to an absent
+  attestation plus a `security_warnings` entry, the way a malformed persona fingerprint
+  already did, rather than raising out of `claude_job_result`.
   Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-39`.
 
 - `focus` is now framed and bounded like `system_prompt_append`. It was the one

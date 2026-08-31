@@ -3856,7 +3856,23 @@ def _capabilities_payload() -> dict:
             "from the workspace "
             "under access=readonly, whose contents the `claude` CLI sends to Anthropic "
             "outside this redaction path. Use access=toolless and config_mode=safe/bare for "
-            "sensitive workspaces; redaction is defense-in-depth, not a guarantee."
+            "sensitive workspaces; redaction is defense-in-depth, not a guarantee. "
+            "Locally, an _async review writes its `focus` verbatim and unredacted into the "
+            "background-job record; consuming a result asks the store to delete that record "
+            "but does not fail if the delete does not succeed, so the job TTL is the "
+            "retention window, not the consume call. Keep secrets out of focus."
+        ),
+        meta_focus=(
+            "meta.focus is the topic a review was narrowed to. Present means the run that "
+            "envelope describes was launched under it, so any verdict beside it covers THAT "
+            "focus only -- never report it to your user as a full-review verdict. It rides "
+            "the async lifecycle envelopes too, where there is no verdict yet, so it bounds "
+            "a verdict rather than attesting delivery to Claude. Absent means unfocused OR "
+            "unknown, never a full review: envelopes describing no run omit it (argument "
+            "errors, the empty-diff pass, context-too-large), and a job record that predates "
+            "the field or holds a malformed value reports that in meta.security_warnings. "
+            "Only envelopes carrying a meta can report it; a successful claude_job_status or "
+            "claude_job_list payload has none."
         ),
         prerequisites=[
             "the `claude` CLI installed and authenticated",

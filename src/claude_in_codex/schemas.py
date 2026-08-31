@@ -36,6 +36,7 @@ FINGERPRINT_COVERS = [
     "config_mode/access/scope/detail/effort value sets",
     "detail-level field density, output bounds, and the truncation contract",
     "caller-supplied system-prompt text (parameter, cap, and the meta fingerprint)",
+    "the meta.focus contract (what presence and absence attest)",
     "capability summary and capabilities payload",
 ]
 
@@ -338,15 +339,23 @@ class Meta(BaseModel):
     # bounded by MAX_FOCUS_BYTES and refused at the boundary if it forges the
     # server's framing markers, but never treated as instructions.
     #
-    # Present means EXACTLY "this text was sent to Claude", so a verdict beside it
-    # covers that focus only and is not a full-review verdict. Absent means the
-    # narrowing is not applied or not known -- never "this was a full review".
-    # Envelopes that describe no run omit it whether or not the call carried one:
-    # argument errors (a refused focus is never echoed back), the empty-diff pass,
-    # and context-too-large. A run that started and then failed keeps it, because
-    # that focus did reach Claude. On a rebuilt job meta, a record predating focus
-    # persistence reports UNKNOWN_FOCUS_WARNING in security_warnings rather than
-    # letting the absence read as unfocused.
+    # Present means the run THIS envelope describes was launched under that focus, so
+    # any verdict beside it covers that focus only and is not a full-review verdict.
+    # Deliberately NOT "the text reached Claude": the async lifecycle envelopes
+    # (job_running, job_failed, job_cancelled, job_timeout) carry it too, and a job
+    # that failed before its child started never sent anything. Presence bounds the
+    # verdict, which is what a consumer needs; it does not attest delivery.
+    #
+    # Absent means the narrowing was not applied or is not known -- never "this was a
+    # full review". Envelopes that describe no run omit it whether or not the call
+    # carried one: argument errors (a refused focus is never echoed back), the
+    # empty-diff pass, and context-too-large. An empty focus is skipped when the
+    # prompt is built, so it is no focus here either. On a rebuilt job meta, a record
+    # predating focus persistence or holding a malformed value reports the ambiguity
+    # in security_warnings rather than letting the absence read as unfocused.
+    #
+    # Only an envelope that CARRIES a meta can report it: a successful
+    # claude_job_status or claude_job_list payload has none.
     focus: str | None = None
     job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
@@ -694,6 +703,11 @@ class CapabilitiesResult(BaseModel):
     # Machine-readable egress disclosure: where paid-tool context goes and the
     # precise limits of redaction. Mirrors the per-tool docstring notes.
     data_egress: str
+    # What meta.focus does and does not attest. Published here rather than in the
+    # meta stub because that description is repeated in every tool's output schema,
+    # and tools/list is the discovery hot path (tests/test_discovery_cost.py); this
+    # payload is the contract's designated home for the full rule.
+    meta_focus: str
     prerequisites: list[str]
     deprecation_policy: str
     annotations_policy: str
