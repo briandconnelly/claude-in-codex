@@ -5307,9 +5307,10 @@ def test_focus_cap_measures_unencodable_text_without_raising(label, focus):
 # ------------------------------------------------------------------ meta.focus (#136)
 # `focus` narrows a review as effectively as `system_prompt_append` steers one, but
 # recorded nothing, so a narrowed `pass` was byte-identical to a full-review `pass`.
-# meta.focus means "this exact text was sent to Claude": it is echoed verbatim (a
-# fingerprint cannot tell a reader WHAT the review was narrowed to) and is absent on
-# every envelope that describes no run.
+# meta.focus means "the run this envelope describes was launched under this focus" --
+# not "the text reached Claude", since the async lifecycle envelopes carry it before
+# any child runs. It is echoed verbatim (a fingerprint cannot tell a reader WHAT the
+# review was narrowed to) and is absent on every envelope that describes no run.
 
 
 async def test_review_changes_echoes_focus_in_meta(fake_claude, git_repo):

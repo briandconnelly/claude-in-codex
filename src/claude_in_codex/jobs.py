@@ -54,6 +54,7 @@ from pydantic import ValidationError
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
+from claude_in_codex.config import MAX_FOCUS_BYTES, contains_framing_marker
 from claude_in_codex.context import sanitize_echo_prose
 from claude_in_codex.normalize import apply_cost_usage, normalize_envelope
 from claude_in_codex.schemas import (
@@ -700,10 +701,14 @@ def _focus_from(config: dict, kind: object) -> tuple[str | None, str | None]:
       adversarial review could never be narrowed, and a warning that fires where it
       cannot matter is one a reader learns to skip.
     * key present and None -- the review genuinely ran unfocused.
-    * key present and not a string -- the record is tampered, truncated, or
-      hand-written. Like a malformed persona fingerprint (`_fingerprint_from`), this
-      must degrade to "unknown" rather than turn a result read into an unstructured
-      exception; the record is an ordinary local file that any process can edit.
+    * key present and not a string, over MAX_FOCUS_BYTES, or carrying a framing
+      marker -- the record is tampered, truncated, or hand-written, because the live
+      boundary (`server._validate_focus`) never accepts the last two. Like a malformed
+      persona fingerprint (`_fingerprint_from`), this must degrade to "unknown" rather
+      than turn a result read into an unstructured exception; the record is an
+      ordinary local file that any process can edit. The same cap and marker refusal
+      apply here so a record cannot replay into meta what the boundary refused: an
+      unbounded string, or text posing as the server's own framing.
     """
     if "focus" not in config:
         return None, UNKNOWN_FOCUS_WARNING if kind in _FOCUSABLE_KINDS else None
@@ -711,6 +716,10 @@ def _focus_from(config: dict, kind: object) -> tuple[str | None, str | None]:
     if raw is None:
         return None, None
     if not isinstance(raw, str):
+        return None, MALFORMED_FOCUS_WARNING
+    # "replace", not strict: a lone surrogate in a hand-edited record must count
+    # toward the ceiling, not raise out of a result read.
+    if len(raw.encode("utf-8", "replace")) > MAX_FOCUS_BYTES or contains_framing_marker(raw):
         return None, MALFORMED_FOCUS_WARNING
     return raw or None, None
 
