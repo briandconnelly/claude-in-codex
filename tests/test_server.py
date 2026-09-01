@@ -6047,3 +6047,60 @@ async def test_empty_diff_result_still_reports_paths_matched(fake_claude, git_re
     assert data["ok"] is True
     assert "job_id" not in data  # the empty-diff branch, not a launched job
     assert data["meta"]["paths_matched"] == [0, 0]
+
+
+async def test_dry_run_does_not_pay_for_path_match_probes(git_repo, monkeypatch):
+    """The free preview must not run measurements it has no field to report.
+
+    DryRunResult carries no paths_matched yet (#155), so probing here is work
+    that is measured and thrown away -- and it is per-entry git processes, on
+    the one tool whose whole purpose is to be the cheap look before spending."""
+    import claude_in_codex.context as ctx_mod
+
+    probes = []
+    real = ctx_mod._path_match_counts
+
+    def spy(cwd, opts):
+        probes.append(opts.paths)
+        return real(cwd, opts)
+
+    monkeypatch.setattr(ctx_mod, "_path_match_counts", spy)
+
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_dry_run",
+                {
+                    "scope": "working_tree",
+                    "paths": ["app.py", "nope"],
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["paths"] == ["app.py", "nope"]
+    assert probes == []
+
+
+async def test_review_still_pays_for_path_match_probes(fake_claude, git_repo, monkeypatch):
+    """The control: the spy must be able to observe a probe.
+
+    Without it, the assertion above would pass against a build where the probe
+    was removed entirely, or where the spy was never wired in."""
+    import claude_in_codex.context as ctx_mod
+
+    probes = []
+    real = ctx_mod._path_match_counts
+
+    def spy(cwd, opts):
+        probes.append(opts.paths)
+        return real(cwd, opts)
+
+    monkeypatch.setattr(ctx_mod, "_path_match_counts", spy)
+
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "paths": ["app.py"], "workspace_root": str(git_repo)},
+        )
+    assert probes == [["app.py"]]

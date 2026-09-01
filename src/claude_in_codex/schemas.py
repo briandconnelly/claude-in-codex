@@ -301,10 +301,17 @@ class Meta(BaseModel):
     head: str | None = None
     diff_range: str | None = None  # effective base...head for scope=branch
     paths: list[str] | None = None
-    # How many files each `paths` entry actually selected, aligned index-for-index
-    # with `paths` above. A zero marks an entry that matched nothing -- a scope the
-    # caller believes they reviewed and did not. `paths` alone cannot report this:
-    # it echoes the caller's list, so it agrees with their typo (#149).
+    # How many changed files each `paths` entry selected, aligned index-for-index
+    # with `paths` above. `paths` alone cannot report this: it echoes the caller's
+    # list, so it agrees with their typo (#149).
+    #
+    # A zero means the pathspec selected no CHANGED files -- nothing more. It does
+    # not establish that the review missed anything: the entry may be a typo, or
+    # may name a real path with no changes in it, and a diff query over an
+    # unchanged path covered it correctly. Entries may also overlap and represent
+    # very different amounts of the tree, so the counts describe the filter's
+    # shape, not the review's coverage. Read a zero as "look at this entry", not
+    # as "this scope was skipped".
     #
     # None has exactly three causes: there was no filter; the list exceeded
     # MAX_PATH_MATCH_PROBES; or the envelope was rebuilt from a background-job

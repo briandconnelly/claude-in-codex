@@ -1015,3 +1015,51 @@ def test_path_match_counts_survive_truncation(git_repo, monkeypatch):
 
     assert res.truncated is True
     assert res.path_match_counts == [1, 1]
+
+
+def test_path_match_probes_can_be_skipped_by_the_caller(git_repo):
+    """A caller that will not surface the counts must not pay for them.
+
+    claude_dry_run is the free preview: it gathers the same diff but has no
+    field to report the counts in yet (#155), so probing there is work that is
+    measured and thrown away."""
+    res = gather_context(
+        str(git_repo),
+        scope="working_tree",
+        base="main",
+        paths=["app.py"],
+        measure_paths=False,
+    )
+
+    assert res.path_match_counts is None
+    # The filter itself still applied -- only the measurement was skipped.
+    assert "app.py" in res.text
+
+
+def test_path_match_probes_stop_at_an_aggregate_time_budget(git_repo, monkeypatch):
+    """The count cap bounds how MANY probes run, not how long they take.
+
+    Each probe is its own git process under the 60s per-process timeout, so a
+    count cap alone permits 32x that in the worst case. The aggregate budget is
+    what actually bounds the amplification; over it the counts are reported
+    absent rather than partially."""
+    import claude_in_codex.context as ctx
+
+    monkeypatch.setattr(ctx, "MAX_PATH_MATCH_SECONDS", 0.0)
+
+    res = gather_context(
+        str(git_repo), scope="working_tree", base="main", paths=["app.py", "other.py"]
+    )
+
+    assert res.path_match_counts is None
+    assert "app.py" in res.text
+
+
+def test_path_match_counts_are_measured_under_a_normal_budget(git_repo):
+    """The control: the budget must not be so tight that it never measures.
+
+    Without this, the assertion above would pass against an implementation that
+    always gave up, and paths_matched would silently never appear in practice."""
+    res = gather_context(str(git_repo), scope="working_tree", base="main", paths=["app.py"])
+
+    assert res.path_match_counts == [1]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 
 from pontonier.core import redaction as _redaction
@@ -21,6 +22,17 @@ MAX_DIFF_BYTES = 200_000
 # are reported as None -- absent, never guessed. 32 covers every plausible hand-
 # written filter while keeping the worst case bounded.
 MAX_PATH_MATCH_PROBES = 32
+
+# Wall-clock budget for the whole probe pass. The count cap above bounds how MANY
+# probes run, not how long they take: each is its own git process under
+# git_timeout_seconds (60s by default), so a count cap alone permits 32x that in
+# the worst case -- a real amplification of the single gather the caller asked
+# for. This is what actually bounds it. Over budget the counts are reported absent
+# rather than partially, because a partial list would still be positionally
+# aligned with `paths` and a caller reading a zero could not tell "selected
+# nothing" from "never measured". Generous next to a measured ~5ms per probe on an
+# ordinary repo, so it bites only on the pathological case it exists for.
+MAX_PATH_MATCH_SECONDS = 5.0
 
 _REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -343,8 +355,11 @@ def _path_match_counts(cwd: str, opts: DiffOptions) -> list[int] | None:
     """
     if not opts.paths or len(opts.paths) > MAX_PATH_MATCH_PROBES:
         return None
+    deadline = time.monotonic() + MAX_PATH_MATCH_SECONDS
     counts: list[int] = []
     for path in opts.paths:
+        if time.monotonic() > deadline:
+            return None
         args = _diff_args(DiffOptions(scope=opts.scope, base=opts.base, head=opts.head))
         args.insert(1, "--name-only")
         out = _git(cwd, *args, "--", path)
@@ -353,7 +368,12 @@ def _path_match_counts(cwd: str, opts: DiffOptions) -> list[int] | None:
 
 
 def gather_context(
-    cwd: str, scope: str, base: str, paths: list[str] | None = None, head: str | None = None
+    cwd: str,
+    scope: str,
+    base: str,
+    paths: list[str] | None = None,
+    head: str | None = None,
+    measure_paths: bool = True,
 ) -> ContextResult:
     # Explicit head only makes sense for a base...head branch comparison; reject it
     # for working_tree/staged rather than silently ignoring it.
@@ -370,7 +390,7 @@ def gather_context(
         if not _ref_exists(cwd, effective_head):
             raise InvalidHeadError(f"head ref does not resolve to a commit: {effective_head!r}")
     summary = _summary(cwd, diff_args)
-    path_match_counts = _path_match_counts(cwd, opts)
+    path_match_counts = _path_match_counts(cwd, opts) if measure_paths else None
     raw = _git(cwd, *diff_args)
     text, redacted = _redact(raw)
     truncated = False

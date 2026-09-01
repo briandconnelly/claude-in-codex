@@ -1050,7 +1050,7 @@ def test_no_unmatched_notice_when_every_filter_entry_matched():
         context_text="diff --git ...",
         context=_ctx(path_match_counts=[4, 2]),
     )
-    assert "matched no files" not in p
+    assert "selected no changed files" not in p
     # The ordinary filter notice is unaffected.
     assert "A caller-supplied path filter was applied" in p
 
@@ -1063,4 +1063,27 @@ def test_no_unmatched_notice_when_the_counts_were_not_measured():
         context_text="diff --git ...",
         context=_ctx(path_match_counts=None),
     )
-    assert "matched no files" not in p
+    assert "selected no changed files" not in p
+
+
+def test_unmatched_notice_names_the_ambiguity_and_claims_no_coverage_gap():
+    """A zero is not proof the review missed something.
+
+    `paths=["src", "docs"]` on a branch that did not touch docs produces a zero
+    for a perfectly good path, and entries are not equal-sized units of scope.
+    An earlier draft told Claude that "part of the scope they believe they asked
+    for is absent from the diff", which is false in exactly that ordinary case
+    and invites a verdict moved by a non-finding."""
+    p = build_prompt(
+        "claude_review_changes",
+        payload={"scope": "working_tree", "paths": ["src", "docs"]},
+        context_text="diff --git ...",
+        context=_ctx(path_match_counts=[4, 0]),
+    )
+    assert "ambiguous" in p
+    assert "may be a typo" in p
+    assert "no changes in it" in p
+    # It must not assert a coverage gap, nor invite the verdict to move on one.
+    assert "do not treat it as a coverage gap" in p
+    assert "absent from the diff" not in p
+    assert "coverage you did not have" not in p

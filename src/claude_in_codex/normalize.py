@@ -93,16 +93,21 @@ _PATH_FILTER_NOTE = (
 # end to end and made of two integers, so it carries no caller bytes and is not an
 # injection channel.
 #
+# What a zero does NOT establish: that the review is missing anything. An entry
+# that selected no changed files may be a typo, or may be a perfectly good path
+# with nothing changed in it -- `paths=["src", "docs"]` on a branch that did not
+# touch docs is the ordinary case, not a defect. Entries are not equal-sized units
+# of scope either, and they may overlap, so counting them measures the filter's
+# shape and not the diff's. The clause therefore reports the fact and names the
+# ambiguity, and explicitly tells Claude not to treat it as a coverage gap. An
+# earlier draft asserted missing coverage and was wrong to.
+#
 # It DOES publish the number of filter entries, which #147 declined to send. That
-# is a deliberate divergence, not an oversight. #147 left the number out because
-# alone it "would describe the filter, not the review": an entry may be a directory
-# and may match nothing, so a bare count of entries told Claude nothing about what
-# it was looking at. Paired with how many of them selected nothing it stops being a
-# description of the request and becomes a coverage ratio -- "1 of 2 matched
-# nothing" says half the scope the caller believes they asked for is absent, which
-# "1 matched nothing" cannot say. The denominator is what makes the numerator
-# readable, and coverage is precisely what Claude can no longer establish for
-# itself now that the values are gone.
+# is a deliberate divergence: #147 left it out because alone it "would describe
+# the filter, not the review", and the bare unmatched count has the same problem
+# in reverse -- "1 selected nothing" reads very differently at 2 entries than at
+# 30. The denominator calibrates how much of the filter is in question. It is NOT
+# a coverage ratio and must not be described as one.
 #
 # Emitted only when something actually matched nothing, so an ordinary filtered
 # review is unchanged.
@@ -113,10 +118,12 @@ def _unmatched_clause(counts: list[int] | None) -> str:
     if unmatched == 0:
         return ""
     return (
-        f" Of the entries the caller supplied, {unmatched} of {len(counts)} matched no "
-        "files at all, so part of the scope they believe they asked for is absent from "
-        "the diff -- misspelled, or genuinely unchanged. Say so rather than reporting "
-        "coverage you did not have."
+        f" Of the entries the caller supplied, {unmatched} of {len(counts)} selected no "
+        "changed files. That is ambiguous on its own: such an entry may be a typo, or may "
+        "name a real path that simply has no changes in it. Entries are not equal-sized "
+        "units of scope, so this is not by itself evidence that anything is missing from "
+        "the diff. Raise it in `questions` or `assumptions`; do not treat it as a "
+        "coverage gap or let it move the verdict."
     )
 
 

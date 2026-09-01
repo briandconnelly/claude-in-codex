@@ -21,17 +21,31 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   wildcard, and reimplementing that here to attribute a file list back to entries
   would be a second, divergent copy of a subtlety this module has no reason to
   own. `paths` has no `maxItems`, so the probe is capped at 32 entries and the
-  field is reported absent above it -- never guessed. The prompt gets the ratio
-  too, as a server-authored sentence made of two integers and no caller values. It
-  reports how many entries matched nothing out of how many were sent, and the
-  denominator is the number #147 declined -- a deliberate divergence: #147 left it
-  out because alone it "would describe the filter, not the review", and paired with
-  the unmatched count it stops describing the request and becomes a coverage ratio.
-  "1 of 2 matched nothing" says half the scope the caller believes they asked for
-  is absent; "1 matched nothing" cannot. Coverage is exactly what Claude can no
-  longer establish for itself now that the values are gone. The clause is emitted
-  only when an entry actually matched nothing, so an ordinary filtered review is
-  unchanged.
+  field is reported absent above it -- never guessed. Probing is additionally bounded
+  by a 5s aggregate wall-clock budget, because the count cap bounds how MANY probes
+  run and not how long they take: each is its own git process under the 60s
+  per-process git timeout, so a count cap alone permits 32x that in the worst case.
+  Over budget the counts are reported absent rather than partially, since a partial
+  list would still be positionally aligned and a zero could not be told from "never
+  measured". `claude_dry_run` skips the probe entirely: it has no field to report
+  the counts in yet (#155), and paying per-entry git processes for a measurement
+  that is then discarded is the wrong trade on the one tool whose purpose is to be
+  the cheap look before spending.
+
+  A zero means the pathspec selected no CHANGED files, and nothing more. It does
+  NOT establish that the review missed anything -- the entry may be a typo, or may
+  name a real path with no changes in it, and `paths=["src", "docs"]` on a branch
+  that did not touch docs is the ordinary case rather than a defect. Entries may
+  also overlap and cover very different amounts of the tree, so the counts describe
+  the filter's shape, not the review's coverage. The prompt clause therefore states
+  the fact, names the ambiguity, and tells Claude explicitly not to treat it as a
+  coverage gap or let it move the verdict; the field docs and the shipped skill say
+  the same. The clause does publish the number of filter entries, which #147
+  declined to send: a deliberate divergence, since "1 selected nothing" reads very
+  differently at 2 entries than at 30, so the denominator calibrates how much of the
+  filter is in question. It is not a coverage ratio and is not described as one.
+  Emitted only when an entry actually selected nothing, so an ordinary filtered
+  review is unchanged.
   Because async meta is rebuilt from the job record at fetch time, the counts are
   persisted there as well, so a fetched result does not silently lose a field its
   launch envelope showed. Every tool builds this `meta` at its own call site, so

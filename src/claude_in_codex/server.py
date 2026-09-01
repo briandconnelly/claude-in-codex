@@ -2987,7 +2987,19 @@ async def _dry_run_impl(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
+            # measure_paths=False: DryRunResult has no field to report per-entry
+            # match counts in yet (#155), and probing costs one git process per
+            # entry. Paying for a measurement that is then discarded is the wrong
+            # trade on the one tool whose whole purpose is to be the cheap look
+            # before spending.
+            lambda: gather_context(
+                cwd,
+                scope=scope,
+                base=base,
+                paths=effective_paths,
+                head=head,
+                measure_paths=False,
+            )
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
         return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
