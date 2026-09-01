@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-38"
+FINGERPRINT = "claude-in-codex/0.1/schema-39"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -36,6 +36,7 @@ FINGERPRINT_COVERS = [
     "config_mode/access/scope/detail/effort value sets",
     "detail-level field density, output bounds, and the truncation contract",
     "caller-supplied system-prompt text (parameter, cap, and the meta fingerprint)",
+    "the meta.focus contract (what presence and absence attest)",
     "capability summary and capabilities payload",
 ]
 
@@ -332,6 +333,30 @@ class Meta(BaseModel):
     # it either way — see SystemPromptAppend. The text is fingerprinted, never
     # echoed.
     system_prompt_append: SystemPromptAppend | None = None
+    # The `focus` text that narrowed a review, echoed VERBATIM rather than
+    # fingerprinted: a consumer must be able to tell a user WHAT the verdict was
+    # narrowed to, and a digest cannot say that. Caller-authored and untrusted --
+    # bounded by MAX_FOCUS_BYTES and refused at the boundary if it forges the
+    # server's framing markers, but never treated as instructions.
+    #
+    # Present means the run THIS envelope describes was launched under that focus, so
+    # any verdict beside it covers that focus only and is not a full-review verdict.
+    # Deliberately NOT "the text reached Claude": the async lifecycle envelopes
+    # (job_running, job_failed, job_cancelled, job_timeout) carry it too, and a job
+    # that failed before its child started never sent anything. Presence bounds the
+    # verdict, which is what a consumer needs; it does not attest delivery.
+    #
+    # Absent means the narrowing was not applied or is not known -- never "this was a
+    # full review". Envelopes that describe no run omit it whether or not the call
+    # carried one: argument errors (a refused focus is never echoed back), the
+    # empty-diff pass, and context-too-large. An empty focus is skipped when the
+    # prompt is built, so it is no focus here either. On a rebuilt job meta, a record
+    # predating focus persistence or holding a malformed value reports the ambiguity
+    # in security_warnings rather than letting the absence read as unfocused.
+    #
+    # Only an envelope that CARRIES a meta can report it: a successful
+    # claude_job_status or claude_job_list payload has none.
+    focus: str | None = None
     job_id: str | None = None  # set on background-job results; None for sync calls
     request_id: str = Field(default_factory=lambda: uuid4().hex)
     fingerprint: str = FINGERPRINT
@@ -678,6 +703,11 @@ class CapabilitiesResult(BaseModel):
     # Machine-readable egress disclosure: where paid-tool context goes and the
     # precise limits of redaction. Mirrors the per-tool docstring notes.
     data_egress: str
+    # What meta.focus does and does not attest. Published here rather than in the
+    # meta stub because that description is repeated in every tool's output schema,
+    # and tools/list is the discovery hot path (tests/test_discovery_cost.py); this
+    # payload is the contract's designated home for the full rule.
+    meta_focus: str
     prerequisites: list[str]
     deprecation_policy: str
     annotations_policy: str
@@ -814,7 +844,7 @@ _META_STUB = {
         "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
         "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
-        "usage, system_prompt_append, job_id, request_id, fingerprint. "
+        "usage, system_prompt_append, focus, job_id, request_id, fingerprint. "
         "Full contract: claude_capabilities."
     ),
 }

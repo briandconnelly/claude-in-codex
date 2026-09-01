@@ -54,6 +54,7 @@ from pydantic import ValidationError
 
 from claude_in_codex.claude import contract_changed_error
 from claude_in_codex.cli_contract import is_contract_drift
+from claude_in_codex.config import MAX_FOCUS_BYTES, contains_framing_marker
 from claude_in_codex.context import sanitize_echo_prose
 from claude_in_codex.normalize import apply_cost_usage, normalize_envelope
 from claude_in_codex.schemas import (
@@ -280,6 +281,13 @@ class JobConfig:
     # material in the on-disk job record, which is exactly what
     # --no-session-persistence exists to prevent.
     system_prompt_append: SystemPromptAppend | None = None
+    # The caller's `focus` text, stored VERBATIM (unlike system_prompt_append, which
+    # is fingerprinted). A job result read in a later session must be able to report
+    # that its verdict covers this focus only, and a digest cannot name the topic.
+    # This is caller-authored prose on disk -- the same class of data as `paths`,
+    # which the record already stores -- and it is bounded by the boundary's
+    # MAX_FOCUS_BYTES cap. It is never system-prompt material and never argv.
+    focus: str | None = None
     idempotency_key: str | None = None
 
 
@@ -308,6 +316,9 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
             "system_prompt_append": (
                 cfg.system_prompt_append.model_dump() if cfg.system_prompt_append else None
             ),
+            # Always written, even when None, so _build_meta can tell a record that
+            # was genuinely unfocused from one written before focus was persisted.
+            "focus": cfg.focus or None,
         },
         "context_summary": summary,
     }
@@ -634,6 +645,15 @@ def _build_meta(meta: dict) -> Meta:
     security_warnings = list(c.get("security_warnings") or [])
     if fp_warning:
         security_warnings.append(fp_warning)
+    # Key ABSENT means the record predates focus persistence, so whether the review
+    # was narrowed is unknowable; key present and None means it genuinely was not.
+    # Collapsing the two would report a possibly-narrowed pass as a full-review pass.
+    # Gated on the kind that HAS a focus parameter: consult and adversarial review
+    # could never be narrowed, so warning about them raises a doubt that cannot arise,
+    # and a warning that fires where it cannot matter is one a reader learns to skip.
+    focus, focus_warning = _focus_from(c, meta.get("kind"))
+    if focus_warning:
+        security_warnings.append(focus_warning)
     source = c.get("workspace_source")
     scope = c.get("scope")
     # Recompute diff_range from the stored base+head inputs so it cannot drift from
@@ -660,9 +680,60 @@ def _build_meta(meta: dict) -> Meta:
         security_warnings=security_warnings,
         elapsed_ms=_elapsed_ms(meta),
         system_prompt_append=fingerprint,
+        focus=focus,
         job_id=meta.get("job_id"),
     )
 
+
+# The tools that accept a `focus`; the others cannot be narrowed, so an absent focus
+# on their records is not an ambiguity.
+_FOCUSABLE_KINDS = {"claude_review_changes"}
+
+
+def _focus_from(config: dict, kind: object) -> tuple[str | None, str | None]:
+    """Rebuild the review's focus from an on-disk record.
+
+    Returns (focus, warning). Three cases have to stay distinct, because collapsing
+    any two of them reports a narrowed verdict as a full-review one:
+
+    * key ABSENT -- the record predates focus persistence, so the narrowing is
+      unknowable. Only ambiguous for a kind that HAS a focus parameter: consult and
+      adversarial review could never be narrowed, and a warning that fires where it
+      cannot matter is one a reader learns to skip.
+    * key present and None -- the review genuinely ran unfocused.
+    * key present and not a string, over MAX_FOCUS_BYTES, or carrying a framing
+      marker -- the record is tampered, truncated, or hand-written, because the live
+      boundary (`server._validate_focus`) never accepts the last two. Like a malformed
+      persona fingerprint (`_fingerprint_from`), this must degrade to "unknown" rather
+      than turn a result read into an unstructured exception; the record is an
+      ordinary local file that any process can edit. The same cap and marker refusal
+      apply here so a record cannot replay into meta what the boundary refused: an
+      unbounded string, or text posing as the server's own framing.
+    """
+    if "focus" not in config:
+        return None, UNKNOWN_FOCUS_WARNING if kind in _FOCUSABLE_KINDS else None
+    raw = config["focus"]
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, MALFORMED_FOCUS_WARNING
+    # "replace", not strict: a lone surrogate in a hand-edited record must count
+    # toward the ceiling, not raise out of a result read.
+    if len(raw.encode("utf-8", "replace")) > MAX_FOCUS_BYTES or contains_framing_marker(raw):
+        return None, MALFORMED_FOCUS_WARNING
+    return raw or None, None
+
+
+MALFORMED_FOCUS_WARNING = (
+    "The job record's focus is malformed, so meta cannot attest what this review was "
+    "narrowed to; treat the absent focus as unknown, not as a full-review verdict."
+)
+
+UNKNOWN_FOCUS_WARNING = (
+    "This job record predates focus recording, so meta cannot attest whether the "
+    "review was narrowed by a focus; treat the absent focus as unknown, not as a "
+    "full-review verdict."
+)
 
 MALFORMED_FINGERPRINT_WARNING = (
     "The job record's system_prompt_append fingerprint is malformed, so meta "

@@ -47,6 +47,18 @@ expires, and a reply can repeat any input — this is true of `prompt` and
 ordinary local files, not a tamper-evident log, so a local process that can edit
 a record can also remove the fingerprint or the record itself.
 
+A background review's `focus` is written to the job record verbatim and
+unredacted. This is a stronger statement than the one above about replies: a
+reply MAY repeat an input, but `focus` is stored every time, by design, because a
+result read later must be able to report which focus its verdict covers. Keep
+secrets out of `focus`. Caller path filters are stored the same way.
+
+Removal is best-effort, so consuming a result is not a guarantee that the
+plaintext is gone. `claude_job_consume_result` asks the store to discard the
+record and does not fail when the delete does not succeed; the record then stays
+readable until the TTL reaper removes it. Plan retention around the TTL, not
+around the consume call.
+
 The tool allowlist does not govern Claude Code hooks. In `config_mode=inherit`
 or `scoped`, workspace `.claude/settings*.json` hooks may run shell before or
 during a review. Use `config_mode=safe` or `config_mode=bare` for untrusted
