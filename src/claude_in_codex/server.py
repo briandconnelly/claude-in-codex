@@ -61,6 +61,7 @@ from claude_in_codex.config import (
 )
 from claude_in_codex.context import (
     MAX_DIFF_BYTES,
+    ContextResult,
     GitUnavailableError,
     InvalidBaseError,
     InvalidHeadError,
@@ -303,6 +304,7 @@ def _meta(
     paths: list[str] | None = None,
     truncated: bool = False,
     hint: str | None = None,
+    paths_matched: list[int] | None = None,
     workspace_source: str | None = None,
     requested_budget: float | None = None,
     configured_budget: float | None = None,
@@ -327,6 +329,7 @@ def _meta(
         head=effective_head,
         diff_range=diff_range,
         paths=paths,
+        paths_matched=paths_matched,
         timeout_seconds=timeout,
         elapsed_ms=elapsed,
         command_exit_code=exit_code,
@@ -1325,8 +1328,13 @@ async def _execute(
     redacted_paths: list[str] | None = None,
     head: str | None = None,
     focus: str | None = None,
+    diff_context: ContextResult | None = None,
 ) -> dict:
-    prompt = build_prompt(tool, payload, context_text)
+    # diff_context carries the server's own measurements of the gathered diff --
+    # truncation and per-entry filter matches -- so build_prompt can disclose
+    # partial coverage to Claude and _meta can report it to the caller. None for
+    # claude_consult, which gathers no diff.
+    prompt = build_prompt(tool, payload, context_text, diff_context)
     # Staged through the ClaudeBackend adapter (the freeze-window re-plumb): argv,
     # prompt-over-stdin, and help-gate drops all come from prepare(). Execution
     # stays this server's — run_claude_async owns the kill-tree, cancellation, and
@@ -1364,6 +1372,7 @@ async def _execute(
         head=head,
         system_prompt_append=r.system_prompt_append,
         focus=focus,
+        paths_matched=diff_context.path_match_counts if diff_context else None,
     )
     if run.exit_code != 0 or run.timed_out:
         # A non-zero exit can still carry a cost-bearing JSON envelope (e.g.
@@ -1685,6 +1694,7 @@ async def claude_review_changes(
         head=head,
         redacted_paths=ctx_data.redacted_paths,
         focus=focus,
+        diff_context=ctx_data,
     )
     return _result(out)
 
@@ -1809,6 +1819,9 @@ async def claude_adversarial_review(
     context_summary = None
     redacted_paths: list[str] = []
     effective_paths = None
+    # None when the caller attacked a plain target with no scope: there is no
+    # gathered diff, so no filter-coverage facts to disclose.
+    diff_context: ContextResult | None = None
     if scope:
         effective_paths, paths_err = _resolve_paths(paths, meta)
         if paths_err:
@@ -1907,6 +1920,7 @@ async def claude_adversarial_review(
             )
         context_text, context_summary = ctx_data.text, ctx_data.summary
         redacted_paths = ctx_data.redacted_paths
+        diff_context = ctx_data
         payload["paths"] = effective_paths
         payload["scope"] = scope
         payload["base"] = base
@@ -1924,6 +1938,7 @@ async def claude_adversarial_review(
         workspace_source=ws_source,
         redacted_paths=redacted_paths,
         head=head,
+        diff_context=diff_context,
     )
     return _result(out)
 
@@ -2347,6 +2362,7 @@ async def claude_review_changes_async(
         effective_budget=r.budget,
         redacted_paths=ctx_data.redacted_paths,
         head=head,
+        paths_matched=ctx_data.path_match_counts,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         held = await _job_held_by_key(cwd, idempotency_key)
@@ -2361,6 +2377,7 @@ async def claude_review_changes_async(
         "claude_review_changes",
         {"scope": scope, "base": base, "head": head, "focus": focus, "paths": effective_paths},
         ctx_data.text,
+        ctx_data,
     )
     cfg = JobConfig(
         kind="claude_review_changes",
@@ -2377,6 +2394,7 @@ async def claude_review_changes_async(
         configured_max_budget_usd=r.configured_budget,
         effective_max_budget_usd=r.budget,
         paths=effective_paths,
+        paths_matched=ctx_data.path_match_counts,
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         system_prompt_append=(
@@ -2410,6 +2428,7 @@ async def claude_review_changes_async(
                 compat_warnings=dropped,
                 security_warnings=hook_security_warnings(cwd, r.config_mode),
                 head=head,
+                paths_matched=ctx_data.path_match_counts,
                 system_prompt_append=r.system_prompt_append,
                 focus=focus,
             ),
@@ -2673,6 +2692,7 @@ async def claude_adversarial_review_async(
     context_summary = None
     redacted_paths: list[str] = []
     effective_paths = None
+    diff_context: ContextResult | None = None
     if scope:
         effective_paths, paths_err = _resolve_paths(paths, meta)
         if paths_err:
@@ -2707,7 +2727,12 @@ async def claude_adversarial_review_async(
                     action=RepairAction(next_step="retry_with_changes"),
                 )
             )
-        meta = build_meta(paths=effective_paths, redacted_paths=ctx_data.redacted_paths)
+        diff_context = ctx_data
+        meta = build_meta(
+            paths=effective_paths,
+            redacted_paths=ctx_data.redacted_paths,
+            paths_matched=ctx_data.path_match_counts,
+        )
         if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
             held = await _job_held_by_key(cwd, idempotency_key)
             if held is not None:
@@ -2747,13 +2772,14 @@ async def claude_adversarial_review_async(
         configured_max_budget_usd=r.configured_budget,
         effective_max_budget_usd=r.budget,
         paths=effective_paths,
+        paths_matched=diff_context.path_match_counts if diff_context else None,
         redacted_paths=redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         idempotency_key=idempotency_key,
     )
     return _result(
         await _launch_job(
-            prompt=build_prompt("claude_adversarial_review", payload, context_text),
+            prompt=build_prompt("claude_adversarial_review", payload, context_text, diff_context),
             cwd=cwd,
             r=r,
             cfg=cfg,
@@ -2763,6 +2789,7 @@ async def claude_adversarial_review_async(
                 redacted_paths=redacted_paths,
                 compat_warnings=dropped,
                 security_warnings=hook_security_warnings(cwd, r.config_mode),
+                paths_matched=diff_context.path_match_counts if diff_context else None,
             ),
             idempotency_key=idempotency_key,
             job_timeout=job_timeout,

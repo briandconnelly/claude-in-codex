@@ -273,6 +273,11 @@ class JobConfig:
     configured_max_budget_usd: float | None = None
     effective_max_budget_usd: float | None = None
     paths: list[str] | None = None
+    # Server-measured per-entry match counts for `paths` (#149). Persisted because
+    # async meta is REBUILT from this record at fetch time: a field the record does
+    # not carry silently vanishes from the fetched result while the launch envelope
+    # still shows it.
+    paths_matched: list[int] | None = None
     redacted_paths: list[str] | None = None
     security_warnings: list[str] | None = None
     # FINGERPRINT of the caller's system-prompt text, never the text. A job
@@ -311,6 +316,7 @@ def _extra_for(cfg: JobConfig, cwd: str) -> dict:
             "configured_max_budget_usd": cfg.configured_max_budget_usd,
             "effective_max_budget_usd": cfg.effective_max_budget_usd,
             "paths": cfg.paths,
+            "paths_matched": cfg.paths_matched,
             "redacted_paths": cfg.redacted_paths or [],
             "security_warnings": cfg.security_warnings or [],
             "system_prompt_append": (
@@ -704,6 +710,7 @@ def _build_meta(meta: dict) -> Meta:
         head=head,
         diff_range=diff_range,
         paths=c.get("paths"),
+        paths_matched=c.get("paths_matched"),
         timeout_seconds=c.get("timeout_seconds", max_seconds()),
         requested_max_budget_usd=c.get("requested_max_budget_usd"),
         configured_max_budget_usd=c.get("configured_max_budget_usd"),

@@ -633,7 +633,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-42"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-43"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1305,7 +1305,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-42"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-43"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -2338,7 +2338,7 @@ async def test_review_changes_threads_head_into_gather_prompt_and_meta(
     captured = {}
     real_build_prompt = srv.build_prompt
 
-    def spy_build_prompt(tool, payload, context_text):
+    def spy_build_prompt(tool, payload, context_text, context=None):
         captured["payload"] = payload
         captured["context_text"] = context_text
         return real_build_prompt(tool, payload, context_text)
@@ -5825,3 +5825,162 @@ def test_emittable_returns_clean_strings_unchanged():
     import claude_in_codex.server as srv
 
     assert srv._emittable({"a": ["émoji 🦓", None, 3, True]}) == {"a": ["émoji 🦓", None, 3, True]}
+
+
+# --- #149: meta.paths_matched, the caller-facing half of the coverage signal ---
+
+
+async def test_review_changes_reports_which_filter_entries_matched(fake_claude, git_repo):
+    """A filter entry that selected nothing must be visible in the envelope.
+
+    `meta.paths` echoes the caller's list verbatim, so it agrees with their typo
+    and reports nothing. `paths_matched` is the server's own measurement, aligned
+    index-for-index with `meta.paths`, so a zero names the offending entry by
+    position."""
+    import subprocess as _sp
+
+    (git_repo / "other.py").write_text("value = 1\n")
+    _sp.run(["git", "add", "-Nf", "other.py"], cwd=git_repo, check=True)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {
+                "scope": "working_tree",
+                "paths": ["other.py", "tets"],
+                "workspace_root": str(git_repo),
+            },
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert data["meta"]["paths"] == ["other.py", "tets"]
+    assert data["meta"]["paths_matched"] == [1, 0]
+
+
+async def test_paths_matched_is_absent_without_a_path_filter(fake_claude, git_repo):
+    """The control: an unfiltered review reports no counts rather than an empty list.
+
+    Absent, not null: meta is dumped with exclude_none, so `paths_matched` drops
+    out of the envelope exactly as `paths` itself does. The two travel together.
+    Without this test, a `paths_matched` populated unconditionally would read as
+    'the filter selected nothing' on every unfiltered review."""
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert "paths" not in data["meta"]
+    assert "paths_matched" not in data["meta"]
+
+
+async def test_async_review_result_keeps_paths_matched(monkeypatch, git_repo):
+    """The counts must survive the job round trip, not just the sync path.
+
+    Async meta is REBUILT at fetch time from the job record, so a field the
+    record does not carry silently disappears from the fetched result while the
+    sync envelope keeps it."""
+    import json as _json
+    import subprocess as _sp
+    import time as _time
+
+    (git_repo / "other.py").write_text("value = 1\n")
+    _sp.run(["git", "add", "-Nf", "other.py"], cwd=git_repo, check=True)
+    inner = {"summary": "ok", "verdict": "pass", "confidence": "high", "findings": []}
+    envelope = _json.dumps(
+        {"type": "result", "subtype": "success", "is_error": False, "result": _json.dumps(inner)}
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
+    )
+
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {
+                    "scope": "working_tree",
+                    "paths": ["other.py", "tets"],
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+        assert started["meta"]["paths_matched"] == [1, 0]
+        job_id = started["job_id"]
+        deadline = _time.time() + 5
+        while _time.time() < deadline:
+            st = structured(
+                await client.call_tool(
+                    "claude_job_status", {"job_id": job_id, "workspace_root": str(git_repo)}
+                )
+            )
+            if st["status"] == "done":
+                break
+            await anyio.sleep(0.05)
+        result = structured(
+            await client.call_tool(
+                "claude_job_result", {"job_id": job_id, "workspace_root": str(git_repo)}
+            )
+        )
+    assert result["meta"]["paths"] == ["other.py", "tets"]
+    assert result["meta"]["paths_matched"] == [1, 0]
+
+
+# --- #148: the refusal that makes a truncation notice unnecessary ---
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("claude_review_changes", {"scope": "working_tree"}),
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review", {"target": "the plan", "scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "the plan", "scope": "working_tree"}),
+    ],
+)
+async def test_a_truncated_diff_never_reaches_claude(
+    fake_claude, git_repo, monkeypatch, tool, args
+):
+    """Every paid path refuses an over-cap diff instead of reviewing a slice of it.
+
+    This is the guarantee behind _PATH_FILTER_NOTE's assurance that "the diff
+    names every file it contains" -- true unconditionally only because a diff
+    that got cut is never sent at all. #148 proposed telling Claude the diff was
+    truncated; that notice would be unreachable, because this refusal fires
+    first. Pinned here so that if the refusal is ever softened into a warning,
+    this fails before a verdict can be rendered over a silently partial diff.
+    """
+    import subprocess as _sp
+
+    import claude_in_codex.context as ctx_mod
+
+    monkeypatch.setattr(ctx_mod, "MAX_DIFF_BYTES", 50)
+    (git_repo / "big.py").write_text("x = 1\n" * 2000)
+    _sp.run(["git", "add", "-Nf", "big.py"], cwd=git_repo, check=True)
+
+    async with Client(mcp) as client:
+        with pytest.raises(Exception) as excinfo:
+            await client.call_tool(tool, {**args, "workspace_root": str(git_repo)})
+
+    payload = json.loads(str(excinfo.value))
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "context_too_large"
+    assert payload["meta"]["truncated"] is True
+
+
+async def test_control_an_under_cap_diff_does_reach_claude(fake_claude, git_repo):
+    """The instrument works: without the tiny cap the same call is reviewed.
+
+    Without this, the refusals above would pass just as well against a server
+    that rejected every review, proving nothing about truncation."""
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+            )
+        )
+    assert data["ok"] is True
+    assert data["meta"]["truncated"] is False

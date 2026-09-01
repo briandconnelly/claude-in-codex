@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from claude_in_codex.context import ContextResult
 from claude_in_codex.normalize import build_prompt, extract_json, normalize_envelope
 from claude_in_codex.schemas import (
     FINGERPRINT,
@@ -1008,3 +1009,58 @@ def test_build_prompt_omits_the_focus_block_when_focus_is_absent():
         context_text="diff --git ...",
     )
     assert "caller-supplied focus" not in p
+
+
+# --- #149: server-authored coverage disclosure in the prompt ---
+
+
+def _ctx(**kw) -> ContextResult:
+    """A ContextResult carrying only the coverage facts a test cares about."""
+    base = {
+        "text": "diff --git ...",
+        "summary": ContextSummary(files_changed=1, lines_added=1, lines_removed=0),
+    }
+    return ContextResult(**{**base, **kw})
+
+
+def test_build_prompt_reports_filter_entries_that_matched_nothing():
+    """Claude can no longer see the filter values, so it cannot spot a typo itself.
+
+    Since #147 the values are dropped from the prompt, which removed the
+    incidental chance that a reviewer seeing `["src", "tets"]` would remark on
+    it. A server-authored COUNT restores the signal without restoring the
+    channel (#149)."""
+    p = build_prompt(
+        "claude_review_changes",
+        payload={"scope": "working_tree", "paths": ["src", "tets"]},
+        context_text="diff --git ...",
+        context=_ctx(path_match_counts=[4, 0]),
+    )
+    assert "1 of 2" in p
+    # Still no values: this is a count of what the filter SELECTED, which is the
+    # server's own measurement, not an echo of the caller's request.
+    assert "tets" not in p
+
+
+def test_no_unmatched_notice_when_every_filter_entry_matched():
+    """The control: the count must be able to report 'all entries matched'."""
+    p = build_prompt(
+        "claude_review_changes",
+        payload={"scope": "working_tree", "paths": ["src", "tests"]},
+        context_text="diff --git ...",
+        context=_ctx(path_match_counts=[4, 2]),
+    )
+    assert "matched no files" not in p
+    # The ordinary filter notice is unaffected.
+    assert "A caller-supplied path filter was applied" in p
+
+
+def test_no_unmatched_notice_when_the_counts_were_not_measured():
+    """Above the probe cap there are no counts, and the prompt must not invent one."""
+    p = build_prompt(
+        "claude_review_changes",
+        payload={"scope": "working_tree", "paths": ["src", "tets"]},
+        context_text="diff --git ...",
+        context=_ctx(path_match_counts=None),
+    )
+    assert "matched no files" not in p

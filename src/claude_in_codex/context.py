@@ -14,6 +14,14 @@ from claude_in_codex.schemas import ContextSummary
 
 MAX_DIFF_BYTES = 200_000
 
+# How many path-filter entries this server will probe individually for #149's
+# per-entry match counts. Each probe is its own `git diff --name-only`, and the
+# `paths` parameter has no maxItems, so an unbounded caller list would otherwise
+# turn one review into arbitrarily many git invocations. Above the cap the counts
+# are reported as None -- absent, never guessed. 32 covers every plausible hand-
+# written filter while keeping the worst case bounded.
+MAX_PATH_MATCH_PROBES = 32
+
 _REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
@@ -87,6 +95,12 @@ class ContextResult:
     truncation_hint: str | None = None
     redacted_paths: list[str] = field(default_factory=list)
     diff_bytes: int = 0  # full (pre-truncation) UTF-8 byte size of the redacted diff
+    # Per-entry file counts for the caller's path filter, positionally aligned
+    # with the `paths` argument. None when there was no filter, or when the list
+    # exceeded MAX_PATH_MATCH_PROBES. A zero marks an entry that selected nothing
+    # -- a typo the caller cannot otherwise see, since `meta.paths` echoes their
+    # list back and so agrees with it (#149).
+    path_match_counts: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -314,6 +328,30 @@ def _redact(diff: str) -> tuple[str, list[str]]:
     return _redaction.redact(diff)
 
 
+def _path_match_counts(cwd: str, opts: DiffOptions) -> list[int] | None:
+    """How many files each path-filter entry selected, one count per entry.
+
+    Asked of git rather than derived from the gathered diff. Git's pathspec
+    matching is exact-or-directory-prefix until an entry contains a wildcard, at
+    which point it is fnmatch; reimplementing that here to attribute an already-
+    gathered file list back to entries would be a second, divergent copy of a
+    subtlety this module has no reason to own. One `--name-only` diff per entry
+    asks the authority instead.
+
+    Measured on the FULL diff for that entry, so the byte cap applied afterwards
+    cannot turn a matched entry into a reported zero.
+    """
+    if not opts.paths or len(opts.paths) > MAX_PATH_MATCH_PROBES:
+        return None
+    counts: list[int] = []
+    for path in opts.paths:
+        args = _diff_args(DiffOptions(scope=opts.scope, base=opts.base, head=opts.head))
+        args.insert(1, "--name-only")
+        out = _git(cwd, *args, "--", path)
+        counts.append(sum(1 for line in out.splitlines() if line.strip()))
+    return counts
+
+
 def gather_context(
     cwd: str, scope: str, base: str, paths: list[str] | None = None, head: str | None = None
 ) -> ContextResult:
@@ -332,6 +370,7 @@ def gather_context(
         if not _ref_exists(cwd, effective_head):
             raise InvalidHeadError(f"head ref does not resolve to a commit: {effective_head!r}")
     summary = _summary(cwd, diff_args)
+    path_match_counts = _path_match_counts(cwd, opts)
     raw = _git(cwd, *diff_args)
     text, redacted = _redact(raw)
     truncated = False
@@ -353,4 +392,5 @@ def gather_context(
         truncation_hint=hint,
         redacted_paths=redacted,
         diff_bytes=diff_bytes,
+        path_match_counts=path_match_counts,
     )

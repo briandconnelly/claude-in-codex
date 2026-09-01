@@ -7,6 +7,64 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- A path-filter entry that matches nothing is no longer invisible. `paths=["src",
+  "tets"]` reviewed `src` and said nothing about the typo: `meta.paths` echoes the
+  list the caller sent, so it agrees with them, and since #147 Claude no longer
+  receives the values and so cannot remark on one that looks wrong. The failure
+  mode was a confident `pass` scoped to less than the caller believed, with no
+  signal anywhere in the envelope. `meta.paths_matched` now reports one file count
+  per entry, aligned index-for-index with `meta.paths`, so a zero names the
+  offending entry by position; it is absent (like `paths` itself, under
+  `exclude_none`) when there was no filter. The counts are asked of git, one
+  `--name-only` diff per entry, rather than derived from the gathered diff:
+  pathspec matching is exact-or-directory-prefix until an entry contains a
+  wildcard, and reimplementing that here to attribute a file list back to entries
+  would be a second, divergent copy of a subtlety this module has no reason to
+  own. `paths` has no `maxItems`, so the probe is capped at 32 entries and the
+  field is reported absent above it -- never guessed. The prompt gets the count
+  too, as a server-authored sentence with no caller values: this is a count of
+  what the filter SELECTED, which describes the review's coverage, not the count
+  of filter entries #147 declined to send, which described only the request.
+  Because async meta is rebuilt from the job record at fetch time, the counts are
+  persisted there as well, so a fetched result does not silently lose a field its
+  launch envelope showed. Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-43`.
+- Pinned the refusal that makes a diff-truncation notice unnecessary. #148 asked
+  for a prompt notice telling Claude a gathered diff had been cut, on the grounds
+  that truncation was reported in `meta` only -- to the caller, not to the model
+  being asked for a verdict. That is true of `gather_context`, but not of the
+  server: all four paid paths (`claude_review_changes`,
+  `claude_adversarial_review`, and both `_async` forms) already refuse an
+  over-cap diff with `context_too_large` before any spend, so a truncated diff
+  never reaches Claude and the notice would have been unreachable. Verified
+  against the running server rather than read off the source, with a control
+  showing an under-cap diff on the same path is reviewed normally. The guarantee
+  is now a test rather than an accident of four separate call sites: it is what
+  makes the #147 path-filter notice's "the diff names every file it contains"
+  true unconditionally, and if it is ever softened into a warning, the test fails
+  before a verdict can be rendered over a silently partial diff.
+- Brought the shipped `collaborating-with-claude` skill up to the current surface
+  (#79). It was missing `claude_models` -- the one tool that tells an agent what
+  to pass to `model`, and so the omission most likely to cause a bad call -- and
+  named no resource URIs at all, neither `claude-in-codex://models` and
+  `claude-in-codex://capabilities` nor the fact that `claude://models` is a
+  deprecated alias on a compatibility window. Its redaction guardrail still
+  described the 0.6.0 scope, understating what the server does: since #66,
+  best-effort redaction also covers Claude's returned output -- the structured
+  fields, the `detail=full` raw text, and model-derived error messages -- so the
+  line now says both what is covered and, explicitly, that caller-supplied text
+  is not. The job-recovery bullet now points at `idempotency_key` beside it, and
+  the `paths` guardrail at the new `meta.paths_matched`. Both copies updated; the
+  marketplace mirror stays byte-identical.
+- Raised the `tools/list` discovery budget from 82,700 to 83,000 bytes (+0.28%)
+  for `meta.paths_matched`. The entire cost is one field name added to the
+  hand-maintained enumeration in `_META_STUB`, which FastMCP inlines into every
+  tool entry. The previous note asked the next feature to slim a schema instead;
+  the only slimming available was abbreviating names in an enumeration whose
+  purpose is to let an agent read the field list, so the readable name was kept
+  and the ceiling moved by the smallest amount that restores headroom. The much
+  larger reclaim is already scheduled: removing the `claude_ask` and
+  `claude_review_dry_run` aliases in 0.9.0 frees ~9KB.
+
 - Settled how MCP roots work on sessionless (MCP 2026-07-28) connections: such a
   connection must pass `workspace_root`, and that is the standing contract rather
   than a stopgap. The protocol's replacement for the missing back-channel is the

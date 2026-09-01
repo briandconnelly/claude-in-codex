@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-42"
+FINGERPRINT = "claude-in-codex/0.1/schema-43"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -301,6 +301,12 @@ class Meta(BaseModel):
     head: str | None = None
     diff_range: str | None = None  # effective base...head for scope=branch
     paths: list[str] | None = None
+    # How many files each `paths` entry actually selected, aligned index-for-index
+    # with `paths` above. A zero marks an entry that matched nothing -- a scope the
+    # caller believes they reviewed and did not. `paths` alone cannot report this:
+    # it echoes the caller's list, so it agrees with their typo. None means there
+    # was no filter, or the list was too long to probe entry by entry (#149).
+    paths_matched: list[int] | None = None
     timeout_seconds: int
     elapsed_ms: int
     # The explicit per-call argument. None when the caller omitted it and the
@@ -840,7 +846,7 @@ _META_STUB = {
     "type": "object",
     "description": (
         "Execution metadata: cwd, workspace_source/warning, config_mode, access, "
-        "scope, base/head/diff_range, paths, timeout_seconds, elapsed_ms, "
+        "scope, base/head/diff_range, paths, paths_matched, timeout_seconds, elapsed_ms, "
         "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
         "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "

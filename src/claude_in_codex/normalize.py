@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
 from claude_in_codex.config import compose_focus
-from claude_in_codex.context import redact_text, sanitize_echo_prose
+from claude_in_codex.context import ContextResult, redact_text, sanitize_echo_prose
 from claude_in_codex.schemas import (
     OUTPUT_BOUNDS,
     TRUNCATION_MARKER,
@@ -88,6 +88,27 @@ _PATH_FILTER_NOTE = (
     "reads, material outside the diff is context only and does not widen the review."
 )
 
+
+# The unmatched-entry clause, appended to _PATH_FILTER_NOTE. It is a count of what
+# the filter SELECTED, measured by the server against git -- not the count of
+# filter entries that #147 deliberately declined to send. That one described the
+# request and told Claude nothing about the review; this one describes the
+# review's actual coverage, which is exactly what Claude cannot otherwise
+# establish now that the values are gone. Still no values (#149).
+def _unmatched_clause(counts: list[int] | None) -> str:
+    if not counts:
+        return ""
+    unmatched = sum(1 for count in counts if count == 0)
+    if unmatched == 0:
+        return ""
+    return (
+        f" Of the entries the caller supplied, {unmatched} of {len(counts)} matched no "
+        "files at all, so part of the scope they believe they asked for is absent from "
+        "the diff -- misspelled, or genuinely unchanged. Say so rather than reporting "
+        "coverage you did not have."
+    )
+
+
 _VALID_VERDICT = {"pass", "concerns", "fail", "unknown"}
 _VALID_CONFIDENCE = {"low", "medium", "high"}
 _VALID_SEVERITY = {"critical", "high", "medium", "low", "nit"}
@@ -131,9 +152,33 @@ def _sanitize_denials_tree(value: object) -> object:
     return value
 
 
-def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
+def build_prompt(
+    tool: str,
+    payload: dict[str, Any],
+    context_text: str,
+    context: ContextResult | None = None,
+) -> str:
+    """Compose the prompt for one tool.
+
+    `context` carries the server's own measurement of which path-filter entries
+    actually selected files. It is optional because claude_consult builds a
+    prompt with no gathered diff at all; when it is absent, the unmatched-entry
+    clause simply does not fire.
+
+    There is deliberately no truncation notice here. A truncated diff never
+    reaches Claude: every paid path refuses it with `context_too_large` before
+    spend, which is what makes _PATH_FILTER_NOTE's "the diff names every file it
+    contains" true unconditionally. That refusal is pinned by
+    tests/test_server.py::test_a_truncated_diff_never_reaches_claude -- if it is
+    ever softened into a warning, a notice belongs here and that test fails first
+    (#148).
+    """
     parts = [_LEAD.get(tool, _LEAD["claude_consult"])]
-    paths_note = _PATH_FILTER_NOTE if payload.get("paths") else ""
+    paths_note = ""
+    if payload.get("paths"):
+        paths_note = _PATH_FILTER_NOTE + _unmatched_clause(
+            context.path_match_counts if context else None
+        )
     if tool == "claude_consult":
         parts.append(payload["prompt"])
         if payload.get("context"):
