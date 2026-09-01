@@ -1645,6 +1645,7 @@ async def claude_review_changes(
             effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             head=head,
+            paths_matched=ctx_data.path_match_counts,
         )
         return _result(
             _err(
@@ -1879,6 +1880,7 @@ async def claude_adversarial_review(
                 effective_budget=r.budget,
                 redacted_paths=ctx_data.redacted_paths,
                 head=head,
+                paths_matched=ctx_data.path_match_counts,
             )
             return _result(
                 _err(
@@ -2337,6 +2339,7 @@ async def claude_review_changes_async(
             effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             head=head,
+            paths_matched=ctx_data.path_match_counts,
         )
         return _result(
             _err(
@@ -2718,6 +2721,7 @@ async def claude_adversarial_review_async(
                 truncated=True,
                 hint=ctx_data.truncation_hint,
                 redacted_paths=ctx_data.redacted_paths,
+                paths_matched=ctx_data.path_match_counts,
             )
             return _result(
                 _err(

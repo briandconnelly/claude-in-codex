@@ -304,8 +304,15 @@ class Meta(BaseModel):
     # How many files each `paths` entry actually selected, aligned index-for-index
     # with `paths` above. A zero marks an entry that matched nothing -- a scope the
     # caller believes they reviewed and did not. `paths` alone cannot report this:
-    # it echoes the caller's list, so it agrees with their typo. None means there
-    # was no filter, or the list was too long to probe entry by entry (#149).
+    # it echoes the caller's list, so it agrees with their typo (#149).
+    #
+    # None has exactly three causes: there was no filter; the list exceeded
+    # MAX_PATH_MATCH_PROBES; or the envelope was rebuilt from a background-job
+    # record written before this field existed. The third is a real post-upgrade
+    # case -- records outlive a release by their TTL -- and it is NOT recomputed at
+    # fetch time on purpose: the counts describe the diff as gathered at launch,
+    # and the working tree may have moved since. A legacy record is recognizable
+    # by `paths` being present and non-empty while this is absent.
     paths_matched: list[int] | None = None
     timeout_seconds: int
     elapsed_ms: int

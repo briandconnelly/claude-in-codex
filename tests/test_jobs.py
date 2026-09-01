@@ -1722,3 +1722,32 @@ def test_a_lifecycle_envelope_carries_focus_without_attesting_delivery(tmp_path,
     assert payload["ok"] is False
     assert "verdict" not in payload
     assert payload["meta"]["focus"] == "security"
+
+
+def test_legacy_job_record_without_paths_matched_still_rebuilds(tmp_path):
+    """A record written before paths_matched existed must stay readable.
+
+    Job records outlive a release by their TTL, so the first fetch after an
+    upgrade reads a config dict with no `paths_matched` key at all. That must
+    degrade to an absent field, not raise -- and it is deliberately not
+    recomputed, because the counts describe the diff as gathered at launch and
+    the working tree may have moved since."""
+    meta = {
+        "config": {
+            "config_mode": "inherit",
+            "access": "toolless",
+            "scope": "working_tree",
+            "base": "main",
+            "detail": "summary",
+            "timeout_seconds": 1800,
+            "workspace_source": "param",
+            "cwd": str(tmp_path),
+            "paths": ["src", "tets"],
+        },
+        "context_summary": None,
+    }
+
+    rebuilt = jobs._build_meta(meta)
+
+    assert rebuilt.paths == ["src", "tets"]
+    assert rebuilt.paths_matched is None

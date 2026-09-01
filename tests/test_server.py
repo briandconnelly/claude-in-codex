@@ -2016,6 +2016,7 @@ def _fake_ctx(**over):
         diff_bytes=4,
         redacted_paths=[],
         summary=None,
+        path_match_counts=None,
     )
     base.update(over)
     return types.SimpleNamespace(**base)
@@ -5955,26 +5956,59 @@ async def test_a_truncated_diff_never_reaches_claude(
     import subprocess as _sp
 
     import claude_in_codex.context as ctx_mod
+    import claude_in_codex.server as srv
 
+    # The error code alone does not pin "before spend": a server that invoked
+    # Claude and THEN returned context_too_large would satisfy it. This spy is
+    # what makes the claim testable -- it replaces the fake runner installed by
+    # fake_claude, so any invocation at all fails the test.
+    calls = []
+
+    async def refuse(cmd, cwd, timeout_seconds, stdin_text=None, *, config_mode=None):
+        calls.append(cmd)
+        raise AssertionError("Claude was invoked for a truncated diff")
+
+    monkeypatch.setattr(srv, "run_claude_async", refuse)
     monkeypatch.setattr(ctx_mod, "MAX_DIFF_BYTES", 50)
     (git_repo / "big.py").write_text("x = 1\n" * 2000)
     _sp.run(["git", "add", "-Nf", "big.py"], cwd=git_repo, check=True)
 
     async with Client(mcp) as client:
         with pytest.raises(Exception) as excinfo:
-            await client.call_tool(tool, {**args, "workspace_root": str(git_repo)})
+            await client.call_tool(
+                tool,
+                {**args, "paths": ["big.py", "nope"], "workspace_root": str(git_repo)},
+            )
 
     payload = json.loads(str(excinfo.value))
     assert payload["ok"] is False
     assert payload["error"]["code"] == "context_too_large"
     assert payload["meta"]["truncated"] is True
+    assert calls == []
+    # The counts were measured before the size cap was applied, so a refusal
+    # envelope can carry them -- and must, or absence stops meaning what
+    # Meta.paths_matched says it means.
+    assert payload["meta"]["paths"] == ["big.py", "nope"]
+    assert payload["meta"]["paths_matched"] == [1, 0]
 
 
-async def test_control_an_under_cap_diff_does_reach_claude(fake_claude, git_repo):
-    """The instrument works: without the tiny cap the same call is reviewed.
+async def test_control_an_under_cap_diff_does_reach_claude(fake_claude, git_repo, monkeypatch):
+    """The instrument works: without the tiny cap the same call IS sent to Claude.
 
-    Without this, the refusals above would pass just as well against a server
-    that rejected every review, proving nothing about truncation."""
+    Two controls in one. Without it, the refusals above would pass just as well
+    against a server that rejected every review, proving nothing about
+    truncation -- and the `calls == []` assertion there would pass against a spy
+    that could never observe a call in the first place."""
+    import claude_in_codex.server as srv
+
+    calls = []
+    real = srv.run_claude_async
+
+    async def spy(*a, **kw):
+        calls.append(a)
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(srv, "run_claude_async", spy)
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
@@ -5984,6 +6018,7 @@ async def test_control_an_under_cap_diff_does_reach_claude(fake_claude, git_repo
         )
     assert data["ok"] is True
     assert data["meta"]["truncated"] is False
+    assert calls, "the spy never observed a call, so its silence above proves nothing"
 
 
 @pytest.mark.parametrize(

@@ -39,8 +39,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   across all four paid tools rather than by inspection -- an empty diff under a
   filter is exactly when the caller most needs to know which entry selected
   nothing, since "no changes in scope" and "you misspelled every entry" are
-  otherwise the same envelope. Bumps `FINGERPRINT` to
-  `claude-in-codex/0.1/schema-43`.
+  otherwise the same envelope. Absence has exactly three causes -- no filter, a
+  list over the probe cap, or an envelope rebuilt from a background-job record
+  written before the field existed. That third case is real after an in-place
+  upgrade, since records outlive a release by their TTL, and it is deliberately
+  not recomputed at fetch time: the counts describe the diff as gathered at
+  launch, and the working tree may have moved since. A legacy record is
+  recognizable by `meta.paths` being present while this is absent. Bumps
+  `FINGERPRINT` to `claude-in-codex/0.1/schema-43`.
 - Pinned the refusal that makes a diff-truncation notice unnecessary. #148 asked
   for a prompt notice telling Claude a gathered diff had been cut, on the grounds
   that truncation was reported in `meta` only -- to the caller, not to the model
@@ -51,10 +57,19 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   never reaches Claude and the notice would have been unreachable. Verified
   against the running server rather than read off the source, with a control
   showing an under-cap diff on the same path is reviewed normally. The guarantee
-  is now a test rather than an accident of four separate call sites: it is what
-  makes the #147 path-filter notice's "the diff names every file it contains"
-  true unconditionally, and if it is ever softened into a warning, the test fails
-  before a verdict can be rendered over a silently partial diff.
+  is now pinned as a property rather than left as an accident of four separate
+  call sites: it is what makes the #147 path-filter notice's "the diff names
+  every file it contains" true unconditionally. A refusal test already existed,
+  but it asserted only the error code, which a server that invoked Claude and
+  THEN returned `context_too_large` would satisfy just as well; the new test
+  drives a real over-cap diff through all four tools with a spy standing in for
+  the runner, so any invocation at all fails it. Both halves were verified by
+  breaking them: softening the refusal fails all four cases, and a control
+  proves the spy can observe a call at all -- an assertion that nothing was
+  invoked is worthless from a spy that could never have seen anything.
+  `meta.paths_matched` rides these refusal envelopes too (the counts are measured
+  before the size cap is applied), because absence otherwise stops meaning what
+  the field says it means.
 - Brought the shipped `collaborating-with-claude` skill up to the current surface
   (#79). It was missing `claude_models` -- the one tool that tells an agent what
   to pass to `model`, and so the omission most likely to cause a bad call -- and
