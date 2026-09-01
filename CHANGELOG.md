@@ -16,6 +16,18 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   surface, and the aliases were advertised as deprecated for a full release.
   Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-44`.
 
+  Two things the removal left stale were caught in review rather than by a test,
+  which is worth recording: the shipped skill still told agents "the deprecated
+  aliases have none" of the async forms, and a capabilities test still carried an
+  alias->primary map that, after the rename, mapped `claude_consult` to itself.
+  Both are now gone. The `_TOOL_KINDS` comment was also rewritten twice -- the
+  first attempt claimed `"review" in tool` would misclassify `claude_dry_run`,
+  which is simply false (`"review"` is not a substring of it). The real
+  counterexample was always `claude_review_dry_run` itself: the word in its name,
+  a free preview in its behavior. The comment now says that, and the test gained
+  the assertion that actually fails under a substring implementation -- without
+  it, every case in that test passed under exactly the shortcut it forbids.
+
   The removal simplifies more than the tool list. `_dry_run_impl` no longer takes
   a `tool_name` argument -- it existed only so two registered names could echo
   themselves -- and `DryRunResult.tool` narrows from a two-value `Literal` to

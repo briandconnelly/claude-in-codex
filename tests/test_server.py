@@ -1425,8 +1425,8 @@ async def test_claude_capabilities_returns_expected_free_tools():
 async def test_dry_run_envelope_echoes_the_invoked_name(monkeypatch, git_repo):
     """Request name and envelope `tool` must agree.
 
-    This looped over both registered names while claude_dry_run existed;
-    that alias was removed in 0.9.0, so there is one name and `tool` is a
+    This looped over both registered names while the claude_review_dry_run
+    alias existed; it was removed in 0.9.0, so there is one name and `tool` is a
     single-value Literal. The assertion is kept because the field is still a
     claim about which tool answered."""
     monkeypatch.chdir(git_repo)
@@ -3745,14 +3745,18 @@ async def test_every_paid_tool_has_a_recoverable_execution_path():
     A blocking paid call that is cancelled or loses its connection loses the
     spend; a job survives both. Every paid tool must therefore either BE an async
     starter or have one, so a new paid tool cannot ship blocking-only by
-    omission. Deprecated aliases inherit their primary's async form.
+    omission.
+
+    This carried an alias->primary map while claude_ask was registered, because
+    that alias had no async form of its own and inherited claude_consult's. The
+    alias was removed in 0.9.0, so the map had nothing left to canonicalize and
+    is gone with it; every paid tool is now checked under its own name.
     """
     data = _capabilities_payload()
     starters = set(data["async_lifecycle"]["start_tools"])
-    aliases = {"claude_consult": "claude_consult"}
+    assert data["paid_tools"], "an empty paid_tools list would vacuously pass"
     for tool in data["paid_tools"]:
-        canonical = aliases.get(tool, tool)
-        assert canonical in starters or f"{canonical}_async" in starters, (
+        assert tool in starters or f"{tool}_async" in starters, (
             f"{tool} is paid but has no async form: a cancelled or disconnected "
             "call would lose the spend with no way to recover the result."
         )
