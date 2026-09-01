@@ -7,6 +7,42 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Unencodable user text is now refused before spend instead of crashing inside the
+  paid runner. A lone surrogate (`json.loads('"security\\ud800"')`) is schema-valid
+  JSON and a valid Python `str`, so it cleared the inputSchema, cleared the per-field
+  caps — `_utf8_len` measures with `errors="replace"` precisely so a ceiling check
+  cannot raise — and then had no UTF-8 encoding when the composed prompt was written
+  to the runner's stdin under `Popen(text=True, encoding="utf-8")`. The
+  `UnicodeEncodeError` was classified nowhere, so the caller got a raw exception
+  string instead of an `ok:false` envelope: a PAID path failing outside the
+  structured contract, with nothing for an agent branching on `ok` to read and no
+  `error.repair` to steer it. `system_prompt_append` was already refused for the same
+  input (`argv_unsafe_text`) because it rides argv; every field that rides stdin —
+  `prompt`, `context`, `target`, `evidence`, `focus` — was not.
+  Three guards, at the three places the text could reach a strict encoder. At the
+  request boundary, `_validate_user_text` (the renamed `_validate_input_size`, already
+  the choke point every tool body passes its free-form fields through) refuses the
+  text as `invalid_arguments` with `details.reason = "unencodable_text"` — a token
+  that does not claim argv is the constraint, since these fields do not ride it. In
+  `normalize_paths`, a path filter with no UTF-8 encoding is refused as `invalid_paths`
+  rather than reaching git argv, where `subprocess.run` raised the same unclassified
+  error (unpaid, but equally unstructured). In `run_claude_async`, a backstop checks
+  argv and stdin before the spawn: it catches whatever a boundary check misses, and it
+  removes a second defect — the stdin raise landed *after* the child was started, so
+  the exception both escaped the contract and orphaned the process.
+  A fourth place is the response. `meta.paths` is recorded from the raw argument
+  before `normalize_paths` can reject it, so the `invalid_paths` envelope itself
+  failed to serialize — the structured refusal replaced by the unstructured failure it
+  existed to prevent. Every envelope now passes `_emittable`, which renders an
+  unencodable character as its `\uXXXX` escape, so a response this server emits can
+  always be serialized.
+  `claude_capabilities.error_catalog` describes `invalid_arguments` accurately for the
+  first time: it has never been only "an argument failed the tool's inputSchema before
+  the body ran" — `argv_unsafe_text`, `forged_framing_marker`, and the per-field caps
+  all emit it from inside the body, and all set a `details.reason` the catalog's
+  `detail_fields` did not list. Both are corrected.
+  Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-40`.
+
 - `meta.focus` now records the `focus` a review ran under, so a narrowed verdict is no
   longer indistinguishable from a full-review one. `meta.system_prompt_append` already
   did this for the other steering channel; `focus` narrows a review just as effectively

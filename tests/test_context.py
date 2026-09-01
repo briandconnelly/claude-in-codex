@@ -137,6 +137,10 @@ def test_paths_none_and_empty_preserve_unfiltered_behavior(git_repo):
         "C:\\repo\\file.py",
         "\\\\server\\share\\file.py",
         "src\\..\\secret.py",
+        # A lone surrogate is schema-valid JSON with no UTF-8 encoding: it reaches
+        # git argv, where subprocess raises UnicodeEncodeError outside the error
+        # taxonomy. Refuse it here, where the mapping to invalid_paths exists.
+        "src/x\ud800",
     ],
 )
 def test_invalid_paths_are_rejected_before_git(monkeypatch, git_repo, path):

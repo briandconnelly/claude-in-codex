@@ -362,3 +362,12 @@ def test_max_focus_bytes_matches_the_append_cap():
     """Both caller-text channels are for a short directive, so neither gets to be the
     hole the other closed."""
     assert cfg.MAX_FOCUS_BYTES == cfg.MAX_SYSTEM_PROMPT_APPEND_BYTES
+
+
+def test_unencodable_reason_flags_lone_surrogate_but_not_nul():
+    """The stdin path and the argv path fail on different inputs, so they get
+    different guards. A NUL encodes to UTF-8 fine and only argv rejects it; a lone
+    surrogate has no UTF-8 encoding at all and fails on both."""
+    assert cfg.unencodable_reason("prompt\ud800") is not None
+    assert cfg.unencodable_reason("prompt\x00x") is None
+    assert cfg.unencodable_reason("plain prose, with émoji 🦓 and \ttabs") is None

@@ -581,3 +581,55 @@ def test_build_command_without_persona_sends_bare_guardrails():
         flag_support=_NO_PROBE,
     )
     assert cmd[cmd.index("--append-system-prompt") + 1] == INDEPENDENT_CRITIC_PROMPT
+
+
+def test_run_claude_async_refuses_unencodable_stdin_without_spawning(monkeypatch):
+    """The backstop for text that no boundary check caught.
+
+    `Popen(text=True, encoding="utf-8")` uses the strict codec, so a lone surrogate
+    in the composed prompt made `communicate()` raise UnicodeEncodeError -- after
+    the child was already spawned, so the exception escaped the error contract AND
+    orphaned the process. Refusing before the spawn removes both."""
+    import claude_in_codex.claude as claude_mod
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("no subprocess may be spawned for unencodable input")
+
+    monkeypatch.setattr(claude_mod.subprocess, "Popen", fail_popen)
+    run = anyio.run(
+        lambda: run_claude_async(
+            ["claude"], ".", 10, stdin_text="security\ud800", config_mode="inherit"
+        )
+    )
+    assert run.stderr == "unencodable_input"
+    assert run.timed_out is False
+
+
+def test_run_claude_async_refuses_unencodable_argv_without_spawning(monkeypatch):
+    """The same guard covers argv: `Popen` itself raises on an unencodable command
+    element, before the `except OSError` that handles a missing executable."""
+    import claude_in_codex.claude as claude_mod
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("no subprocess may be spawned for unencodable input")
+
+    monkeypatch.setattr(claude_mod.subprocess, "Popen", fail_popen)
+    run = anyio.run(
+        lambda: run_claude_async(
+            ["claude", "--append-system-prompt", "persona\ud800"],
+            ".",
+            10,
+            stdin_text="hi",
+            config_mode="inherit",
+        )
+    )
+    assert run.stderr == "unencodable_input"
+
+
+def test_classify_failure_maps_the_unencodable_sentinel():
+    """The sentinel must land in the taxonomy, not in the generic nonzero_exit
+    bucket, so an agent gets a repair it can act on."""
+    err = classify_failure(ClaudeRun("", "unencodable_input", -1, 0, False))
+    assert err.code == "invalid_arguments"
+    assert err.retryable is False
+    assert "surrogate" in err.repair.lower()
