@@ -35,6 +35,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   reason this could only ever be prose. Bumps `FINGERPRINT` to
   `claude-in-codex/0.1/schema-45`.
 
+  `FINGERPRINT_COVERS` gains a matching entry. That list is the agent-readable
+  disclosure of what the fingerprint pins, and its own comment requires it to
+  stay in sync with the surface the test digests; the pre-existing "tool records
+  ... input/output schemas" line does not describe this coverage, precisely
+  because `meta` is advertised as an opaque stub -- the whole reason the blind
+  spot existed. A test now pins that the disclosure names it, so the two cannot
+  drift apart the way the description and the model did.
+
   Also corrected a claim in that test's own comments while working there: it said
   stripping the capabilities fingerprint keeps the digest independent of
   `FINGERPRINT`. It does not -- the value is a schema DEFAULT on every result

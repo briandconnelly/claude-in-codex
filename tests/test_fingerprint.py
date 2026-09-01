@@ -183,3 +183,16 @@ def test_advertised_meta_description_enumerates_every_meta_field():
     described = schemas.meta_fields_from_description(schemas._META_STUB["description"])
 
     assert described == list(schemas.Meta.model_fields)
+
+
+async def test_fingerprint_covers_discloses_the_meta_field_coverage():
+    """The public disclosure must name what the digest actually pins.
+
+    FINGERPRINT_COVERS is agent-readable and its own comment requires it to stay
+    in sync with the pinned surface here. #143 added `Meta`'s field names to that
+    surface, and the pre-existing "tool records ... input/output schemas" entry
+    does not describe it -- `meta` is advertised as an opaque stub, which is the
+    whole reason the blind spot existed."""
+    covers = _capabilities_payload()["fingerprint_covers"]
+
+    assert any("meta field names" in item for item in covers), covers

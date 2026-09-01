@@ -37,6 +37,12 @@ FINGERPRINT_COVERS = [
     "detail-level field density, output bounds, and the truncation contract",
     "caller-supplied system-prompt text (parameter, cap, and the meta fingerprint)",
     "the meta.focus contract (what presence and absence attest)",
+    # `meta` is advertised as an opaque stub, so its field names would otherwise
+    # reach the digest only through the description that enumerates them. They
+    # are digested directly as well (#143); disclosed separately because that
+    # coverage holds even if the description is ever hand-written again, which
+    # the "tool records ... input/output schemas" entry above does not say.
+    "meta field names (digested directly, not only via the advertised meta description)",
     "capability summary and capabilities payload",
 ]
 
