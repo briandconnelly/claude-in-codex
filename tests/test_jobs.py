@@ -101,23 +101,38 @@ def _await_done(cwd, job_id, timeout=5.0):
     raise AssertionError("job did not leave running state in time")
 
 
-def test_job_error_envelope_keeps_the_full_error_info(tmp_path):
-    """A failure that arrives through a job carries the SAME error fields the sync
-    path reports — repair included (#145).
+@pytest.mark.parametrize(
+    ("result_text", "code", "retryable"),
+    [
+        ("Invalid API key provided by the environment", "api_key_invalid", False),
+        ("upstream overloaded; try again shortly", "nonzero_exit", True),
+    ],
+)
+def test_job_error_envelope_keeps_the_full_error_info(tmp_path, result_text, code, retryable):
+    """A failure that arrives through a job carries the SAME error object the sync
+    path reports — `repair`, `retryable`, and any typed `details` included (#145).
 
     A stored failure is classified by `claude.classify_failure` at render time
     (normalize.normalize_envelope), not narrowed into the backend adapter's
-    `ClassifiedFailure`, which has room for neither `repair` nor `details`. The
-    control below proves the classifier is what answers here: the same call on the
-    same evidence must agree field for field, so a green result cannot come from an
-    envelope that happened to be empty."""
+    `ClassifiedFailure`, which has room for none of those three. The comparison is
+    whole-object rather than field-by-field for exactly that reason: a named list
+    pins only the fields someone thought to name, and the fields at issue here are
+    the ones a narrowing drops. The classifier's own output is the control, so a
+    green result cannot come from an envelope that happened to be empty; the second
+    case carries `retryable=True`, so the flag is not pinned only at its default.
+
+    One limit, stated rather than implied: no classifier branch reachable from a
+    STORED envelope sets typed `details` today (the one that does keys on the
+    runner's stderr sentinel, which a job record cannot carry), so both cases here
+    have `details=None` and a regression that dropped the field would not fail this
+    test. The whole-object comparison covers it the moment such a branch exists."""
     cwd = str(tmp_path)
     envelope = json.dumps(
         {
             "type": "result",
             "subtype": "error_during_execution",
             "is_error": True,
-            "result": "Invalid API key provided by the environment",
+            "result": result_text,
         }
     )
     job_id, _ = jobs.start_job(_emit_cmd(envelope), cwd, _cfg(config_mode="bare"))
@@ -125,16 +140,15 @@ def test_job_error_envelope_keeps_the_full_error_info(tmp_path):
     payload, found = jobs.result(cwd, job_id)
     assert found is True
     assert payload["ok"] is False
-    error = payload["error"]
     direct = classify_failure(
         ClaudeRun(stdout=envelope, stderr="", exit_code=0, elapsed_ms=0, timed_out=False),
         config_mode="bare",
     )
-    assert error["code"] == direct.code == "api_key_invalid"
-    assert error["message"] == direct.message
-    assert error["repair"] == direct.repair
-    assert error["repair"]  # not merely equal-and-empty
-    assert error["action"] == direct.action.model_dump(mode="json", exclude_none=True)
+    assert payload["error"] == direct.model_dump(mode="json", exclude_none=True)
+    # The classifier itself must be saying something, not agreeing about nothing.
+    assert direct.code == code
+    assert direct.retryable is retryable
+    assert direct.repair
 
 
 def test_job_done_returns_normalized_result(tmp_path):
