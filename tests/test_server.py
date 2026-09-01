@@ -5588,6 +5588,81 @@ async def test_runner_backstop_reports_the_boundary_reason_token(monkeypatch, tm
     assert data["error"]["details"]["reason"] == "unencodable_text"
 
 
+@pytest.mark.parametrize("carrier", ["argv", "prompt"])
+async def test_async_launch_backstop_reports_the_boundary_reason_token(
+    monkeypatch, git_repo, tmp_path, carrier
+):
+    """The async twin of the runner backstop (#145).
+
+    The synchronous runner refuses an unencodable composed request BEFORE spawning
+    (claude._run), so a caller gets invalid_arguments + reason=unencodable_text. The
+    detached path spawns through the job store instead, which never saw that check:
+    an unencodable argv raised UnicodeEncodeError out of the launch, and an
+    unencodable prompt killed the store's stdin-writer thread and left a spawned,
+    prompt-less child to burn its whole wall-clock deadline. Neither is an envelope
+    a caller can branch on. Refuse both here, with the same reason token the sync
+    path uses, so one branch serves both forms of the same tool."""
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    bad = json.loads('"composed\\ud800"')
+    if carrier == "argv":
+        monkeypatch.setattr(
+            claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "true", bad], [])
+        )
+    else:
+        monkeypatch.setattr(srv, "build_prompt", lambda *a, **k: bad)
+
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+        listed = structured(
+            await client.call_tool("claude_job_list", {"workspace_root": str(git_repo)})
+        )
+
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_arguments"
+    assert data["error"]["details"]["reason"] == "unencodable_text"
+    # Refused BEFORE spend: no record, so nothing is left running or billable.
+    assert listed["jobs"] == []
+
+
+async def test_sync_and_async_agree_on_the_unencodable_refusal(monkeypatch, git_repo, tmp_path):
+    """The parity the two backstops exist to provide: for one composed request that
+    cannot be encoded, the sync and async forms of the same tool must hand back the
+    same `error` object, field for field (#145).
+
+    Comparing whole objects rather than the code alone is the point. #140's backstop
+    already matched on `code`; what an agent recovers from is `repair`, `details`,
+    and `action`, and those are exactly the fields a second, separately worded
+    refusal would drift on."""
+    import claude_in_codex.server as srv
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(srv, "build_prompt", lambda *a, **k: json.loads('"composed\\ud800"'))
+    args = {"scope": "working_tree", "workspace_root": str(git_repo)}
+
+    async with Client(mcp) as client:
+        # The sync call reaches the runner's own pre-spawn backstop, which returns
+        # before any process is started -- no CLI is installed or spent here.
+        sync = structured(
+            await client.call_tool("claude_review_changes", args, raise_on_error=False)
+        )
+        asynchronous = structured(
+            await client.call_tool("claude_review_changes_async", args, raise_on_error=False)
+        )
+
+    assert sync["ok"] is False
+    assert asynchronous["ok"] is False
+    assert sync["error"]["details"]["reason"] == "unencodable_text"  # not vacuously equal
+    assert asynchronous["error"] == sync["error"]
+
+
 def test_emittable_returns_clean_strings_unchanged():
     """The control for the test above: without this, a walk that replaced nothing
     and a walk that ran on nothing would look identical."""

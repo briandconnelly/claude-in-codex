@@ -202,6 +202,18 @@ class ClaudeBackend:
         )
 
     def classify_failure(self, outcome: RunOutcome, request: RunRequest) -> ClassifiedFailure:
+        """Protocol conformance, not a tool path — see the narrowing note below.
+
+        `ClassifiedFailure` (frozen at contract API 1) has room for `code`,
+        `detail`, and `retry_after_ms`, so the `repair`, `details`, and `retryable`
+        this bridge's `ErrorInfo` carries are dropped here. No agent-visible
+        envelope is built from this method: the tools classify with
+        `claude.classify_failure` directly (sync) or through
+        `normalize.normalize_envelope` (a stored job result), both of which render
+        the full `ErrorInfo`. Widening the taxonomy through `detail` prose would
+        weaken the structured semantics for a generic protocol runner, so the
+        mapping stays faithfully lossy until pontonier carries the fields (#145).
+        """
         info = claude.classify_failure(
             claude.ClaudeRun(
                 stdout=outcome.run.stdout,

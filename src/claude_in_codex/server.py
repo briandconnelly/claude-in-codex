@@ -25,6 +25,7 @@ from claude_in_codex.claude import (
     auth_status,
     classify_failure,
     run_claude_async,
+    unencodable_request_error,
 )
 from claude_in_codex.claude_models import read_model_catalog
 from claude_in_codex.config import (
@@ -1998,6 +1999,21 @@ async def _launch_job(
     # this backend stages no file artifacts — documented on ClaudeBackend.prepare.
     async with BACKEND.prepare(_run_request(kind_for_tool(cfg.kind), prompt, cwd, r)) as prepared:
         cmd, dropped = list(prepared.argv), list(prepared.dropped_flags)
+    # The detached twin of the runner's pre-spawn encodability backstop (#145).
+    # Caller-authored fields are already refused at the boundary by
+    # `_validate_user_text`; this catches what no single field owns — composed
+    # prompt text, a future call site added without the check — because on this
+    # path the alternative is not a clean failure either. An unencodable argv
+    # raises UnicodeEncodeError out of the store's spawn, escaping the ok:false
+    # contract entirely; an unencodable prompt is worse still, because the store
+    # writes stdin from a thread: the spawn SUCCEEDS, the writer thread dies, and
+    # a paid, prompt-less child is left to burn its whole wall-clock deadline.
+    # Refusing before the launch removes both, and reuses the sync path's error so
+    # one `unencodable_text` branch serves both forms of every tool.
+    if any(unencodable_reason(part) is not None for part in (*cmd, prompt)):
+        return ErrorResult(error=unencodable_request_error(), meta=meta).model_dump(
+            mode="json", exclude_none=True
+        )
     try:
         if idempotency_key:
             outcome = await run_sync(

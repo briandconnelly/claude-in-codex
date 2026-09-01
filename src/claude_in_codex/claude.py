@@ -293,16 +293,7 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
     if run.stderr == _UNENCODABLE_SENTINEL:
-        # Same reason token the request-boundary refusal uses: an agent that has
-        # learned to branch on `unencodable_text` must not need a second branch
-        # because the backstop caught what the boundary missed.
-        return ErrorInfo(
-            code="invalid_arguments",
-            message="The composed request contains text with no UTF-8 encoding "
-            "(an unpaired surrogate), which cannot be sent to claude.",
-            repair="Remove unpaired surrogates from the request text, then retry.",
-            details=ErrorDetails(reason="unencodable_text"),
-        )
+        return unencodable_request_error()
     if run.stderr == "claude_not_found":
         return ErrorInfo(
             code="claude_not_found",
@@ -405,6 +396,25 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
         code="nonzero_exit",
         message=f"claude exited {run.exit_code}: {safe_stderr.strip()[:200]}",
         repair="Inspect the error; retry with a smaller request.",
+    )
+
+
+def unencodable_request_error() -> ErrorInfo:
+    """Shared invalid_arguments error for a composed request that cannot be encoded.
+
+    Reused by every pre-spawn backstop — the synchronous runner's (`_run`) and the
+    detached launcher's (server._launch_job) — so the same underlying failure is
+    reported identically whichever form of a tool the caller chose (#145). The
+    reason token is the one the request-boundary refusal uses: an agent that has
+    learned to branch on `unencodable_text` must not need a second branch because a
+    backstop caught what the boundary missed.
+    """
+    return ErrorInfo(
+        code="invalid_arguments",
+        message="The composed request contains text with no UTF-8 encoding "
+        "(an unpaired surrogate), which cannot be sent to claude.",
+        repair="Remove unpaired surrogates from the request text, then retry.",
+        details=ErrorDetails(reason="unencodable_text"),
     )
 
 

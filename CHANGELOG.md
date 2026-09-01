@@ -7,6 +7,33 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- The pre-spawn encodability backstop now covers the detached path too, so the two
+  forms of a tool refuse an unencodable composed request identically. #140 gave the
+  synchronous runner that backstop; the `*_async` starters spawn through the job
+  store instead and had none, and their two failure modes were both worse than the
+  sync one. An unencodable argv raised `UnicodeEncodeError` out of the launch,
+  escaping the `ok:false` contract entirely — the exact defect #140 removed from the
+  sync path, still live on this one. An unencodable prompt was worse: the store
+  writes stdin from a thread, so the spawn SUCCEEDED, the writer thread died with the
+  envelope unread, and a `running` job with a prompt-less child was left to burn its
+  whole wall-clock deadline before reporting `job_timeout`. `_launch_job` — the one
+  choke point every `*_async` starter passes through — now checks argv and the
+  composed prompt before the launch and returns the sync path's own error, shared as
+  `claude.unencodable_request_error()`: `invalid_arguments` with
+  `details.reason = "unencodable_text"`, so one branch serves both forms of every
+  tool. Caller-authored fields were already refused at the request boundary on both
+  paths (`_validate_user_text`); this is the backstop for what no single field owns.
+  No contract surface moves: the code, the reason token, and the catalog entry all
+  already exist, and `FINGERPRINT` is unchanged.
+  Reported as #145, whose diagnosis pointed at `ClaudeBackend.classify_failure`
+  narrowing `ErrorInfo` into pontonier's `ClassifiedFailure`. That narrowing is real
+  but reaches no envelope: the tools classify with `claude.classify_failure` (sync)
+  or `normalize.normalize_envelope` (a stored job result), both of which render the
+  full `ErrorInfo` — now pinned by a test that compares a job-borne failure against
+  the classifier field for field. The adapter method is documented as the
+  protocol-conformance seam it is, and stays faithfully lossy rather than smuggling
+  recovery data through `detail` prose.
+
 - Unencodable user text is now refused before spend instead of crashing inside the
   paid runner. A lone surrogate (`json.loads('"security\\ud800"')`) is schema-valid
   JSON and a valid Python `str`, so it cleared the inputSchema, cleared the per-field

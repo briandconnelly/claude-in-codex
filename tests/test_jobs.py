@@ -15,6 +15,7 @@ import anyio
 import pytest
 
 from claude_in_codex import _job_worker, jobs
+from claude_in_codex.claude import ClaudeRun, classify_failure
 from claude_in_codex.jobs import JobConfig
 from claude_in_codex.schemas import OUTPUT_BOUNDS
 
@@ -98,6 +99,42 @@ def _await_done(cwd, job_id, timeout=5.0):
             return st
         time.sleep(0.05)
     raise AssertionError("job did not leave running state in time")
+
+
+def test_job_error_envelope_keeps_the_full_error_info(tmp_path):
+    """A failure that arrives through a job carries the SAME error fields the sync
+    path reports — repair included (#145).
+
+    A stored failure is classified by `claude.classify_failure` at render time
+    (normalize.normalize_envelope), not narrowed into the backend adapter's
+    `ClassifiedFailure`, which has room for neither `repair` nor `details`. The
+    control below proves the classifier is what answers here: the same call on the
+    same evidence must agree field for field, so a green result cannot come from an
+    envelope that happened to be empty."""
+    cwd = str(tmp_path)
+    envelope = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "Invalid API key provided by the environment",
+        }
+    )
+    job_id, _ = jobs.start_job(_emit_cmd(envelope), cwd, _cfg(config_mode="bare"))
+    _await_done(cwd, job_id)
+    payload, found = jobs.result(cwd, job_id)
+    assert found is True
+    assert payload["ok"] is False
+    error = payload["error"]
+    direct = classify_failure(
+        ClaudeRun(stdout=envelope, stderr="", exit_code=0, elapsed_ms=0, timed_out=False),
+        config_mode="bare",
+    )
+    assert error["code"] == direct.code == "api_key_invalid"
+    assert error["message"] == direct.message
+    assert error["repair"] == direct.repair
+    assert error["repair"]  # not merely equal-and-empty
+    assert error["action"] == direct.action.model_dump(mode="json", exclude_none=True)
 
 
 def test_job_done_returns_normalized_result(tmp_path):
