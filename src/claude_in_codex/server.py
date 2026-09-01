@@ -726,9 +726,15 @@ async def _file_roots(ctx) -> list[str] | None:
     2026-07-28 era has no back-channel for server-initiated requests, and the
     SDK raises NoBackChannelError. That is distinct from "no roots" on purpose —
     the client may well have roots the server cannot see, so the resolver must
-    not fall back to its own cwd or skip containment as if none existed. Roots
-    on that era need the guard pattern (InputRequiredResult), tracked in #151;
-    until then such a connection has to pass workspace_root explicitly."""
+    not fall back to its own cwd or skip containment as if none existed. Such a
+    connection has to pass workspace_root explicitly, and that is the settled
+    contract rather than a placeholder: the protocol's replacement for the
+    back-channel is the guard pattern (SEP-2322 -- return an InputRequiredResult
+    carrying a ListRootsRequest and resume from ctx.input_responses), but the
+    roots capability is itself deprecated in the very era that would need it
+    (SEP-2577), and no target host negotiates that era yet. Spending an extra
+    round trip on every paid call to poll a deprecated capability buys less than
+    the explicit argument it would replace."""
     if ctx is None:
         return []
     try:
