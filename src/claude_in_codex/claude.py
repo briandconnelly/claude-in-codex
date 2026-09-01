@@ -23,7 +23,7 @@ from claude_in_codex.config import (
     unencodable_reason,
 )
 from claude_in_codex.context import sanitize_echo_prose
-from claude_in_codex.schemas import ErrorInfo
+from claude_in_codex.schemas import ErrorDetails, ErrorInfo
 
 _BUDGET_REPAIR = (
     "Before making another call, raise max_budget_usd (up to $5.00) or narrow the "
@@ -293,11 +293,15 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
     if run.stderr == _UNENCODABLE_SENTINEL:
+        # Same reason token the request-boundary refusal uses: an agent that has
+        # learned to branch on `unencodable_text` must not need a second branch
+        # because the backstop caught what the boundary missed.
         return ErrorInfo(
             code="invalid_arguments",
             message="The composed request contains text with no UTF-8 encoding "
             "(an unpaired surrogate), which cannot be sent to claude.",
             repair="Remove unpaired surrogates from the request text, then retry.",
+            details=ErrorDetails(reason="unencodable_text"),
         )
     if run.stderr == "claude_not_found":
         return ErrorInfo(

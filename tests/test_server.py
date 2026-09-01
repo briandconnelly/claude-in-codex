@@ -5550,6 +5550,44 @@ def test_emittable_replaces_unencodable_text_anywhere_in_the_envelope():
     assert payload["error"]["details"]["value"] == "src/x\\ud800"
 
 
+def test_emittable_replaces_unencodable_dictionary_keys():
+    """`RepairAction.arguments` is keyed by the caller's own argument names, so an
+    unencodable KEY breaks serialization exactly as an unencodable value does. Without
+    this the envelope guarantee held only because the transport happened to sanitize
+    argument names first -- a property of the client, not of this server."""
+    import claude_in_codex.server as srv
+
+    payload = srv._emittable(
+        {"error": {"action": {"arguments": {json.loads('"bad\\ud800"'): "x"}}}}
+    )
+    json.dumps(payload).encode("utf-8")  # must not raise
+    assert list(payload["error"]["action"]["arguments"]) == ["bad\\ud800"]
+
+
+async def test_runner_backstop_reports_the_boundary_reason_token(monkeypatch, tmp_path):
+    """The backstop's envelope must be indistinguishable from the boundary's in the
+    field an agent branches on. Asserting ErrorInfo.code alone would not have caught
+    that `_execute` dropped the classifier's typed details on the floor."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
+
+    async def unencodable(*args, **kwargs):
+        return ClaudeRun("", "unencodable_input", -1, 0, False)
+
+    monkeypatch.setattr(srv, "run_claude_async", unencodable)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_consult",
+                {"prompt": "x", "workspace_root": str(tmp_path)},
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_arguments"
+    assert data["error"]["details"]["reason"] == "unencodable_text"
+
+
 def test_emittable_returns_clean_strings_unchanged():
     """The control for the test above: without this, a walk that replaced nothing
     and a walk that ran on nothing would look identical."""

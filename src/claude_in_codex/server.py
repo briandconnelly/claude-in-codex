@@ -261,7 +261,13 @@ def _emittable(value):
             return value
         return value.encode("utf-8", "backslashreplace").decode("utf-8")
     if isinstance(value, dict):
-        return {k: _emittable(v) for k, v in value.items()}
+        # Keys, not just values: `RepairAction.arguments` is built from the caller's
+        # own argument names, so an unencodable KEY is as fatal to serialization as
+        # an unencodable value, and a walk that skipped them would leave the
+        # guarantee above true only by luck. Two keys could in principle escape to
+        # the same string; that degrades one echoed argument name, which is strictly
+        # better than emitting no envelope at all.
+        return {_emittable(k): _emittable(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_emittable(v) for v in value]
     return value
@@ -1311,7 +1317,14 @@ async def _execute(
         if isinstance(env, dict):
             apply_cost_usage(meta, env)
         info = classify_failure(run, config_mode=r.config_mode)
-        return _err(info.code, info.message, info.repair, meta, retryable=info.retryable)
+        return _err(
+            info.code,
+            info.message,
+            info.repair,
+            meta,
+            retryable=info.retryable,
+            details=info.details,
+        )
     return normalize_envelope(
         tool, run.stdout, meta, detail=r.detail, context_summary=context_summary
     )
@@ -3378,11 +3391,11 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
     ),
     (
         "invalid_arguments",
-        "An argument failed the tool's inputSchema, or a check the schema cannot "
-        "express (encodable text, argv safety, forged framing markers, per-field "
-        "caps); details.reason names which.",
+        "An argument failed the tool's inputSchema, or a body check the schema "
+        "cannot express: unencodable text, argv-unsafe bytes, a forged framing "
+        "marker, or a per-field byte cap.",
         False,
-        ["field", "value", "reason", "allowed_values"],
+        ["field", "value", "reason", "allowed_values", "limit_bytes", "actual_bytes"],
     ),
     (
         "invalid_scope",

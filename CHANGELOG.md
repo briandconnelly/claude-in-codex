@@ -39,8 +39,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `claude_capabilities.error_catalog` describes `invalid_arguments` accurately for the
   first time: it has never been only "an argument failed the tool's inputSchema before
   the body ran" — `argv_unsafe_text`, `forged_framing_marker`, and the per-field caps
-  all emit it from inside the body, and all set a `details.reason` the catalog's
-  `detail_fields` did not list. Both are corrected.
+  all emit it from inside the body, and carry `reason` or `limit_bytes`/`actual_bytes`
+  that the catalog's `detail_fields` did not list. Both the condition and the field
+  list are corrected. `_execute` now forwards the classifier's typed `details` into the
+  envelope, so the runner backstop reports the same `unencodable_text` token as the
+  boundary refusal and an agent needs one branch, not two.
   Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-40`.
 
 - `meta.focus` now records the `focus` a review ran under, so a narrowed verdict is no
