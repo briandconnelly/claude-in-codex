@@ -7,6 +7,46 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **Closed the fingerprint gate's blind spot for `Meta` fields (#143).**
+  `AGENTS.md` requires a `FINGERPRINT` bump for agent-visible schema changes and
+  `tests/test_fingerprint.py` is the instrument that enforces it, but `meta` is
+  advertised as an opaque stub whose DESCRIPTION enumerates the field names by
+  hand -- so that sentence was the only part of `Meta` reaching the digest. The
+  gate therefore fired only when an author remembered to edit prose: the same
+  manual step the fingerprint bump itself is, and the reason this test exists.
+  A field added without touching the sentence shipped an unbumped contract
+  behind a green gate.
+
+  Reproduced before fixing rather than taken from the issue: adding a probe field
+  to `Meta` left all six fingerprint tests green, while editing an advertised
+  description failed them -- the instrument was live in general and blind to
+  exactly this. After the fix the same probe fails.
+
+  Fixed both ways the issue proposed, because they compose. The digest now
+  covers `Meta.model_fields` directly, so coverage is structural rather than a
+  side effect of prose. And the advertised enumeration is GENERATED from
+  `Meta.model_fields` instead of hand-written, so it cannot drift from the model
+  and any added field necessarily moves it. `meta_fields_from_description` is the
+  inverse, which makes the property testable rather than merely true today -- a
+  future hand-written replacement fails as soon as it disagrees with the model.
+  The names are now spelled out rather than compressed (`workspace_source,
+  workspace_warning`, not `workspace_source/warning`): the compressions saved
+  bytes at the cost of being un-checkable and un-greppable, and they were the
+  reason this could only ever be prose. Bumps `FINGERPRINT` to
+  `claude-in-codex/0.1/schema-45`.
+
+  Also corrected a claim in that test's own comments while working there: it said
+  stripping the capabilities fingerprint keeps the digest independent of
+  `FINGERPRINT`. It does not -- the value is a schema DEFAULT on every result
+  model, so it appears ~13 times in the advertised records and a bump moves the
+  digest by itself. Harmless in the intended workflow (bump because the contract
+  changed, then re-pin), but the comment now says so instead of denying it.
+
+- Raised the `tools/list` discovery budget from 74,000 to 75,000 bytes for the
+  generated enumeration: measured 73,315 (+896 / +1.2%), which left under 1%
+  headroom. Bought with the alias removal's reclaim in the same release -- net
+  across both changes this ceiling sits 8,000 bytes BELOW where it started.
+
 - **Removed the deprecated `claude_ask` and `claude_review_dry_run` aliases.**
   They were introduced in 0.8.0 when the canonical verbs became `claude_consult`
   and `claude_dry_run`, documented in nine places as "removal planned for 0.9.0",

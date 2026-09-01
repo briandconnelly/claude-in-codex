@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-44"
+FINGERPRINT = "claude-in-codex/0.1/schema-45"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -856,17 +856,46 @@ class ModelCatalogResult(BaseModel):
 # decoration rides along on every field. The slimmed schema is what agents SEE;
 # the wire payload still carries the full Meta, whose field contract
 # claude_capabilities documents. Measured effect: tools/list 113,495 -> 62,642 bytes.
+# The enumeration is GENERATED from Meta.model_fields, not hand-written (#143).
+#
+# It used to be prose an author had to remember to edit. That made it the gate on
+# whether a new Meta field moved the contract digest -- because `meta` is
+# advertised as an opaque object, this sentence is the ONLY part of Meta that
+# reaches the digest at all. So the enforcement instrument depended on the same
+# manual step it exists to catch, and a field added without touching the sentence
+# shipped an unbumped contract behind a green test. Verified before the fix:
+# adding a field to Meta left tests/test_fingerprint.py fully green.
+#
+# Generating it fixes both halves at once. The advertised list cannot drift from
+# the model, and any added field necessarily moves the description, and so the
+# digest. The names are spelled out rather than compressed ("workspace_source,
+# workspace_warning", not "workspace_source/warning"): the compressions saved
+# bytes at the cost of being un-checkable and un-greppable, and an enumeration
+# whose whole purpose is to let an agent read the field list should be the field
+# list. `meta_fields_from_description` is the inverse, so the property is
+# testable rather than merely true today.
+_META_FIELDS_PREFIX = "Execution metadata. Fields: "
+_META_FIELDS_SUFFIX = ". Full contract: claude_capabilities."
+
+
+def meta_fields_from_description(description: str) -> list[str]:
+    """Recover the enumerated field names from an advertised meta description.
+
+    The inverse of how _META_STUB's description is built. Lets a test assert the
+    advertised enumeration IS Meta's field list rather than trusting that it was
+    generated -- so a future hand-written replacement fails as soon as it
+    disagrees with the model."""
+    body = description
+    if body.startswith(_META_FIELDS_PREFIX):
+        body = body[len(_META_FIELDS_PREFIX) :]
+    if body.endswith(_META_FIELDS_SUFFIX):
+        body = body[: -len(_META_FIELDS_SUFFIX)]
+    return [name.strip() for name in body.split(",") if name.strip()]
+
+
 _META_STUB = {
     "type": "object",
-    "description": (
-        "Execution metadata: cwd, workspace_source/warning, config_mode, access, "
-        "scope, base/head/diff_range, paths, paths_matched, timeout_seconds, elapsed_ms, "
-        "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
-        "command_exit_code, "
-        "permission_denials, compat/security warnings, redacted_paths, cost_usd, "
-        "usage, system_prompt_append, focus, job_id, request_id, fingerprint. "
-        "Full contract: claude_capabilities."
-    ),
+    "description": (_META_FIELDS_PREFIX + ", ".join(Meta.model_fields) + _META_FIELDS_SUFFIX),
 }
 
 
