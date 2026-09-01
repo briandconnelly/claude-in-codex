@@ -72,8 +72,10 @@ _LEAD = {
 # What this does NOT claim: that a path value can never reach Claude. An entry that
 # names a file the diff actually contains still appears in that file's diff header —
 # as diff data the guardrails already name untrusted, not as server-authored framing.
-# The guarantee is the voice, not the bytes. It holds for the injection shape #141
-# described, because prose smuggled into a path is prose that matches no file.
+# The guarantee is the VOICE, not the bytes, and it is unconditional: a hostile entry
+# that happens to name a real file (filenames may legally contain prose, so nothing
+# rules this out) reaches Claude only as diff data, which is the tier it belonged to
+# all along. What #141 removed is the promotion of that text into the server's voice.
 #
 # "may show only part": a filter can be exhaustive (`paths=["."]` is accepted and
 # gathers everything), so a sentence promising a partial diff would be false there

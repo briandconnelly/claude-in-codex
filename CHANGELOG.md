@@ -27,18 +27,31 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   entry, all to deliver text with no use. The notice is now its own section rather
   than a suffix inside the `Changes (...)` and `Related changes` headings.
   The guarantee is the VOICE, not the bytes: an entry that names a file the diff
-  contains still appears in that file's diff header, as untrusted diff data. That is
-  the whole guarantee the injection shape needed, because prose smuggled into a path
-  is prose that matches no file. The notice also says the diff "may" show only part
+  contains still appears in that file's diff header, as untrusted diff data. That
+  holds unconditionally, including for a hostile entry that happens to name a real
+  file — filenames may legally contain prose, so nothing rules that out. Such text
+  reaches Claude only in the tier it belonged to all along; what this removes is its
+  promotion into the server's voice. The notice also says the diff "may" show only part
   of the scope rather than asserting it does — an exhaustive filter (`paths=["."]`)
   is accepted, and telling Claude changes are missing when none are is its own defect.
   No FINGERPRINT bump: this is prompt composition, and no advertised record moved.
   Verified against the contract digest with a positive control — perturbing an
   advertised tool description does fail that test — so the green result is evidence
-  and not an untested instrument (#143). One caveat for callers: `arg_hash_for`
-  hashes the composed prompt, so an `idempotency_key` reused across this upgrade for
-  a path-filtered `*_async` launch conflicts rather than replaying. That is
-  fail-closed and matches every prior prompt change.
+  and not an untested instrument (#143).
+  `arg_hash_for` now takes `paths` as a third argument, because taking the values out
+  of the prompt took them out of the async idempotency digest with it. `paths` never
+  reached Claude's argv — it rides GIT's — so the prompt was its only carrier, and
+  two filters that select the SAME changes (`["src"]` and `["src/file.py"]` when only
+  that file changed) compose an identical prompt. They therefore hashed alike, and a
+  keyed retry that narrowed or widened its filter would have silently received the
+  earlier job's answer carrying the earlier job's `meta.paths` — the misattributed
+  paid answer the (key, effective arguments) guarantee exists to refuse. Passing the
+  values to the digest rather than restoring them to the prompt keeps both
+  properties. Caught by Copilot's review; pinned by a test whose two launches share
+  argv and prompt exactly, so it cannot pass by accident.
+  One caveat for callers: an `idempotency_key` reused across this upgrade for a
+  path-filtered `*_async` launch conflicts rather than replaying, since the digest
+  moved. That is fail-closed and matches every prior prompt change.
   Closes #141.
 - The pre-spawn encodability backstop now covers the detached path too, so the two
   forms of a tool refuse an unencodable composed request identically. #140 gave the
