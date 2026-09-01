@@ -3632,7 +3632,12 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "is not yet visible, so do not treat a no-changes result as proof that no "
         "job exists — claude_job_list is the authority.",
         "The effective arguments are the ones that change what Claude is asked and "
-        "paid to do. `detail` is NOT one of them: the raw envelope is stored, so a "
+        "paid to do, or the scope a stored answer is recorded under. `paths` IS one "
+        "of them, and is matched AS SENT: two filters that select the same changes "
+        "(a directory and the only changed file under it) still conflict, as do the "
+        "same entries in a different order, because the stored result records the "
+        "filter its verdict was scoped to. `detail` is NOT one of them: the raw "
+        "envelope is stored, so a "
         "replay can still be read at any density by passing `detail` to "
         "claude_job_result, for free. Retrying a key with only `detail` changed is "
         "therefore a replay, not a conflict — conflicting would force a second paid "

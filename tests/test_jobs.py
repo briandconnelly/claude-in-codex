@@ -5,6 +5,7 @@ a known JSON envelope, so the full start -> status -> result/cancel/timeout flow
 exercised deterministically and for free.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -1166,22 +1167,81 @@ def test_arg_hash_separates_runs_that_differ_only_by_focus():
     The equal-inputs assertion is a determinism guard, NOT a positive control:
     SHA-256 over equal material is equal by construction, so it cannot show
     that the digest discriminates. What it can catch is material that stopped
-    being a pure function of (argv, prompt) — a nonce, a timestamp, an object
-    id — which would replace every replay with a spurious idempotency_conflict.
-    The inequality assertions below are what prove discrimination.
+    being a pure function of (argv, prompt, paths) — a nonce, a timestamp, an
+    object id — which would replace every replay with a spurious
+    idempotency_conflict. The inequality assertions below prove discrimination.
     """
     argv = ["claude", "-p", "--model", "sonnet"]
-    assert jobs.arg_hash_for(argv, "review this") == jobs.arg_hash_for(argv, "review this")
-    assert jobs.arg_hash_for(argv, "review this") != jobs.arg_hash_for(
-        argv, "review this, focus on auth"
+    assert jobs.arg_hash_for(argv, "review this", None) == jobs.arg_hash_for(
+        argv, "review this", None
     )
+    assert jobs.arg_hash_for(argv, "review this", None) != jobs.arg_hash_for(
+        argv, "review this, focus on auth", None
+    )
+
+
+def test_arg_hash_separates_runs_that_differ_only_by_paths():
+    """`paths` is an effective argument with no carrier but this one.
+
+    It never reaches Claude's argv (it rides git's), and #141 removed it from the
+    prompt. The hard case is two DISTINCT filters that select the SAME changes —
+    `["src"]` and `["src/file.py"]` when only that file changed. The gathered diff
+    is identical, so prompt and argv are identical too, and before `paths` was
+    hashed explicitly the two collided: a keyed retry that narrowed or widened its
+    filter got the earlier job's answer back, carrying the earlier job's
+    `meta.paths`. Equal argv and equal prompt in this test are the POINT, not an
+    oversight — they are what makes it a real control rather than a restatement of
+    "different prompts hash differently".
+    """
+    argv = ["claude", "-p"]
+    prompt = "review this"
+    assert jobs.arg_hash_for(argv, prompt, ["src"]) != jobs.arg_hash_for(
+        argv, prompt, ["src/file.py"]
+    )
+    # A filter is not the same request as no filter.
+    assert jobs.arg_hash_for(argv, prompt, ["src"]) != jobs.arg_hash_for(argv, prompt, None)
+    # Order is part of the argument the caller sent, and determinism still holds.
+    assert jobs.arg_hash_for(argv, prompt, ["a", "b"]) == jobs.arg_hash_for(
+        argv, prompt, ["a", "b"]
+    )
+    assert jobs.arg_hash_for(argv, prompt, ["a", "b"]) != jobs.arg_hash_for(
+        argv, prompt, ["b", "a"]
+    )
+    # An empty list means "no filter applied", exactly as normalize_paths returns None for it.
+    assert jobs.arg_hash_for(argv, prompt, []) == jobs.arg_hash_for(argv, prompt, None)
 
 
 def test_arg_hash_separates_runs_that_differ_only_by_model():
     prompt = "review this"
-    assert jobs.arg_hash_for(["claude", "-p", "--model", "sonnet"], prompt) != jobs.arg_hash_for(
-        ["claude", "-p", "--model", "opus"], prompt
-    )
+    assert jobs.arg_hash_for(
+        ["claude", "-p", "--model", "sonnet"], prompt, None
+    ) != jobs.arg_hash_for(["claude", "-p", "--model", "opus"], prompt, None)
+
+
+def test_arg_hash_is_unchanged_for_a_launch_that_passed_no_filter():
+    """Adding `paths` to the digest must not move it for callers who sent none.
+
+    An absent filter contributes no key at all, so the material for an unfiltered
+    launch is byte-identical to what it was before `paths` joined the digest. This
+    matters on upgrade: emitting `"paths": null` would have invalidated every keyed
+    launch ever made — `claude_consult_async` included, which has no `paths`
+    parameter and whose prompt this release does not touch — and turned a harmless
+    upgrade into a conflict for callers who changed nothing.
+
+    The pre-change digest is recomputed here from the OLD material shape rather
+    than pasted as a hex constant, so this test states the property (absence adds
+    nothing) instead of pinning today's bytes.
+    """
+    argv = ["claude", "-p", "--model", "sonnet"]
+    prompt = "review this"
+    legacy = hashlib.sha256(
+        json.dumps({"argv": argv, "prompt": prompt}, sort_keys=True).encode()
+    ).hexdigest()
+    assert jobs.arg_hash_for(argv, prompt, None) == legacy
+    assert jobs.arg_hash_for(argv, prompt, []) == legacy
+    # The control: a real filter DOES move it, so the equality above is not a
+    # digest that ignores its third argument.
+    assert jobs.arg_hash_for(argv, prompt, ["src"]) != legacy
 
 
 def _run_worker_capturing_popen(tmp_path, monkeypatch, extra_args):
@@ -1332,6 +1392,42 @@ def test_keyed_replay_survives_the_executable_disappearing(tmp_path, monkeypatch
     assert replay["job_id"] == first["job_id"]
 
     jobs.cancel(cwd, first["job_id"])
+
+
+def test_keyed_retry_that_changes_only_paths_conflicts(tmp_path):
+    """The reservation must actually CARRY the paths into the digest.
+
+    `test_arg_hash_separates_runs_that_differ_only_by_paths` proves the function
+    discriminates; it says nothing about whether `start_job_idempotent` passes
+    `cfg.paths` to it. Dropping that one argument at the call site left the entire
+    suite green, which is the whole reason this test exists: a digest that
+    discriminates but is never handed the value is a check that cannot fail.
+
+    Same cmd, same stdin, same key — only the filter differs, exactly as it would
+    for a caller who narrowed the scope on a retry. A replay here would hand back
+    an answer gathered under a DIFFERENT filter, carrying the earlier job's
+    `meta.paths`.
+    """
+    script = tmp_path / "fake-claude"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    cmd = [str(script)]
+    cwd = str(tmp_path)
+
+    first = jobs.start_job_idempotent(cmd, cwd, _cfg(paths=["src"]), None, key="paths-key")
+    assert first["kind"] == "created"
+    try:
+        narrowed = jobs.start_job_idempotent(
+            cmd, cwd, _cfg(paths=["src/file.py"]), None, key="paths-key"
+        )
+        assert narrowed["kind"] == "conflict", narrowed
+        # The control: an unchanged filter still replays, so the digest did not
+        # simply become impossible to match.
+        same = jobs.start_job_idempotent(cmd, cwd, _cfg(paths=["src"]), None, key="paths-key")
+        assert same["kind"] == "replay"
+        assert same["job_id"] == first["job_id"]
+    finally:
+        jobs.cancel(cwd, first["job_id"])
 
 
 def test_keyed_create_still_reports_a_missing_executable(tmp_path):

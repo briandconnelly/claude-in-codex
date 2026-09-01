@@ -453,16 +453,47 @@ def start_job(
         )
 
 
-def arg_hash_for(cmd: list[str], prompt: str | None) -> str:
+def arg_hash_for(cmd: list[str], prompt: str | None, paths: list[str] | None) -> str:
     """The effective-argument digest a keyed launch is deduplicated under.
 
     Two launches with the same idempotency_key but different effective arguments
-    are a conflict, not a replay. The pair (argv, prompt) IS the effective
+    are a conflict, not a replay. The triple (argv, prompt, paths) IS the effective
     argument set: argv carries model, effort, budget, access, and config-mode
-    flags, and the prompt carries scope, base, head, paths, focus, and the
-    gathered diff. Hashing them directly means a newly added tool parameter
-    cannot silently fall out of the digest the way an enumerated field list
-    allowed — `focus`, `model`, and `reasoning_effort` all did.
+    flags, and the prompt carries scope, base, head, focus, and the gathered diff.
+    Hashing them directly means a newly added tool parameter cannot silently fall
+    out of the digest the way an enumerated field list allowed — `focus`, `model`,
+    and `reasoning_effort` all did.
+
+    `paths` is passed separately because it is the one effective argument with no
+    carrier of its own. It never reaches argv (it rides GIT's argv, not Claude's),
+    and #141 removed it from the prompt, where it used to be interpolated in the
+    server's own voice. Carrying it here rather than restoring it to the prompt
+    keeps both properties: the values stay out of what Claude reads, and two
+    filters remain distinguishable to the index.
+
+    Nothing else can stand in for it. The filter is applied when the diff is
+    gathered, so distinct filters that select the SAME changes — `["src"]` and
+    `["src/file.py"]` when only that file changed — produce an identical prompt
+    and identical argv. Without this argument they hash alike, and a keyed retry
+    that narrowed or widened its filter silently receives the earlier job's
+    answer, carrying the earlier job's `meta.paths`. That is precisely the
+    misattributed paid answer the (key, effective arguments) guarantee exists to
+    refuse. Caught by Copilot reviewing #147.
+
+    The parameter is REQUIRED, with no default. A default would compile at every
+    future call site that forgets it, and forgetting it is not hypothetical: when
+    this argument was added, deleting it from the one call site below left the whole
+    suite green except the single test written to catch exactly that. Requiring it
+    turns that class of regression into a TypeError rather than a silent replay of
+    an answer gathered under someone else's filter.
+
+    An absent filter contributes NO key, rather than a null one. Emitting
+    `"paths": null` would move the digest for every keyed launch ever made,
+    including `claude_consult_async`, which has no `paths` parameter at all and
+    whose prompt this release does not touch — turning a harmless upgrade into a
+    conflict for callers who changed nothing. Omitting it keeps the movement where
+    the change is: launches that passed a filter. `[]` and None are the same absence
+    here, matching `normalize_paths`, which returns None for both.
 
     Volatile bookkeeping (timeouts, workspace provenance, redaction counts) is
     excluded by construction: it appears in neither argv nor the prompt.
@@ -477,7 +508,10 @@ def arg_hash_for(cmd: list[str], prompt: str | None) -> str:
     claude_capabilities.async_lifecycle and pinned by a test, so it is a contract,
     not an accident of what happens to reach argv.
     """
-    material = json.dumps({"argv": list(cmd), "prompt": prompt}, sort_keys=True)
+    material_map: dict[str, object] = {"argv": list(cmd), "prompt": prompt}
+    if paths:
+        material_map["paths"] = list(paths)
+    material = json.dumps(material_map, sort_keys=True)
     return hashlib.sha256(material.encode()).hexdigest()
 
 
@@ -501,7 +535,7 @@ def start_job_idempotent(
             kind=cfg.kind,
             tool=_IDEMPOTENCY_NAMESPACE,
             key=key,
-            arg_hash=arg_hash_for(cmd, stdin_text),
+            arg_hash=arg_hash_for(cmd, stdin_text, cfg.paths),
             extra=_extra_for(cfg, cwd),
             stdin_text=stdin_text,
         )

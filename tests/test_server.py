@@ -576,7 +576,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-40"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-41"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1248,7 +1248,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-40"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-41"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -4066,8 +4066,9 @@ async def test_a_keyed_retry_that_changes_only_system_prompt_append_conflicts(
     DIFFERENT system prompt than the one the caller asked for, and bill nothing
     to reveal it.
 
-    The property holds by construction — `arg_hash_for` hashes (argv, prompt) and
-    the persona rides argv inside the composed `--append-system-prompt` value —
+    The property holds by construction — `arg_hash_for` hashes (argv, prompt,
+    paths) and the persona rides argv inside the composed `--append-system-prompt`
+    value —
     but "by construction" is exactly what breaks silently when the carrier moves,
     which is what #132 just did to it. Hence a test.
 
@@ -4146,8 +4147,8 @@ async def test_one_key_cannot_replay_across_two_starters(monkeypatch, git_repo):
 
     `jobs._IDEMPOTENCY_NAMESPACE` asserts in a comment that reusing a key across
     two starters conflicts rather than replaying the first tool's job. Nothing
-    tested it, and the digest itself carries only (argv, prompt), not the job
-    kind. A cross-tool replay would be the worst failure this key has: it would
+    tested it, and the digest itself carries only (argv, prompt, paths), not the
+    job kind. A cross-tool replay would be the worst failure this key has: it would
     hand back a paid answer to a question the caller never asked.
     """
     monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(git_repo / ".state"))
