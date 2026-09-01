@@ -7,6 +7,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Settled how MCP roots work on sessionless (MCP 2026-07-28) connections: such a
+  connection must pass `workspace_root`, and that is the standing contract rather
+  than a stopgap. The protocol's replacement for the missing back-channel is the
+  guard pattern (SEP-2322), but it polls a capability the same era deprecates
+  (SEP-2577), at the cost of an extra round trip on every paid call, and no target
+  host negotiates that era yet. No behavior change; the accepted consequence --
+  an explicit `workspace_root` on such a connection gets no containment check,
+  because there is no roots snapshot to contain it against -- is now pinned by a
+  test rather than left implicit.
 - Upgraded to FastMCP 4 (4.0.0), which is built on the MCP Python SDK v2 (2.1.1,
   now declared directly since the server imports it). The framework upgrade itself
   leaves the agent-visible contract untouched: the wire-shaped `tools/list`,
@@ -26,7 +35,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `workspace_root` is accepted with the same standing as one from a client that
   offered no roots. The `workspace_root` descriptions and the shipped skill say
   so. Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-42`.
-  Guard-pattern roots for that era are tracked in #151. Test-side, the suite's
+  Test-side, the suite's
   `Client` defaults to the handshake era the target host speaks (sessionless
   tests opt in explicitly), the contract-fingerprint and discovery-cost checks dump
   models `by_alias=True` so they measure the wire shape rather than Python field

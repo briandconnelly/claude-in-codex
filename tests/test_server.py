@@ -2923,11 +2923,21 @@ async def test_handshake_era_client_gets_its_first_root_as_default_workspace(fak
     assert data["meta"]["cwd"] == str(git_repo)
 
 
-async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo):
+async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo, tmp_path_factory):
     """The sessionless 2026-07-28 era has no back-channel for roots/list, so the
     server cannot see the roots this client configured. It fails closed before
     spend rather than reviewing its own cwd, and names the cause; an explicit
-    workspace_root is accepted (guard-pattern roots for this era: #151)."""
+    workspace_root is accepted.
+
+    Requiring the argument is the standing contract for that era, not a stopgap:
+    the guard pattern that would restore roots there (SEP-2322) polls a
+    capability the same era deprecates (SEP-2577). The accepted cost is the last
+    assertion: an explicit workspace_root gets no containment check on such a
+    connection, because there is no roots snapshot to contain it against. That
+    is the same standing a client that offered no roots has always had, and it
+    is pinned here so the skipped check stays a decision rather than drift."""
+    # git_repo IS tmp_path, so the uncontained directory needs its own root.
+    outside = tmp_path_factory.mktemp("outside")
     async with Client(mcp, roots=[git_repo.as_uri()], mode="auto") as client:
         assert client.protocol_version == "2026-07-28"
         omitted = structured(
@@ -2942,6 +2952,15 @@ async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo
                 raise_on_error=False,
             )
         )
+        # claude_consult, not claude_review_changes: no git repo is needed at the
+        # uncontained path, so the call can succeed and show where it landed.
+        uncontained = structured(
+            await client.call_tool(
+                "claude_consult",
+                {"prompt": "hi", "workspace_root": str(outside)},
+                raise_on_error=False,
+            )
+        )
     assert omitted["ok"] is False
     assert omitted["error"]["code"] == "invalid_workspace_root"
     assert omitted["error"]["details"] == {
@@ -2952,6 +2971,11 @@ async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo
     assert explicit["ok"] is True
     assert explicit["meta"]["workspace_source"] == "param"
     assert explicit["meta"]["cwd"] == str(git_repo)
+    # Outside the client's configured root, yet accepted: the connection cannot
+    # deliver the snapshot the containment check needs. The equivalent call on a
+    # handshake-era connection is refused (see the allowed_roots test above).
+    assert uncontained["ok"] is True
+    assert uncontained["meta"]["cwd"] == str(outside)
 
 
 async def test_roots_lookup_keeps_the_sdk_deprecation_warning_quiet(fake_claude, git_repo):
