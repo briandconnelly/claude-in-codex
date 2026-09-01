@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from pontonier.core import redaction as _redaction
 
-from claude_in_codex.config import git_timeout_seconds
+from claude_in_codex.config import git_timeout_seconds, unencodable_reason
 from claude_in_codex.schemas import ContextSummary
 
 MAX_DIFF_BYTES = 200_000
@@ -148,6 +148,12 @@ def normalize_paths(paths: list[str] | None) -> list[str] | None:
             raise InvalidPathsError(f"path must be repo-relative: {path!r}")
         if any(segment == ".." for segment in path.split("/")):
             raise InvalidPathsError(f"path must not contain '..' segments: {path!r}")
+        # Not a policy rule like the ones above: git argv is encoded strictly, so a
+        # path with no UTF-8 encoding raises UnicodeEncodeError inside subprocess,
+        # outside this module's error taxonomy. Refuse it here, where the caller
+        # still gets invalid_paths (#140).
+        if unencodable_reason(path) is not None:
+            raise InvalidPathsError(f"path is not valid UTF-8 (lone surrogate): {path!r}")
         normalized.append(path)
     return normalized
 

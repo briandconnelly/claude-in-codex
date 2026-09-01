@@ -20,9 +20,10 @@ from claude_in_codex.config import (
     compose_system_prompt,
     config_mode_flags,
     is_env_placeholder,
+    unencodable_reason,
 )
 from claude_in_codex.context import sanitize_echo_prose
-from claude_in_codex.schemas import ErrorInfo
+from claude_in_codex.schemas import ErrorDetails, ErrorInfo
 
 _BUDGET_REPAIR = (
     "Before making another call, raise max_budget_usd (up to $5.00) or narrow the "
@@ -30,6 +31,10 @@ _BUDGET_REPAIR = (
     "small prompts, try at least $0.10-$0.20; lower best-effort budgets can spend "
     "and still stop before a useful answer."
 )
+# Carried on `ClaudeRun.stderr`, like "claude_not_found": the field is the runner's
+# channel for a failure that never produced real stderr, and `classify_failure` keys
+# on it. Never a substring of real CLI output.
+_UNENCODABLE_SENTINEL = "unencodable_input"
 _LOGIN_MODES = frozenset({"inherit", "scoped", "safe"})
 _LOGIN_CREDENTIAL_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
@@ -181,6 +186,16 @@ async def run_claude_async(
     timeout OR an MCP request cancellation, we can terminate the whole tree
     rather than orphaning a paid Claude run."""
     start = time.monotonic()
+    # Backstop, not the primary guard: every caller-supplied field is refused at the
+    # server boundary before it reaches here (#140). This catches whatever a boundary
+    # check misses -- composed prompt text no single field owns, a future call site
+    # added without the check -- because the alternative is not a clean failure. Both
+    # channels are strict: `Popen` encodes argv, and `communicate()` encodes stdin
+    # under `encoding="utf-8"` with the default strict codec. The stdin raise is the
+    # dangerous one: it lands AFTER the child is spawned, so the exception escapes the
+    # error contract and orphans the process. Checking before the spawn removes both.
+    if any(unencodable_reason(part) for part in (*cmd, stdin_text or "")):
+        return ClaudeRun("", _UNENCODABLE_SENTINEL, -1, 0, False)
     try:
         proc = subprocess.Popen(
             cmd,
@@ -277,6 +292,17 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     safe_stderr = sanitize_echo_prose(run.stderr)
     with contextlib.suppress(json.JSONDecodeError, ValueError, TypeError):
         env = json.loads(run.stdout)
+    if run.stderr == _UNENCODABLE_SENTINEL:
+        # Same reason token the request-boundary refusal uses: an agent that has
+        # learned to branch on `unencodable_text` must not need a second branch
+        # because the backstop caught what the boundary missed.
+        return ErrorInfo(
+            code="invalid_arguments",
+            message="The composed request contains text with no UTF-8 encoding "
+            "(an unpaired surrogate), which cannot be sent to claude.",
+            repair="Remove unpaired surrogates from the request text, then retry.",
+            details=ErrorDetails(reason="unencodable_text"),
+        )
     if run.stderr == "claude_not_found":
         return ErrorInfo(
             code="claude_not_found",

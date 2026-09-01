@@ -124,6 +124,24 @@ _MARKER_PATTERN = re.compile(
 )
 
 
+def unencodable_reason(text: str) -> str | None:
+    """Why `text` has no UTF-8 encoding, or None when it has one.
+
+    A lone surrogate is schema-valid JSON and a valid `str`, but strict UTF-8
+    refuses it. Everything this server sends Claude is encoded strictly somewhere:
+    the prompt over the runner's stdin (`Popen(text=True, encoding="utf-8")`), the
+    system prompt through argv, path filters through git argv. None of those raises
+    are classified, so text that reaches them fails outside the error contract —
+    for the stdin path, after the call is committed and paid (#140). Every boundary
+    that accepts caller text calls this, directly or through
+    `argv_unsafe_reason`."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return "is not valid UTF-8 (lone surrogate)"
+    return None
+
+
 def argv_unsafe_reason(text: str) -> str | None:
     """Why `text` cannot ride argv, or None when it can.
 
@@ -131,14 +149,14 @@ def argv_unsafe_reason(text: str) -> str | None:
     raises `ValueError` on an embedded NUL and `UnicodeEncodeError` on a lone
     surrogate, neither of which the runner classifies — so a schema-valid request
     would fail unstructured, after validation, and in the async path before a
-    job record exists. Both boundaries (server and adapter) call this first."""
+    job record exists. Both boundaries (server and adapter) call this first.
+
+    Strictly wider than `unencodable_reason`: argv rejects a NUL that UTF-8
+    encodes without complaint, so the argv-borne field needs both checks and a
+    stdin-borne field needs only the encoding one."""
     if "\x00" in text:
         return "contains a NUL byte"
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return "is not valid UTF-8 (lone surrogate)"
-    return None
+    return unencodable_reason(text)
 
 
 def contains_framing_marker(text: str) -> bool:

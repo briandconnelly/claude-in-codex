@@ -576,7 +576,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-39"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-40"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1248,7 +1248,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-39"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-40"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -5282,10 +5282,10 @@ def test_focus_cap_measures_unencodable_text_without_raising(label, focus):
     Measuring the cap with a bare `.encode()` raised here and escaped the structured
     error contract entirely; `_utf8_len` counts the replacement instead.
 
-    Such text still fails later, unstructured, when the prompt is written to the
-    runner's stdin -- that is equally true of `prompt`/`context`/`target`/`evidence`
-    and is not this guard's to fix. What is fixed is that the CAP no longer adds an
-    earlier crash of its own."""
+    The text itself is now refused by `_validate_user_text` at the call site (#140),
+    but this cap must still be unable to raise: it runs first, and a guard that
+    crashes while measuring cannot hand off to the guard that would have refused
+    cleanly."""
     import claude_in_codex.server as srv
     from claude_in_codex.config import MAX_FOCUS_BYTES
 
@@ -5469,3 +5469,128 @@ async def test_review_changes_keeps_meta_focus_when_the_run_fails(monkeypatch, g
         )
     assert data["ok"] is False
     assert data["meta"]["focus"] == "security"
+
+
+@pytest.mark.parametrize(
+    ("tool", "field", "extra"),
+    [
+        ("claude_consult", "prompt", {}),
+        ("claude_consult", "context", {"prompt": "x"}),
+        ("claude_consult_async", "prompt", {}),
+        ("claude_review_changes", "focus", {"scope": "working_tree"}),
+        ("claude_review_changes_async", "focus", {"scope": "working_tree"}),
+        ("claude_adversarial_review", "target", {"evidence": "e"}),
+        ("claude_adversarial_review", "evidence", {"target": "t"}),
+        ("claude_adversarial_review_async", "target", {"evidence": "e"}),
+    ],
+)
+async def test_unencodable_user_text_is_refused_before_spend(
+    monkeypatch, git_repo, tool, field, extra
+):
+    """A lone surrogate is schema-valid JSON that strict UTF-8 refuses to encode.
+
+    Every free-form field rides the runner's stdin, where `communicate()` raised
+    UnicodeEncodeError *after* the call was committed -- a paid path failing outside
+    the structured contract, with nothing for a caller branching on `ok` to read.
+    Refuse it at the boundary instead, with a reason token that does not claim argv
+    is the constraint (these fields do not ride argv; `system_prompt_append` does,
+    and keeps `argv_unsafe_text`)."""
+    import claude_in_codex.server as srv
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    args = {"workspace_root": str(git_repo), field: json.loads('"security\\ud800"'), **extra}
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool(tool, args, raise_on_error=False))
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_arguments"
+    assert data["error"]["details"]["field"] == field
+    assert data["error"]["details"]["reason"] == "unencodable_text"
+
+
+async def test_unencodable_path_filter_is_refused_as_invalid_paths(monkeypatch, git_repo):
+    """`paths` reaches git argv rather than the prompt, so it fails earlier and
+    unpaid -- but just as unstructured. It already has a taxonomy entry; use it."""
+    import claude_in_codex.server as srv
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("paid call should not run")
+
+    monkeypatch.setattr(srv, "run_claude_async", fail_run)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "working_tree",
+                    "workspace_root": str(git_repo),
+                    "paths": [json.loads('"src/x\\ud800"')],
+                },
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_paths"
+
+
+def test_emittable_replaces_unencodable_text_anywhere_in_the_envelope():
+    """A structured refusal that cannot be serialized is not a refusal. The walk
+    must reach nested dicts and lists, because that is where the echoes live
+    (meta.paths, error.details.value)."""
+    import claude_in_codex.server as srv
+
+    bad = json.loads('"src/x\\ud800"')
+    payload = srv._emittable(
+        {"ok": False, "meta": {"paths": [bad]}, "error": {"details": {"value": bad}}}
+    )
+    json.dumps(payload).encode("utf-8")  # must not raise
+    assert payload["meta"]["paths"] == ["src/x\\ud800"]
+    assert payload["error"]["details"]["value"] == "src/x\\ud800"
+
+
+def test_emittable_replaces_unencodable_dictionary_keys():
+    """`RepairAction.arguments` is keyed by the caller's own argument names, so an
+    unencodable KEY breaks serialization exactly as an unencodable value does. Without
+    this the envelope guarantee held only because the transport happened to sanitize
+    argument names first -- a property of the client, not of this server."""
+    import claude_in_codex.server as srv
+
+    payload = srv._emittable(
+        {"error": {"action": {"arguments": {json.loads('"bad\\ud800"'): "x"}}}}
+    )
+    json.dumps(payload).encode("utf-8")  # must not raise
+    assert list(payload["error"]["action"]["arguments"]) == ["bad\\ud800"]
+
+
+async def test_runner_backstop_reports_the_boundary_reason_token(monkeypatch, tmp_path):
+    """The backstop's envelope must be indistinguishable from the boundary's in the
+    field an agent branches on. Asserting ErrorInfo.code alone would not have caught
+    that `_execute` dropped the classifier's typed details on the floor."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
+
+    async def unencodable(*args, **kwargs):
+        return ClaudeRun("", "unencodable_input", -1, 0, False)
+
+    monkeypatch.setattr(srv, "run_claude_async", unencodable)
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_consult",
+                {"prompt": "x", "workspace_root": str(tmp_path)},
+                raise_on_error=False,
+            )
+        )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_arguments"
+    assert data["error"]["details"]["reason"] == "unencodable_text"
+
+
+def test_emittable_returns_clean_strings_unchanged():
+    """The control for the test above: without this, a walk that replaced nothing
+    and a walk that ran on nothing would look identical."""
+    import claude_in_codex.server as srv
+
+    assert srv._emittable({"a": ["émoji 🦓", None, 3, True]}) == {"a": ["émoji 🦓", None, 3, True]}

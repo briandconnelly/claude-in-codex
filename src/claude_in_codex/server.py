@@ -52,6 +52,7 @@ from claude_in_codex.config import (
     safe_available,
     sanitize_effort,
     supported_majors,
+    unencodable_reason,
     version_supported,
     workspace_hook_settings,
 )
@@ -237,13 +238,52 @@ _ASYNC_START_ANNOTATIONS = {
 }
 
 
+def _emittable(value):
+    """`value` with every unencodable character replaced by its `\\uXXXX` escape.
+
+    The last of the three places unencodable caller text could fail unstructured
+    (#140). The other two are requests — refused at the boundary — but a field the
+    server ECHOES has already been accepted, and some are echoed by an error
+    envelope built precisely because the value was bad: `meta.paths` is recorded
+    from the raw argument before `normalize_paths` rejects it, and
+    `ErrorDetails.value` renders a rejected string as-is. Serializing either raises
+    inside FastMCP, replacing a structured refusal with the unstructured failure the
+    refusal existed to prevent.
+
+    An escape rather than `?` or a dropped field: an echo exists so the caller can
+    see what it sent, and `backslashreplace` names the exact offending code point --
+    the same rendering `repr()` gives it in the messages next to it. The accompanying
+    message and repair name the cause."""
+    if isinstance(value, str):
+        # Fast path: the overwhelming majority of strings encode cleanly, and
+        # re-decoding a large diff for nothing is pure cost.
+        if unencodable_reason(value) is None:
+            return value
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    if isinstance(value, dict):
+        # Keys, not just values: `RepairAction.arguments` is built from the caller's
+        # own argument names, so an unencodable KEY is as fatal to serialization as
+        # an unencodable value, and a walk that skipped them would leave the
+        # guarantee above true only by luck. Two keys could in principle escape to
+        # the same string; that degrades one echoed argument name, which is strictly
+        # better than emitting no envelope at all.
+        return {_emittable(k): _emittable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_emittable(v) for v in value]
+    return value
+
+
 def _result(payload: dict) -> ToolResult:
     """Wrap a normalized payload as a ToolResult, flagging error envelopes.
 
     Keeps the structured ok:true|false contract intact AND sets the native
     is_error flag for ok:false, so clients that branch on is_error (not just the
     `ok` field) detect failures.
+
+    Every envelope passes `_emittable` first: a response that cannot be serialized
+    is not an error envelope, it is no envelope at all (#140).
     """
+    payload = _emittable(payload)
     return ToolResult(structured_content=payload, is_error=payload.get("ok") is False)
 
 
@@ -720,7 +760,36 @@ def _utf8_len(value: str | None) -> int:
     return len((value or "").encode("utf-8", "replace"))
 
 
-def _validate_input_size(fields: dict[str, str | None], meta: Meta) -> dict | None:
+def _validate_user_text(fields: dict[str, str | None], meta: Meta) -> dict | None:
+    """The one gate every caller-authored free-form field passes: encodable, then
+    within the operator's total byte budget.
+
+    Encodability comes first because it is the harder failure. A lone surrogate is
+    schema-valid JSON and a valid `str`, so it clears the inputSchema, clears the
+    per-field caps (`_utf8_len` counts it with `errors="replace"` precisely so a
+    ceiling check cannot raise), and then has no UTF-8 encoding when the composed
+    prompt is written to the runner's stdin. That raise used to land AFTER the call
+    was committed, so a PAID path failed outside the structured contract and an agent
+    branching on `ok` had nothing to read (#140). Refusing here makes it a pre-spend
+    `invalid_arguments` like any other bad argument.
+
+    The reason token is `unencodable_text`, not the `argv_unsafe_text` that
+    `system_prompt_append` gets: these fields ride stdin, and a reason naming argv
+    would send a caller looking at the wrong constraint. NUL is likewise absent
+    here — argv rejects it, UTF-8 does not, and this gate speaks for the stdin
+    path."""
+    for name, value in fields.items():
+        if value is None or unencodable_reason(value) is None:
+            continue
+        return _err(
+            "invalid_arguments",
+            f"{name} is not valid UTF-8 (lone surrogate); the text cannot be encoded "
+            "for the request sent to claude.",
+            f"Remove unpaired surrogates from {name}, then retry.",
+            meta,
+            offending=name,
+            details=ErrorDetails(reason="unencodable_text"),
+        )
     limit = max_input_bytes()
     total = sum(_utf8_len(value) for value in fields.values())
     if total <= limit:
@@ -849,7 +918,7 @@ def _validate_system_prompt_append(text: str | None, meta) -> dict | None:
         # The fixed cap is a ceiling; the operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES
         # bounds everything caller-authored that reaches Anthropic, and this text
         # does. Check it here so every tool that accepts the parameter honours it.
-        return _validate_input_size({"system_prompt_append": text}, meta)
+        return _validate_user_text({"system_prompt_append": text}, meta)
     return _err(
         "invalid_arguments",
         f"system_prompt_append is {size} bytes; the cap is {MAX_SYSTEM_PROMPT_APPEND_BYTES}.",
@@ -876,12 +945,12 @@ def _validate_focus(text: str | None, meta) -> dict | None:
     character-length check, and through `_utf8_len` rather than a bare `.encode()`:
     a lone surrogate is schema-valid JSON that strict UTF-8 refuses to encode, so
     measuring it strictly would raise here and escape the structured error contract.
-    Counting it as its replacement is enough for a ceiling. (Such text still fails
-    later, unstructured, when the prompt is written to the runner's stdin -- that is
-    true of `prompt`, `context`, `target`, and `evidence` too, and is not this
-    function's to fix.) Both bounds apply: this fixed per-field ceiling here, and the
-    operator's CLAUDE_IN_CODEX_MAX_INPUT_BYTES over the summed caller text at the call
-    site."""
+    Counting it as its replacement is enough for a ceiling. Such text is refused
+    outright -- for `focus` and for `prompt`/`context`/`target`/`evidence` alike -- by
+    `_validate_user_text` at the call site (#140); this cap stays deliberately
+    unable to raise so the two guards cannot fight over which reports first. Both
+    bounds apply: this fixed per-field ceiling here, and the operator's
+    CLAUDE_IN_CODEX_MAX_INPUT_BYTES over the summed caller text at the call site."""
     if text is None:
         return None
     if contains_framing_marker(text):
@@ -1248,7 +1317,14 @@ async def _execute(
         if isinstance(env, dict):
             apply_cost_usage(meta, env)
         info = classify_failure(run, config_mode=r.config_mode)
-        return _err(info.code, info.message, info.repair, meta, retryable=info.retryable)
+        return _err(
+            info.code,
+            info.message,
+            info.repair,
+            meta,
+            retryable=info.retryable,
+            details=info.details,
+        )
     return normalize_envelope(
         tool, run.stdout, meta, detail=r.detail, context_summary=context_summary
     )
@@ -1332,7 +1408,7 @@ async def claude_consult(
         configured_budget=r.configured_budget,
         effective_budget=r.budget,
     )
-    too_large = _validate_input_size(
+    too_large = _validate_user_text(
         {**payload, "system_prompt_append": r.system_prompt_append}, meta
     )
     if too_large:
@@ -1469,7 +1545,7 @@ async def claude_review_changes(
     forged_focus = _validate_focus(focus, meta)
     if forged_focus:
         return _result(forged_focus)
-    too_large = _validate_input_size(
+    too_large = _validate_user_text(
         {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
     )
     if too_large:
@@ -1668,7 +1744,7 @@ async def claude_adversarial_review(
                 "head requires scope=branch on claude_adversarial_review.",
             )
         )
-    too_large = _validate_input_size(payload_text, meta)
+    too_large = _validate_user_text(payload_text, meta)
     if too_large:
         return _result(too_large)
     context_text = ""
@@ -2138,7 +2214,7 @@ async def claude_review_changes_async(
     forged_focus = _validate_focus(focus, meta)
     if forged_focus:
         return _result(forged_focus)
-    too_large = _validate_input_size(
+    too_large = _validate_user_text(
         {"focus": focus, "system_prompt_append": r.system_prompt_append}, meta
     )
     if too_large:
@@ -2351,7 +2427,7 @@ async def claude_consult_async(
     legacy = await _legacy_keyed_job(cwd, idempotency_key)
     if legacy is not None:
         return _result(_legacy_key_error(legacy, cwd, meta))
-    too_large = _validate_input_size(
+    too_large = _validate_user_text(
         {**payload, "system_prompt_append": r.system_prompt_append}, meta
     )
     if too_large:
@@ -2517,7 +2593,7 @@ async def claude_adversarial_review_async(
                 meta, "head requires scope=branch on claude_adversarial_review_async."
             )
         )
-    too_large = _validate_input_size(payload_text, meta)
+    too_large = _validate_user_text(payload_text, meta)
     if too_large:
         return _result(too_large)
     context_text = ""
@@ -3315,9 +3391,11 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
     ),
     (
         "invalid_arguments",
-        "An argument failed the tool's inputSchema before the body ran.",
+        "An argument failed the tool's inputSchema, or a body check the schema "
+        "cannot express: unencodable text, argv-unsafe bytes, a forged framing "
+        "marker, or a per-field byte cap.",
         False,
-        ["field", "value", "allowed_values"],
+        ["field", "value", "reason", "allowed_values", "limit_bytes", "actual_bytes"],
     ),
     (
         "invalid_scope",
