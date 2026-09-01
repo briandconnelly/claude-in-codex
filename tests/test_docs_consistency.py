@@ -2,7 +2,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from fastmcp import Client
+from tests.support import Client
 
 from claude_in_codex import __version__
 from claude_in_codex.schemas import FINGERPRINT
@@ -59,7 +59,7 @@ async def test_serverinfo_version_matches_the_release_lockstep():
     """
     declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     async with Client(mcp) as client:
-        reported = client.initialize_result.serverInfo.version
+        reported = client.server_info.version
 
     assert __version__ == declared
     assert reported == declared

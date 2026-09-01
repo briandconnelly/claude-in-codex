@@ -14,23 +14,32 @@ internal-only refactor does not.
 When this test fails on an intentional contract change:
   1. bump FINGERPRINT in src/claude_in_codex/schemas.py (the `schema-NN` suffix), and
   2. update EXPECTED_CONTRACT_DIGEST below to the printed `actual` value.
+
+Records are dumped `by_alias=True` so the digest covers the WIRE shape (the
+camelCase keys and `_meta` a client actually receives), not the SDK's Python
+field names — MCP SDK v2 renamed those to snake_case while keeping the wire
+format, and a digest of field names would move on a framework upgrade that
+changed nothing an agent can see. The FastMCP 3 -> 4 upgrade moved this digest
+for that reason first (the by-alias surface was compared byte-for-byte against
+the 3.4.7 build and found identical) and then for a real contract change: the
+workspace_root descriptions now state that sessionless connections must pass it.
 """
 
 import hashlib
 import json
 from typing import get_args
 
-from fastmcp import Client
+from tests.support import Client
 
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "0cb99e6322dc627dfd443c5a77606992e8f17f203bce512491be15920a41b663"
+EXPECTED_CONTRACT_DIGEST = "c3abe58339ff307c256eadaca8d28de09e003fc2ca6a33a1339af3f2c11dfbf5"
 
 
 async def _contract_surface() -> dict:
     async with Client(mcp) as client:
-        server_info = client.initialize_result.serverInfo.model_dump(mode="json", exclude_none=True)
+        server_info = client.server_info.model_dump(mode="json", exclude_none=True, by_alias=True)
         tools = await client.list_tools()
         resources = await client.list_resources()
         templates = await client.list_resource_templates()
@@ -53,12 +62,20 @@ async def _contract_surface() -> dict:
         # ({"fastmcp": {"tags": []}}) across every tool/resource in this server
         # and free of any fastmcp-version string, so it is stable contract shape,
         # not framework noise.
-        "tools": {t.name: t.model_dump(mode="json", exclude_none=True) for t in tools},
-        "resources": {str(r.uri): r.model_dump(mode="json", exclude_none=True) for r in resources},
-        "resource_templates": {
-            str(t.uriTemplate): t.model_dump(mode="json", exclude_none=True) for t in templates
+        "tools": {
+            t.name: t.model_dump(mode="json", exclude_none=True, by_alias=True) for t in tools
         },
-        "prompts": {p.name: p.model_dump(mode="json", exclude_none=True) for p in prompts},
+        "resources": {
+            str(r.uri): r.model_dump(mode="json", exclude_none=True, by_alias=True)
+            for r in resources
+        },
+        "resource_templates": {
+            str(t.uri_template): t.model_dump(mode="json", exclude_none=True, by_alias=True)
+            for t in templates
+        },
+        "prompts": {
+            p.name: p.model_dump(mode="json", exclude_none=True, by_alias=True) for p in prompts
+        },
         "capabilities": capabilities,
         "error_codes": sorted(get_args(schemas.ErrorCode)),
         "capability_summary": CAPABILITY_SUMMARY,

@@ -7,6 +7,32 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Upgraded to FastMCP 4 (4.0.0), which is built on the MCP Python SDK v2 (2.1.1,
+  now declared directly since the server imports it). The framework upgrade itself
+  leaves the agent-visible contract untouched: the wire-shaped `tools/list`,
+  resource, resource-template, prompt, and `serverInfo` records were compared
+  byte-for-byte against the 3.4.7 build and found identical. Underneath, the SDK v2
+  renames model fields to snake_case in Python while keeping the camelCase wire
+  aliases, removes `Context.list_roots()`, and adds the sessionless MCP 2026-07-28
+  era, which the server now serves alongside the 2025-11-25 handshake the Codex
+  CLI negotiates. `_file_roots` asks the session directly (`roots/list`), so
+  `workspace_root` defaulting and the `workspace_outside_roots` containment check
+  behave exactly as before on handshake-era connections. A 2026-07-28 connection
+  has no back-channel for server-initiated requests, so the server cannot tell
+  "no roots" from "roots it cannot see"; rather than silently reviewing its own
+  cwd or skipping containment there, an omitted `workspace_root` on such a
+  connection is an `invalid_workspace_root` error before any spend
+  (`details.reason: roots_unavailable_on_connection`), and an explicit
+  `workspace_root` is accepted with the same standing as one from a client that
+  offered no roots. The `workspace_root` descriptions and the shipped skill say
+  so. Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-42`.
+  Guard-pattern roots for that era are tracked in #151. Test-side, the suite's
+  `Client` defaults to the handshake era the target host speaks (sessionless
+  tests opt in explicitly), the contract-fingerprint and discovery-cost checks dump
+  models `by_alias=True` so they measure the wire shape rather than Python field
+  names (`EXPECTED_CONTRACT_DIGEST` moved for that reason alone), and the suite
+  runs with FastMCP's camelCase compatibility bridge disabled so a bridged read
+  fails outright instead of surviving on a shim scheduled for removal.
 - `paths` values no longer reach Claude inside a sentence written in the server's own
   voice. The prompt used to interpolate the caller's path list through `repr()`, and
   `repr()` is a Python-literal escape, not a boundary against a model: it escapes

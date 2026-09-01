@@ -4,8 +4,8 @@ import shutil
 import subprocess
 
 import pytest
-from fastmcp import Client
 from tests.conftest import structured
+from tests.support import Client
 
 from claude_in_codex.server import mcp
 

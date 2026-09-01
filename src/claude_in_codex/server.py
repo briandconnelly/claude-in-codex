@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal, cast, get_args
 from urllib.parse import unquote, urlparse
@@ -16,6 +17,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from mcp.shared.exceptions import MCPDeprecationWarning, NoBackChannelError
 from pontonier.backend.protocol import RunRequest
 from pydantic import Field, ValidationError
 
@@ -124,15 +126,16 @@ CAPABILITY_SUMMARY = (
     "adversarial plan review, and second opinions. The server grants no Bash/write "
     "tools and never proxies Claude's own MCP tools, but workspace hooks may run "
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
-    "config_mode=bare disable hooks. Paid tools send context to Anthropic; call "
-    "claude_status before spending. Use claude_models to discover valid model slugs. "
+    "config_mode=bare disable hooks. Paid tools send context to Anthropic; check "
+    "claude_status first. claude_models lists model slugs. "
     "Paid tools have claude_*_async forms (deprecated aliases do not): a job_id to "
     "poll/result/cancel, absent on an empty diff. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
-    "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
+    "workspace_root: first MCP root else cwd, required when sessionless (2026-07-28); "
+    "with roots must be inside. "
     "toolless default; readonly lets Claude read files, bypassing diff redaction. "
-    "Tool semantic and argument-validation failures return isError:true with an "
+    "Semantic and argument-validation failures return isError:true with an "
     "ok:false envelope (code/message/repair) in structuredContent. "
     "system_prompt_append adds caller text behind the always-leading guardrails; "
     "grants no tools; hashed into meta. "
@@ -679,6 +682,17 @@ def _workspace_error(
                 arguments={"workspace_root": roots[0]} if roots else None,
             ),
         )
+    if workspace_root is None and roots is None:
+        return _err(
+            code,
+            "No default workspace: this connection cannot be asked for MCP roots "
+            "(sessionless MCP 2026-07-28 has no back-channel for roots/list), and "
+            "the server does not fall back to its own cwd there.",
+            "Pass workspace_root as an absolute path to an existing directory.",
+            meta,
+            details=ErrorDetails(field="workspace_root", reason="roots_unavailable_on_connection"),
+            action=RepairAction(next_step="retry_with_changes"),
+        )
     if workspace_root is None:
         return _err(
             code,
@@ -687,29 +701,52 @@ def _workspace_error(
             "or configure an MCP root that points at an existing directory.",
             meta,
         )
+    # roots is None only when the connection cannot be asked for roots, where
+    # "configure an MCP root" is advice the caller cannot act on.
+    repair = "Pass workspace_root as an absolute path to an existing directory"
+    repair += "." if roots is None else ", or configure an MCP root."
     return _err(
         code,
         f"workspace_root '{workspace_root}' is not an existing absolute directory.",
-        "Pass workspace_root as an absolute path to an existing directory, or "
-        "configure an MCP root.",
+        repair,
         meta,
         offending="workspace_root",
     )
 
 
-async def _file_roots(ctx) -> list[str]:
+async def _file_roots(ctx) -> list[str] | None:
     """Return filesystem paths from the client's file:// roots.
 
-    Returns [] if the client provides no roots or does not support the roots
-    capability (list_roots raises)."""
+    FastMCP 4 removed `Context.list_roots()`; the MCP SDK v2 session still
+    serves `roots/list` on handshake-era connections (MCP <= 2025-11-25, the era
+    Codex negotiates), so the request goes through `ctx.session`. Returns []
+    when the client provides no roots or does not support the roots capability.
+
+    Returns None when the connection cannot be asked at all: the sessionless
+    2026-07-28 era has no back-channel for server-initiated requests, and the
+    SDK raises NoBackChannelError. That is distinct from "no roots" on purpose —
+    the client may well have roots the server cannot see, so the resolver must
+    not fall back to its own cwd or skip containment as if none existed. Roots
+    on that era need the guard pattern (InputRequiredResult), tracked in #151;
+    until then such a connection has to pass workspace_root explicitly."""
     if ctx is None:
         return []
     try:
-        roots = await ctx.list_roots()
+        with warnings.catch_warnings():
+            # The SDK deprecates the roots capability as of 2026-07-28 and warns
+            # on every roots/list; this call is the deliberate handshake-era path.
+            # `@deprecated` warns when the coroutine is created, so only that
+            # synchronous step sits inside the filter — the await runs outside it
+            # and cannot swallow another task's warnings.
+            warnings.simplefilter("ignore", MCPDeprecationWarning)
+            pending = ctx.session.list_roots()
+        listed = await pending
+    except NoBackChannelError:
+        return None
     except Exception:
         return []
     paths = []
-    for root in roots or []:
+    for root in getattr(listed, "roots", None) or []:
         uri = str(getattr(root, "uri", ""))
         if uri.startswith("file://"):
             paths.append(unquote(urlparse(uri).path))
@@ -718,7 +755,7 @@ async def _file_roots(ctx) -> list[str]:
 
 async def _first_root(ctx) -> str | None:
     roots = await _file_roots(ctx)
-    return roots[0] if roots else None
+    return roots[0] if roots else None  # None (unaskable) and [] both mean no default
 
 
 def _contained_by(path: str, root: str) -> bool:
@@ -734,11 +771,25 @@ async def _resolve_workspace(workspace_root, ctx):
     """Resolve the workspace directory.
 
     Order: explicit workspace_root arg -> first file:// MCP root -> os.getcwd().
-    Returns (path, error_code, source). error_code is None on success; on failure
-    path is None and source is None. `roots` is the snapshot used for the
+    Returns (path, error_code, source, roots). error_code is None on success; on
+    failure path is None and source is None. `roots` is the snapshot used for the
     containment check, returned so the error builder can name the allowed roots
-    without asking the client again."""
+    without asking the client again.
+
+    On a connection that cannot be asked for roots (`_file_roots` -> None), an
+    omitted workspace_root is an error rather than a cwd fallback: the server
+    cannot tell "no roots" from "roots it cannot see", and the tool description
+    promises the first root, so the only honest default there is none. An
+    explicit workspace_root is accepted without containment — the same standing
+    as a client that never offered roots — and `roots` stays None on every
+    return so the error builder can name the actual cause and never suggests
+    configuring an MCP root the connection cannot deliver."""
     roots = await _file_roots(ctx)
+    if roots is None and not workspace_root:
+        return None, "invalid_workspace_root", None, None
+    # roots stays None past this point on an unaskable connection: the checks
+    # below treat it as "nothing to contain against", and the error builder
+    # reads it as "do not suggest configuring an MCP root".
     if workspace_root:
         path, source = workspace_root, "param"
     else:
@@ -1340,8 +1391,8 @@ async def claude_consult(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace to operate in. If omitted, "
-            "the server uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
@@ -1459,8 +1510,8 @@ async def claude_review_changes(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace to operate in. If omitted, "
-            "the server uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
@@ -1658,8 +1709,8 @@ async def claude_adversarial_review(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace to operate in. If omitted, "
-            "the server uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
@@ -2138,8 +2189,8 @@ async def claude_review_changes_async(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace to operate in. If omitted, "
-            "the server uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
@@ -2373,8 +2424,8 @@ async def claude_consult_async(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace to operate in. If omitted, "
-            "the server uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
@@ -2522,8 +2573,8 @@ async def claude_adversarial_review_async(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace to operate in. If omitted, "
-            "the server uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     config_mode: Annotated[ConfigMode | None, Field(description="inherit|scoped|safe|bare")] = None,
@@ -2951,8 +3002,8 @@ async def claude_dry_run(
     workspace_root: Annotated[
         str | None,
         Field(
-            description="Absolute path to the repo/workspace. If omitted, the server "
-            "uses the client's first MCP root, else its own cwd."
+            description="Absolute repo/workspace path. If omitted: first MCP root, else "
+            "server cwd; sessionless (MCP 2026-07-28) connections must pass it."
         ),
     ] = None,
     ctx: Context | None = None,

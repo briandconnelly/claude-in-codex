@@ -3,15 +3,17 @@ import inspect
 import json
 import time
 import types
+import warnings
 from typing import Literal, get_args
 
 import anyio
 import pytest
-from fastmcp import Client
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
+from mcp.shared.exceptions import MCPDeprecationWarning, NoBackChannelError
 from pydantic import ValidationError as PydanticValidationError
 from pydantic import create_model
 from tests.conftest import structured
+from tests.support import Client
 
 from claude_in_codex import __version__
 from claude_in_codex import claude as claude_mod
@@ -27,6 +29,7 @@ from claude_in_codex.server import (
     _capabilities_payload,
     _first_root,
     _resolve_workspace,
+    _workspace_error,
     mcp,
 )
 
@@ -94,16 +97,25 @@ def _patch_full_flag_support(monkeypatch):
 
 
 class _FakeRoots:
-    """Minimal stand-in for a FastMCP Context exposing list_roots()."""
+    """Minimal stand-in for a FastMCP Context whose session serves roots/list.
 
-    def __init__(self, uris=None, raises=False):
+    Mirrors the SDK v2 shape `_file_roots` reads: `ctx.session.list_roots()`
+    returns a ListRootsResult-like object with a `.roots` list of Root-like
+    objects carrying `.uri`."""
+
+    def __init__(self, uris=None, raises=False, no_backchannel=False):
         self._uris = uris or []
         self._raises = raises
+        self._no_backchannel = no_backchannel
+        self.session = self
 
     async def list_roots(self):
+        if self._no_backchannel:
+            raise NoBackChannelError("roots/list")
         if self._raises:
             raise RuntimeError("client does not support roots")
-        return [type("R", (), {"uri": u})() for u in self._uris]
+        roots = [type("Root", (), {"uri": u})() for u in self._uris]
+        return type("ListRootsResult", (), {"roots": roots})()
 
 
 async def test_first_root_returns_path_from_file_uri():
@@ -113,6 +125,51 @@ async def test_first_root_returns_path_from_file_uri():
 
 async def test_first_root_none_when_unsupported():
     assert await _first_root(_FakeRoots(raises=True)) is None
+
+
+async def test_first_root_none_when_connection_has_no_backchannel():
+    assert await _first_root(_FakeRoots(no_backchannel=True)) is None
+
+
+async def test_resolve_workspace_requires_param_when_roots_cannot_be_asked(tmp_path):
+    """A connection with no back-channel (sessionless MCP 2026-07-28) is not a
+    client without roots: the server cannot see roots the client may have, so an
+    omitted workspace_root fails closed instead of falling back to cwd. `roots`
+    comes back None (not []) so the error names the real cause."""
+    path, err, source, roots = await _resolve_workspace(None, _FakeRoots(no_backchannel=True))
+    assert (path, err, source, roots) == (None, "invalid_workspace_root", None, None)
+    # An explicit absolute directory is accepted with no containment to enforce;
+    # roots stays None rather than becoming "no roots".
+    path, err, source, roots = await _resolve_workspace(
+        str(tmp_path), _FakeRoots(no_backchannel=True)
+    )
+    assert (path, err, source, roots) == (str(tmp_path), None, "param", None)
+    # An explicit but invalid path fails as usual, and the repair cannot suggest
+    # configuring an MCP root on a connection that cannot deliver one.
+    path, err, source, roots = await _resolve_workspace(
+        "relative/dir", _FakeRoots(no_backchannel=True)
+    )
+    assert (path, err, source, roots) == (None, "invalid_workspace_root", None, None)
+    envelope = _workspace_error(err, "relative/dir", roots)
+    assert envelope["error"]["details"]["field"] == "workspace_root"
+    assert "MCP root" not in envelope["error"]["repair"]
+    # The same failure from a client that merely has no roots keeps that advice.
+    envelope = _workspace_error("invalid_workspace_root", "relative/dir", [])
+    assert "configure an MCP root" in envelope["error"]["repair"]
+
+
+async def test_sessionless_workspace_prerequisite_is_stated_consistently():
+    """The first-read contract (server instructions / capabilities summary) and
+    every workspace_root description must agree that sessionless connections
+    have to pass workspace_root, so an agent following either is never steered
+    into a guaranteed invalid_workspace_root."""
+    assert "sessionless" in CAPABILITY_SUMMARY
+    for name, tool in (await _tools_by_name()).items():
+        prop = tool.input_schema.get("properties", {}).get("workspace_root")
+        if prop is None:
+            continue
+        desc = prop["description"]
+        assert "sessionless" in desc or "defaults like the async tools" in desc, name
 
 
 async def test_first_root_skips_non_file_uris():
@@ -204,7 +261,7 @@ async def test_tools_publish_real_output_schema():
     # F1: the ok-discriminated contract must be in the schema, not just prose.
     tools = await _tools_by_name()
     for name in (*PAID_TOOLS, "claude_status"):
-        schema = tools[name].outputSchema
+        schema = tools[name].output_schema
         assert schema is not None
         assert schema != {"additionalProperties": True, "type": "object"}, name
         assert schema.get("type") == "object", name
@@ -213,7 +270,7 @@ async def test_tools_publish_real_output_schema():
 
 async def test_paid_tool_output_schema_describes_both_outcomes():
     # F1: success and error shapes are both discoverable from the schema.
-    schema = (await _tools_by_name())["claude_ask"].outputSchema
+    schema = (await _tools_by_name())["claude_ask"].output_schema
     blob = json.dumps(schema)
     assert "summary" in blob and "verdict" in blob  # success branch
     assert "error" in blob and "repair" in blob  # error branch
@@ -221,8 +278,8 @@ async def test_paid_tool_output_schema_describes_both_outcomes():
 
 async def test_fixed_value_inputs_use_enums():
     # F2: choices are JSON Schema enums, not prose like "inherit|scoped|safe|bare".
-    props = (await _tools_by_name())["claude_review_changes"].inputSchema["properties"]
-    dry_props = (await _tools_by_name())["claude_review_dry_run"].inputSchema["properties"]
+    props = (await _tools_by_name())["claude_review_changes"].input_schema["properties"]
+    dry_props = (await _tools_by_name())["claude_review_dry_run"].input_schema["properties"]
     assert props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert dry_props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert props["detail"]["enum"] == ["summary", "full"]
@@ -290,24 +347,24 @@ async def test_paid_tool_descriptions_disclose_hook_boundary():
 async def test_common_optional_params_are_described():
     tools = await _tools_by_name()
     for name in ("claude_ask", "claude_review_changes", "claude_adversarial_review"):
-        props = tools[name].inputSchema["properties"]
+        props = tools[name].input_schema["properties"]
         assert props["model"]["description"]
         assert props["max_budget_usd"]["description"]
         assert props["timeout_seconds"]["description"]
-    assert tools["claude_adversarial_review"].inputSchema["properties"]["base"]["description"]
+    assert tools["claude_adversarial_review"].input_schema["properties"]["base"]["description"]
     for name in (
         "claude_review_changes",
         "claude_review_changes_async",
         "claude_adversarial_review",
         "claude_review_dry_run",
     ):
-        assert tools[name].inputSchema["properties"]["paths"]["description"]
+        assert tools[name].input_schema["properties"]["paths"]["description"]
 
 
 async def test_paid_tools_publish_budget_bounds():
     tools = await _tools_by_name()
     for name in PAID_TOOLS:
-        prop = tools[name].inputSchema["properties"]["max_budget_usd"]
+        prop = tools[name].input_schema["properties"]["max_budget_usd"]
         number_schema = next(
             branch for branch in prop.get("anyOf", [prop]) if branch.get("type") == "number"
         )
@@ -576,7 +633,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-41"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-42"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -962,27 +1019,27 @@ async def test_paid_tools_declare_cost_safety_hints():
     for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann is not None, name
-        assert ann.readOnlyHint is False, name
-        assert ann.destructiveHint is True, name
-        assert ann.idempotentHint is False, name
+        assert ann.read_only_hint is False, name
+        assert ann.destructive_hint is True, name
+        assert ann.idempotent_hint is False, name
 
 
 async def test_job_tools_declare_state_hints():
     tools = await _tools_by_name()
-    assert tools["claude_review_changes_async"].annotations.readOnlyHint is False
-    assert tools["claude_review_changes_async"].annotations.idempotentHint is False
+    assert tools["claude_review_changes_async"].annotations.read_only_hint is False
+    assert tools["claude_review_changes_async"].annotations.idempotent_hint is False
     # Job polling performs lazy maintenance while reading (deadline kills,
     # TTL deletion), so it is not read-only, though it never alters a
     # terminal job's stored result.
-    assert tools["claude_job_status"].annotations.readOnlyHint is False
-    assert tools["claude_job_result"].annotations.readOnlyHint is False
+    assert tools["claude_job_status"].annotations.read_only_hint is False
+    assert tools["claude_job_result"].annotations.read_only_hint is False
     # Consume irreversibly deletes the stored record.
-    assert tools["claude_job_consume_result"].annotations.readOnlyHint is False
-    assert tools["claude_job_consume_result"].annotations.destructiveHint is True
-    assert tools["claude_job_consume_result"].annotations.idempotentHint is False
+    assert tools["claude_job_consume_result"].annotations.read_only_hint is False
+    assert tools["claude_job_consume_result"].annotations.destructive_hint is True
+    assert tools["claude_job_consume_result"].annotations.idempotent_hint is False
     # Cancel is idempotent: already-terminal jobs are returned unchanged.
-    assert tools["claude_job_cancel"].annotations.readOnlyHint is False
-    assert tools["claude_job_cancel"].annotations.idempotentHint is True
+    assert tools["claude_job_cancel"].annotations.read_only_hint is False
+    assert tools["claude_job_cancel"].annotations.idempotent_hint is True
 
 
 async def test_review_uses_workspace_root_over_cwd(fake_claude, monkeypatch, git_repo, tmp_path):
@@ -1018,7 +1075,7 @@ async def test_review_invalid_root_without_param_does_not_blame_workspace_root(
     fake_claude, tmp_path
 ):
     missing = tmp_path / "missing"
-    async with Client(mcp, roots=[missing.as_uri()]) as client:
+    async with Client(mcp, roots=[missing.as_uri()], mode="legacy") as client:
         result = await client.call_tool(
             "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
         )
@@ -1034,7 +1091,7 @@ async def test_review_workspace_outside_roots_is_structured_error(fake_claude, t
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    async with Client(mcp, roots=[root.as_uri()]) as client:
+    async with Client(mcp, roots=[root.as_uri()], mode="legacy") as client:
         result = await client.call_tool(
             "claude_review_changes",
             {"scope": "working_tree", "workspace_root": str(outside)},
@@ -1248,7 +1305,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-41"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-42"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -1388,7 +1445,7 @@ async def test_dry_run_alias_input_schema_is_identical():
     change either signature."""
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert tools["claude_dry_run"].inputSchema == tools["claude_review_dry_run"].inputSchema
+    assert tools["claude_dry_run"].input_schema == tools["claude_review_dry_run"].input_schema
 
 
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
@@ -2255,7 +2312,7 @@ async def test_tool_schemas_expose_head():
         "claude_adversarial_review",
         "claude_review_dry_run",
     ):
-        props = tools[name].inputSchema["properties"]
+        props = tools[name].input_schema["properties"]
         assert "head" in props, name
         assert props["head"]["description"], name
 
@@ -2827,7 +2884,7 @@ async def test_workspace_outside_roots_publishes_the_allowed_roots(fake_claude, 
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    async with Client(mcp, roots=[root.as_uri()]) as client:
+    async with Client(mcp, roots=[root.as_uri()], mode="legacy") as client:
         res = await client.call_tool(
             "claude_review_changes",
             {"scope": "working_tree", "workspace_root": str(outside)},
@@ -2837,6 +2894,80 @@ async def test_workspace_outside_roots_publishes_the_allowed_roots(fake_claude, 
     assert err["details"]["allowed_roots"] == [str(root)]
     # The corrected call is spelled out, not left for the agent to infer.
     assert err["action"]["arguments"] == {"workspace_root": str(root)}
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_server_serves_both_protocol_eras(mode):
+    """FastMCP 4 (MCP SDK v2) negotiates the era per client: a default client
+    lands on the sessionless 2026-07-28 protocol, a legacy one on the
+    2025-11-25 handshake that the Codex CLI speaks. Both must see the same tools
+    and complete a free call."""
+    async with Client(mcp, mode=mode) as client:
+        assert client.protocol_version == ("2026-07-28" if mode == "auto" else "2025-11-25")
+        tools = {t.name for t in await client.list_tools()}
+        assert "claude_consult" in tools
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    assert data["name"] == "claude-in-codex"
+
+
+async def test_handshake_era_client_gets_its_first_root_as_default_workspace(fake_claude, git_repo):
+    """Handshake-era clients (MCP <= 2025-11-25) still get their first file://
+    root as the default workspace, now via the session's roots/list."""
+    async with Client(mcp, roots=[git_repo.as_uri()], mode="legacy") as client:
+        result = await client.call_tool(
+            "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert data["meta"]["workspace_source"] == "roots"
+    assert data["meta"]["cwd"] == str(git_repo)
+
+
+async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo):
+    """The sessionless 2026-07-28 era has no back-channel for roots/list, so the
+    server cannot see the roots this client configured. It fails closed before
+    spend rather than reviewing its own cwd, and names the cause; an explicit
+    workspace_root is accepted (guard-pattern roots for this era: #151)."""
+    async with Client(mcp, roots=[git_repo.as_uri()], mode="auto") as client:
+        assert client.protocol_version == "2026-07-28"
+        omitted = structured(
+            await client.call_tool(
+                "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
+            )
+        )
+        explicit = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert omitted["ok"] is False
+    assert omitted["error"]["code"] == "invalid_workspace_root"
+    assert omitted["error"]["details"] == {
+        "field": "workspace_root",
+        "reason": "roots_unavailable_on_connection",
+    }
+    assert "workspace_root" in omitted["error"]["repair"]
+    assert explicit["ok"] is True
+    assert explicit["meta"]["workspace_source"] == "param"
+    assert explicit["meta"]["cwd"] == str(git_repo)
+
+
+async def test_roots_lookup_keeps_the_sdk_deprecation_warning_quiet(fake_claude, git_repo):
+    """The SDK deprecates the roots capability (SEP-2577) and warns on every
+    roots/list. MCPDeprecationWarning is a UserWarning, so an unfiltered one
+    would reach the host's stderr on every tool call; `_file_roots` opts into
+    the deprecated request deliberately and must keep it quiet. Escalating the
+    warning to an error would make `_file_roots` swallow it and fall back to
+    cwd, so the roots-sourced workspace is the observable proof."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", MCPDeprecationWarning)
+        async with Client(mcp, roots=[git_repo.as_uri()], mode="legacy") as client:
+            result = await client.call_tool(
+                "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
+            )
+    assert structured(result)["meta"]["workspace_source"] == "roots"
 
 
 def test_every_error_carries_exactly_one_next_step():
@@ -3171,29 +3302,29 @@ async def test_annotation_contract():
     # arbitrary shell, non-idempotent (each call spends), open-world.
     for name in PAID_TOOLS:
         ann = tools[name].annotations
-        assert ann.readOnlyHint is False, name
-        assert ann.destructiveHint is True, name
-        assert ann.idempotentHint is False, name
-        assert ann.openWorldHint is True, name
+        assert ann.read_only_hint is False, name
+        assert ann.destructive_hint is True, name
+        assert ann.idempotent_hint is False, name
+        assert ann.open_world_hint is True, name
     # Job polling performs lazy maintenance while reading (deadline kills, TTL
     # deletion): not read-only, but never alters a terminal job's stored result.
     for name in ("claude_job_status", "claude_job_result", "claude_job_list"):
-        assert tools[name].annotations.readOnlyHint is False, name
+        assert tools[name].annotations.read_only_hint is False, name
     # Consume irreversibly deletes the stored result record.
     consume = tools["claude_job_consume_result"].annotations
-    assert consume.readOnlyHint is False
-    assert consume.destructiveHint is True
+    assert consume.read_only_hint is False
+    assert consume.destructive_hint is True
     # Cancel is idempotent: already-terminal jobs are returned unchanged.
     cancel = tools["claude_job_cancel"].annotations
-    assert cancel.readOnlyHint is False
-    assert cancel.idempotentHint is True
+    assert cancel.read_only_hint is False
+    assert cancel.idempotent_hint is True
     # Pure reads: no spend, no job-lifecycle side effects.
     for name in ("claude_status", "claude_capabilities", "claude_models", "claude_review_dry_run"):
         ann = tools[name].annotations
-        assert ann.readOnlyHint is True, name
-        assert ann.destructiveHint is None, name
-        assert ann.idempotentHint is None, name
-    assert tools["claude_status"].annotations.openWorldHint is False
+        assert ann.read_only_hint is True, name
+        assert ann.destructive_hint is None, name
+        assert ann.idempotent_hint is None, name
+    assert tools["claude_status"].annotations.open_world_hint is False
 
 
 def test_capabilities_documents_annotations_policy():
@@ -3251,10 +3382,10 @@ async def test_paid_tool_detail_params_point_at_the_capability_contract():
         "claude_adversarial_review",
         "claude_review_changes_async",
     ):
-        described = tools[name].inputSchema["properties"]["detail"]["description"]
+        described = tools[name].input_schema["properties"]["detail"]["description"]
         assert "claude_capabilities.detail_modes" in described, name
     for name in ("claude_job_result", "claude_job_consume_result"):
-        assert "detail" in tools[name].inputSchema["properties"], name
+        assert "detail" in tools[name].input_schema["properties"], name
 
 
 async def test_job_result_accepts_a_detail_override_over_mcp(monkeypatch, git_repo, tmp_path):
@@ -3320,8 +3451,8 @@ async def test_initialize_reports_application_version_and_name():
     silent framework-added field or a name drift away from claude_capabilities.
     """
     async with Client(mcp) as client:
-        server_info = client.initialize_result.serverInfo.model_dump(mode="json", exclude_none=True)
-        instructions = client.initialize_result.instructions
+        server_info = client.server_info.model_dump(mode="json", exclude_none=True)
+        instructions = client.instructions
     capabilities = _capabilities_payload()
 
     assert server_info == {"name": "claude-in-codex", "version": __version__}
@@ -3351,10 +3482,10 @@ async def test_deprecated_aliases_match_their_primaries(fake_claude):
 
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert tools["claude_ask"].inputSchema == tools["claude_consult"].inputSchema
-    assert tools["claude_ask"].outputSchema == tools["claude_consult"].outputSchema
-    assert tools["claude_review_dry_run"].inputSchema == tools["claude_dry_run"].inputSchema
-    assert tools["claude_review_dry_run"].outputSchema == tools["claude_dry_run"].outputSchema
+    assert tools["claude_ask"].input_schema == tools["claude_consult"].input_schema
+    assert tools["claude_ask"].output_schema == tools["claude_consult"].output_schema
+    assert tools["claude_review_dry_run"].input_schema == tools["claude_dry_run"].input_schema
+    assert tools["claude_review_dry_run"].output_schema == tools["claude_dry_run"].output_schema
 
 
 @pytest.mark.parametrize(
@@ -3784,7 +3915,7 @@ async def test_consult_async_cannot_answer_with_a_result():
         tools = {t.name: t for t in await client.list_tools()}
 
     def branches(name):
-        return tools[name].outputSchema["anyOf"]
+        return tools[name].output_schema["anyOf"]
 
     def has_result_branch(name):
         # `verdict` appears only on the SuccessResult branch, and _slim strips the

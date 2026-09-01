@@ -12,6 +12,8 @@ Claude is a reviewer, not a co-pilot: it never edits your code.
 If you omit it and the client exposes no MCP root, the server falls back to its own
 install directory and silently reviews the wrong repository.
 The result `meta.workspace_warning` flags when this fallback happened.
+On a sessionless MCP 2026-07-28 connection the server cannot query roots at all, so
+omitting `workspace_root` there is an `invalid_workspace_root` error, not a fallback.
 
 ## When to ask Claude
 
@@ -66,7 +68,7 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 - Free-form `prompt`/`context`/`target`/`evidence`/`focus` text is capped before spend; split very large asks or use a narrower diff scope. `focus` and `system_prompt_append` also carry their own 4096-byte per-field caps.
 - Default access is `toolless` (Claude gets no tools) and `config_mode=inherit`; both access modes withhold write/Bash tools. Claude Code hooks are outside the tool allowlist and may run in `inherit`/`scoped`; use `config_mode=safe` or `config_mode=bare` for untrusted workspaces.
 - Prefer `config_mode=safe` when preserving normal Claude authentication matters; use `config_mode=bare` when API-key-backed maximum isolation is desired.
-- When client MCP roots are available, explicit `workspace_root` values must be inside one of those roots; omit `workspace_root` to use the first root.
+- When client MCP roots are available (handshake-era connections, MCP <= 2025-11-25), explicit `workspace_root` values must be inside one of those roots; omit `workspace_root` to use the first root. Sessionless connections cannot supply roots, so `workspace_root` is required there.
 - Cap cost/time with `max_budget_usd` and `timeout_seconds` for large reviews.
 - Reviews run at `effort=xhigh` by default for depth. Lower `effort` to `high`/`medium` to save cost on routine changes; raise to `max` for the most subtle ones.
 - `system_prompt_append` is accepted on `claude_consult`, `claude_review_changes`, and their `_async` forms; NOT on either `claude_adversarial_review` form, whose fixed stance is the product. It rides behind the guardrails, which always lead. It grants NO tools — that guarantee is mechanical, the allowlist rides argv — but Claude is only INSTRUCTED not to let it set a verdict. Capped at 4096 bytes; text carrying the server's framing markers is refused. `meta.system_prompt_append` hashes the text so a result shows it ran under a non-default prompt.

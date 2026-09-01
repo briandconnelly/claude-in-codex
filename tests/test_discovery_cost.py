@@ -9,8 +9,8 @@ import json
 from pathlib import Path
 
 import pytest
-from fastmcp import Client
 from jsonschema import validate
+from tests.support import Client
 
 from claude_in_codex.schemas import (
     DRY_RUN_SCHEMA,
@@ -81,7 +81,7 @@ def _token_proxy(wire_bytes: int) -> int:
 async def _tools_list_wire() -> tuple[str, list[dict]]:
     async with Client(mcp) as client:
         tools = await client.list_tools()
-    payload = [t.model_dump(mode="json", exclude_none=True) for t in tools]
+    payload = [t.model_dump(mode="json", exclude_none=True, by_alias=True) for t in tools]
     return json.dumps(payload, separators=(",", ":")), payload
 
 
@@ -202,7 +202,7 @@ async def test_live_error_envelope_validates_against_the_advertised_schema():
         )
     assert result.is_error, "expected a failing call to exercise the error branch"
     assert result.structured_content["ok"] is False
-    validate(result.structured_content, tools["claude_job_status"].outputSchema)
+    validate(result.structured_content, tools["claude_job_status"].output_schema)
 
 
 async def test_invalid_arguments_envelope_validates_against_the_advertised_schema():
@@ -216,7 +216,7 @@ async def test_invalid_arguments_envelope_validates_against_the_advertised_schem
             "claude_ask", {"prompt": "x", "detail": "verbose"}, raise_on_error=False
         )
     assert result.structured_content["error"]["code"] == "invalid_arguments"
-    validate(result.structured_content, tools["claude_ask"].outputSchema)
+    validate(result.structured_content, tools["claude_ask"].output_schema)
 
 
 async def test_capabilities_publishes_the_full_error_catalog():
