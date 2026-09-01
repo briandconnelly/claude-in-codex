@@ -171,6 +171,17 @@ Background runs are bounded by the job deadline (`CLAUDE_IN_CODEX_JOB_MAX_SECOND
   families, so neither can forge the other's delimiters. The framing makes an injected directive
   visible as caller text; it does not make Claude incapable of following one, so never build
   `focus` from untrusted workspace content.
+- `paths` narrows which changes the server gathers. Its values are never interpolated into
+  server-authored prose: the prompt says only that a caller-supplied filter was applied, and
+  keeps the caveat that `access=readonly` may still permit reads outside the filter. Path
+  validation cannot police this channel — spaces, punctuation, and prose are legal in
+  filenames — so the fix is that the values do not reach the server's own voice, where an
+  injected sentence would have read as task framing. The guarantee is the voice, not the
+  bytes: an entry naming a file the diff contains still appears in that file's diff header,
+  as untrusted diff data. The guardrail prompt also names path filters as untrusted.
+  What none of this covers is omission: a filter chosen from untrusted material can hide the
+  very changes worth reviewing before Claude ever sees them, so treat `paths` as scope you
+  decide, and never derive it blindly from workspace content.
 
 If a requested diff scope has no changes, the review tools return a passing result without
 invoking Claude.
