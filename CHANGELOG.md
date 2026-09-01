@@ -21,10 +21,17 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   wildcard, and reimplementing that here to attribute a file list back to entries
   would be a second, divergent copy of a subtlety this module has no reason to
   own. `paths` has no `maxItems`, so the probe is capped at 32 entries and the
-  field is reported absent above it -- never guessed. The prompt gets the count
-  too, as a server-authored sentence with no caller values: this is a count of
-  what the filter SELECTED, which describes the review's coverage, not the count
-  of filter entries #147 declined to send, which described only the request.
+  field is reported absent above it -- never guessed. The prompt gets the ratio
+  too, as a server-authored sentence made of two integers and no caller values. It
+  reports how many entries matched nothing out of how many were sent, and the
+  denominator is the number #147 declined -- a deliberate divergence: #147 left it
+  out because alone it "would describe the filter, not the review", and paired with
+  the unmatched count it stops describing the request and becomes a coverage ratio.
+  "1 of 2 matched nothing" says half the scope the caller believes they asked for
+  is absent; "1 matched nothing" cannot. Coverage is exactly what Claude can no
+  longer establish for itself now that the values are gone. The clause is emitted
+  only when an entry actually matched nothing, so an ordinary filtered review is
+  unchanged.
   Because async meta is rebuilt from the job record at fetch time, the counts are
   persisted there as well, so a fetched result does not silently lose a field its
   launch envelope showed. Every tool builds this `meta` at its own call site, so

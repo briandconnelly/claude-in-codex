@@ -89,12 +89,23 @@ _PATH_FILTER_NOTE = (
 )
 
 
-# The unmatched-entry clause, appended to _PATH_FILTER_NOTE. It is a count of what
-# the filter SELECTED, measured by the server against git -- not the count of
-# filter entries that #147 deliberately declined to send. That one described the
-# request and told Claude nothing about the review; this one describes the
-# review's actual coverage, which is exactly what Claude cannot otherwise
-# establish now that the values are gone. Still no values (#149).
+# The unmatched-entry clause, appended to _PATH_FILTER_NOTE (#149). Server-authored
+# end to end and made of two integers, so it carries no caller bytes and is not an
+# injection channel.
+#
+# It DOES publish the number of filter entries, which #147 declined to send. That
+# is a deliberate divergence, not an oversight. #147 left the number out because
+# alone it "would describe the filter, not the review": an entry may be a directory
+# and may match nothing, so a bare count of entries told Claude nothing about what
+# it was looking at. Paired with how many of them selected nothing it stops being a
+# description of the request and becomes a coverage ratio -- "1 of 2 matched
+# nothing" says half the scope the caller believes they asked for is absent, which
+# "1 matched nothing" cannot say. The denominator is what makes the numerator
+# readable, and coverage is precisely what Claude can no longer establish for
+# itself now that the values are gone.
+#
+# Emitted only when something actually matched nothing, so an ordinary filtered
+# review is unchanged.
 def _unmatched_clause(counts: list[int] | None) -> str:
     if not counts:
         return ""
