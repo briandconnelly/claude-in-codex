@@ -27,7 +27,13 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   of filter entries #147 declined to send, which described only the request.
   Because async meta is rebuilt from the job record at fetch time, the counts are
   persisted there as well, so a fetched result does not silently lose a field its
-  launch envelope showed. Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-43`.
+  launch envelope showed. Every tool builds this `meta` at its own call site, so
+  the no-spend empty-diff early return is covered by its own parametrized test
+  across all four paid tools rather than by inspection -- an empty diff under a
+  filter is exactly when the caller most needs to know which entry selected
+  nothing, since "no changes in scope" and "you misspelled every entry" are
+  otherwise the same envelope. Bumps `FINGERPRINT` to
+  `claude-in-codex/0.1/schema-43`.
 - Pinned the refusal that makes a diff-truncation notice unnecessary. #148 asked
   for a prompt notice telling Claude a gathered diff had been cut, on the grounds
   that truncation was reported in `meta` only -- to the caller, not to the model

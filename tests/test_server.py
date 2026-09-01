@@ -5984,3 +5984,31 @@ async def test_control_an_under_cap_diff_does_reach_claude(fake_claude, git_repo
         )
     assert data["ok"] is True
     assert data["meta"]["truncated"] is False
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("claude_review_changes", {"scope": "working_tree"}),
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_adversarial_review", {"target": "the plan", "scope": "working_tree"}),
+        ("claude_adversarial_review_async", {"target": "the plan", "scope": "working_tree"}),
+    ],
+)
+async def test_empty_diff_result_still_reports_paths_matched(fake_claude, git_repo, tool, args):
+    """Every no-spend early return must carry the counts too.
+
+    An empty diff under a filter is exactly when the caller most needs to know
+    WHICH entry selected nothing -- 'no changes in scope' and 'you misspelled
+    every entry' are otherwise the same envelope. Parametrized because each tool
+    builds this meta at its own call site, so one of them keeping the field
+    proves nothing about the other three."""
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            tool,
+            {**args, "paths": ["nope", "also-nope"], "workspace_root": str(git_repo)},
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert "job_id" not in data  # the empty-diff branch, not a launched job
+    assert data["meta"]["paths_matched"] == [0, 0]

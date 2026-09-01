@@ -1673,6 +1673,7 @@ async def claude_review_changes(
         redacted_paths=ctx_data.redacted_paths,
         security_warnings=hook_security_warnings(cwd, r.config_mode),
         head=head,
+        paths_matched=ctx_data.path_match_counts,
     )
     if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
         return _result(
@@ -1905,6 +1906,7 @@ async def claude_adversarial_review(
             effective_budget=r.budget,
             redacted_paths=ctx_data.redacted_paths,
             head=head,
+            paths_matched=ctx_data.path_match_counts,
         )
         if ctx_data.summary.files_changed == 0 and not ctx_data.text.strip():
             return _result(
