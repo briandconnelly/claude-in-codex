@@ -126,15 +126,16 @@ CAPABILITY_SUMMARY = (
     "adversarial plan review, and second opinions. The server grants no Bash/write "
     "tools and never proxies Claude's own MCP tools, but workspace hooks may run "
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
-    "config_mode=bare disable hooks. Paid tools send context to Anthropic; call "
-    "claude_status before spending. Use claude_models to discover valid model slugs. "
+    "config_mode=bare disable hooks. Paid tools send context to Anthropic; check "
+    "claude_status first. claude_models lists model slugs. "
     "Paid tools have claude_*_async forms (deprecated aliases do not): a job_id to "
     "poll/result/cancel, absent on an empty diff. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
-    "workspace_root defaults to first MCP root else cwd; with roots must be inside. "
+    "workspace_root: first MCP root else cwd, required when sessionless (2026-07-28); "
+    "with roots must be inside. "
     "toolless default; readonly lets Claude read files, bypassing diff redaction. "
-    "Tool semantic and argument-validation failures return isError:true with an "
+    "Semantic and argument-validation failures return isError:true with an "
     "ok:false envelope (code/message/repair) in structuredContent. "
     "system_prompt_append adds caller text behind the always-leading guardrails; "
     "grants no tools; hashed into meta. "
@@ -700,11 +701,14 @@ def _workspace_error(
             "or configure an MCP root that points at an existing directory.",
             meta,
         )
+    # roots is None only when the connection cannot be asked for roots, where
+    # "configure an MCP root" is advice the caller cannot act on.
+    repair = "Pass workspace_root as an absolute path to an existing directory"
+    repair += "." if roots is None else ", or configure an MCP root."
     return _err(
         code,
         f"workspace_root '{workspace_root}' is not an existing absolute directory.",
-        "Pass workspace_root as an absolute path to an existing directory, or "
-        "configure an MCP root.",
+        repair,
         meta,
         offending="workspace_root",
     )
@@ -777,13 +781,15 @@ async def _resolve_workspace(workspace_root, ctx):
     cannot tell "no roots" from "roots it cannot see", and the tool description
     promises the first root, so the only honest default there is none. An
     explicit workspace_root is accepted without containment — the same standing
-    as a client that never offered roots — and `roots` comes back None so the
-    error builder can name the actual cause."""
+    as a client that never offered roots — and `roots` stays None on every
+    return so the error builder can name the actual cause and never suggests
+    configuring an MCP root the connection cannot deliver."""
     roots = await _file_roots(ctx)
-    if roots is None:
-        if not workspace_root:
-            return None, "invalid_workspace_root", None, None
-        roots = []
+    if roots is None and not workspace_root:
+        return None, "invalid_workspace_root", None, None
+    # roots stays None past this point on an unaskable connection: the checks
+    # below treat it as "nothing to contain against", and the error builder
+    # reads it as "do not suggest configuring an MCP root".
     if workspace_root:
         path, source = workspace_root, "param"
     else:

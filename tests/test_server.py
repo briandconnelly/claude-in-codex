@@ -29,6 +29,7 @@ from claude_in_codex.server import (
     _capabilities_payload,
     _first_root,
     _resolve_workspace,
+    _workspace_error,
     mcp,
 )
 
@@ -137,11 +138,38 @@ async def test_resolve_workspace_requires_param_when_roots_cannot_be_asked(tmp_p
     comes back None (not []) so the error names the real cause."""
     path, err, source, roots = await _resolve_workspace(None, _FakeRoots(no_backchannel=True))
     assert (path, err, source, roots) == (None, "invalid_workspace_root", None, None)
-    # An explicit absolute directory is accepted with no containment to enforce.
+    # An explicit absolute directory is accepted with no containment to enforce;
+    # roots stays None rather than becoming "no roots".
     path, err, source, roots = await _resolve_workspace(
         str(tmp_path), _FakeRoots(no_backchannel=True)
     )
-    assert (path, err, source, roots) == (str(tmp_path), None, "param", [])
+    assert (path, err, source, roots) == (str(tmp_path), None, "param", None)
+    # An explicit but invalid path fails as usual, and the repair cannot suggest
+    # configuring an MCP root on a connection that cannot deliver one.
+    path, err, source, roots = await _resolve_workspace(
+        "relative/dir", _FakeRoots(no_backchannel=True)
+    )
+    assert (path, err, source, roots) == (None, "invalid_workspace_root", None, None)
+    envelope = _workspace_error(err, "relative/dir", roots)
+    assert envelope["error"]["details"]["field"] == "workspace_root"
+    assert "MCP root" not in envelope["error"]["repair"]
+    # The same failure from a client that merely has no roots keeps that advice.
+    envelope = _workspace_error("invalid_workspace_root", "relative/dir", [])
+    assert "configure an MCP root" in envelope["error"]["repair"]
+
+
+async def test_sessionless_workspace_prerequisite_is_stated_consistently():
+    """The first-read contract (server instructions / capabilities summary) and
+    every workspace_root description must agree that sessionless connections
+    have to pass workspace_root, so an agent following either is never steered
+    into a guaranteed invalid_workspace_root."""
+    assert "sessionless" in CAPABILITY_SUMMARY
+    for name, tool in (await _tools_by_name()).items():
+        prop = tool.input_schema.get("properties", {}).get("workspace_root")
+        if prop is None:
+            continue
+        desc = prop["description"]
+        assert "sessionless" in desc or "defaults like the async tools" in desc, name
 
 
 async def test_first_root_skips_non_file_uris():
