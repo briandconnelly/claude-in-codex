@@ -49,9 +49,29 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   values to the digest rather than restoring them to the prompt keeps both
   properties. Caught by Copilot's review; pinned by a test whose two launches share
   argv and prompt exactly, so it cannot pass by accident.
+  An absent filter contributes no key to the digest rather than a null one, so the
+  material for an unfiltered launch is byte-identical to what it was before. Without
+  that, adding the field would have moved the digest for every keyed launch ever
+  made — `claude_consult_async` included, which has no `paths` parameter and whose
+  prompt this release does not touch — and made a harmless upgrade a conflict for
+  callers who changed nothing. `arg_hash_for` also takes `paths` as a REQUIRED
+  parameter: a default would compile at any future call site that forgot it, and
+  deleting it from the current call site left the whole suite green except the one
+  test written to catch that.
   One caveat for callers: an `idempotency_key` reused across this upgrade for a
-  path-filtered `*_async` launch conflicts rather than replaying, since the digest
-  moved. That is fail-closed and matches every prior prompt change.
+  launch that PASSED a path filter conflicts rather than replaying, since both its
+  prompt and its digest moved. Keys for unfiltered launches are unaffected. The
+  conflict is fail-closed and matches every prior prompt change.
+  The published contract text is corrected to match, which is the one part of this
+  work that IS an agent-visible surface change. `claude_capabilities.async_lifecycle`
+  defined effective arguments as "the ones that change what Claude is asked and paid
+  to do", and `paths` does not fit that definition in the very case that motivated
+  the fix: a directory and the only changed file under it ask Claude for the same
+  thing, yet now conflict. Leaving the text stale would advertise a replay the server
+  refuses, and bill the caller twice to discover it. The definition now covers the
+  scope an answer is recorded under, names `paths` as an effective argument, and says
+  it is matched AS SENT, so order- and spelling-sensitivity is documented rather than
+  surprising. Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-41`.
   Closes #141.
 - The pre-spawn encodability backstop now covers the detached path too, so the two
   forms of a tool refuse an unencodable composed request identically. #140 gave the

@@ -5,6 +5,7 @@ a known JSON envelope, so the full start -> status -> result/cancel/timeout flow
 exercised deterministically and for free.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -1166,14 +1167,16 @@ def test_arg_hash_separates_runs_that_differ_only_by_focus():
     The equal-inputs assertion is a determinism guard, NOT a positive control:
     SHA-256 over equal material is equal by construction, so it cannot show
     that the digest discriminates. What it can catch is material that stopped
-    being a pure function of (argv, prompt) — a nonce, a timestamp, an object
-    id — which would replace every replay with a spurious idempotency_conflict.
-    The inequality assertions below are what prove discrimination.
+    being a pure function of (argv, prompt, paths) — a nonce, a timestamp, an
+    object id — which would replace every replay with a spurious
+    idempotency_conflict. The inequality assertions below prove discrimination.
     """
     argv = ["claude", "-p", "--model", "sonnet"]
-    assert jobs.arg_hash_for(argv, "review this") == jobs.arg_hash_for(argv, "review this")
-    assert jobs.arg_hash_for(argv, "review this") != jobs.arg_hash_for(
-        argv, "review this, focus on auth"
+    assert jobs.arg_hash_for(argv, "review this", None) == jobs.arg_hash_for(
+        argv, "review this", None
+    )
+    assert jobs.arg_hash_for(argv, "review this", None) != jobs.arg_hash_for(
+        argv, "review this, focus on auth", None
     )
 
 
@@ -1210,9 +1213,35 @@ def test_arg_hash_separates_runs_that_differ_only_by_paths():
 
 def test_arg_hash_separates_runs_that_differ_only_by_model():
     prompt = "review this"
-    assert jobs.arg_hash_for(["claude", "-p", "--model", "sonnet"], prompt) != jobs.arg_hash_for(
-        ["claude", "-p", "--model", "opus"], prompt
-    )
+    assert jobs.arg_hash_for(
+        ["claude", "-p", "--model", "sonnet"], prompt, None
+    ) != jobs.arg_hash_for(["claude", "-p", "--model", "opus"], prompt, None)
+
+
+def test_arg_hash_is_unchanged_for_a_launch_that_passed_no_filter():
+    """Adding `paths` to the digest must not move it for callers who sent none.
+
+    An absent filter contributes no key at all, so the material for an unfiltered
+    launch is byte-identical to what it was before `paths` joined the digest. This
+    matters on upgrade: emitting `"paths": null` would have invalidated every keyed
+    launch ever made — `claude_consult_async` included, which has no `paths`
+    parameter and whose prompt this release does not touch — and turned a harmless
+    upgrade into a conflict for callers who changed nothing.
+
+    The pre-change digest is recomputed here from the OLD material shape rather
+    than pasted as a hex constant, so this test states the property (absence adds
+    nothing) instead of pinning today's bytes.
+    """
+    argv = ["claude", "-p", "--model", "sonnet"]
+    prompt = "review this"
+    legacy = hashlib.sha256(
+        json.dumps({"argv": argv, "prompt": prompt}, sort_keys=True).encode()
+    ).hexdigest()
+    assert jobs.arg_hash_for(argv, prompt, None) == legacy
+    assert jobs.arg_hash_for(argv, prompt, []) == legacy
+    # The control: a real filter DOES move it, so the equality above is not a
+    # digest that ignores its third argument.
+    assert jobs.arg_hash_for(argv, prompt, ["src"]) != legacy
 
 
 def _run_worker_capturing_popen(tmp_path, monkeypatch, extra_args):
