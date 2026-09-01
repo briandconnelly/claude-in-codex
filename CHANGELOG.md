@@ -7,6 +7,25 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- Upgraded to FastMCP 4 (4.0.0), which is built on the MCP Python SDK v2 (2.1.1).
+  The agent-visible contract is unchanged: the wire-shaped `tools/list`, resource,
+  resource-template, prompt, and `serverInfo` records were compared byte-for-byte
+  against the 3.4.7 build and found identical, so `FINGERPRINT` does not move.
+  Underneath, the SDK v2 renames model fields to snake_case in Python while keeping
+  the camelCase wire aliases, removes `Context.list_roots()`, and adds the
+  sessionless MCP 2026-07-28 era, which the server now serves alongside the
+  2025-11-25 handshake the Codex CLI negotiates. `_file_roots` asks the session
+  directly (`roots/list`), so `workspace_root` defaulting and the
+  `workspace_outside_roots` containment check behave exactly as before on
+  handshake-era connections; a 2026-07-28 connection has no back-channel for
+  server-initiated requests, so roots resolve to none there and the workspace is
+  resolved as if the client had configured no roots (the existing
+  `workspace_root`/cwd fallback). Guard-pattern roots for that era are tracked in
+  #151. Test-side, the contract-fingerprint and discovery-cost checks now dump
+  models `by_alias=True` so they measure the wire shape rather than Python field
+  names (`EXPECTED_CONTRACT_DIGEST` moved for that reason alone), and the suite
+  runs with FastMCP's camelCase compatibility bridge disabled so a bridged read
+  fails outright instead of surviving on a shim scheduled for removal.
 - `paths` values no longer reach Claude inside a sentence written in the server's own
   voice. The prompt used to interpolate the caller's path list through `repr()`, and
   `repr()` is a Python-literal escape, not a boundary against a model: it escapes

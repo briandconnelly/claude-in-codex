@@ -3,12 +3,14 @@ import inspect
 import json
 import time
 import types
+import warnings
 from typing import Literal, get_args
 
 import anyio
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
+from mcp.shared.exceptions import MCPDeprecationWarning
 from pydantic import ValidationError as PydanticValidationError
 from pydantic import create_model
 from tests.conftest import structured
@@ -94,16 +96,22 @@ def _patch_full_flag_support(monkeypatch):
 
 
 class _FakeRoots:
-    """Minimal stand-in for a FastMCP Context exposing list_roots()."""
+    """Minimal stand-in for a FastMCP Context whose session serves roots/list.
+
+    Mirrors the SDK v2 shape `_file_roots` reads: `ctx.session.list_roots()`
+    returns a ListRootsResult-like object with a `.roots` list of Root-like
+    objects carrying `.uri`."""
 
     def __init__(self, uris=None, raises=False):
         self._uris = uris or []
         self._raises = raises
+        self.session = self
 
     async def list_roots(self):
         if self._raises:
             raise RuntimeError("client does not support roots")
-        return [type("R", (), {"uri": u})() for u in self._uris]
+        roots = [type("Root", (), {"uri": u})() for u in self._uris]
+        return type("ListRootsResult", (), {"roots": roots})()
 
 
 async def test_first_root_returns_path_from_file_uri():
@@ -204,7 +212,7 @@ async def test_tools_publish_real_output_schema():
     # F1: the ok-discriminated contract must be in the schema, not just prose.
     tools = await _tools_by_name()
     for name in (*PAID_TOOLS, "claude_status"):
-        schema = tools[name].outputSchema
+        schema = tools[name].output_schema
         assert schema is not None
         assert schema != {"additionalProperties": True, "type": "object"}, name
         assert schema.get("type") == "object", name
@@ -213,7 +221,7 @@ async def test_tools_publish_real_output_schema():
 
 async def test_paid_tool_output_schema_describes_both_outcomes():
     # F1: success and error shapes are both discoverable from the schema.
-    schema = (await _tools_by_name())["claude_ask"].outputSchema
+    schema = (await _tools_by_name())["claude_ask"].output_schema
     blob = json.dumps(schema)
     assert "summary" in blob and "verdict" in blob  # success branch
     assert "error" in blob and "repair" in blob  # error branch
@@ -221,8 +229,8 @@ async def test_paid_tool_output_schema_describes_both_outcomes():
 
 async def test_fixed_value_inputs_use_enums():
     # F2: choices are JSON Schema enums, not prose like "inherit|scoped|safe|bare".
-    props = (await _tools_by_name())["claude_review_changes"].inputSchema["properties"]
-    dry_props = (await _tools_by_name())["claude_review_dry_run"].inputSchema["properties"]
+    props = (await _tools_by_name())["claude_review_changes"].input_schema["properties"]
+    dry_props = (await _tools_by_name())["claude_review_dry_run"].input_schema["properties"]
     assert props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert dry_props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert props["detail"]["enum"] == ["summary", "full"]
@@ -290,24 +298,24 @@ async def test_paid_tool_descriptions_disclose_hook_boundary():
 async def test_common_optional_params_are_described():
     tools = await _tools_by_name()
     for name in ("claude_ask", "claude_review_changes", "claude_adversarial_review"):
-        props = tools[name].inputSchema["properties"]
+        props = tools[name].input_schema["properties"]
         assert props["model"]["description"]
         assert props["max_budget_usd"]["description"]
         assert props["timeout_seconds"]["description"]
-    assert tools["claude_adversarial_review"].inputSchema["properties"]["base"]["description"]
+    assert tools["claude_adversarial_review"].input_schema["properties"]["base"]["description"]
     for name in (
         "claude_review_changes",
         "claude_review_changes_async",
         "claude_adversarial_review",
         "claude_review_dry_run",
     ):
-        assert tools[name].inputSchema["properties"]["paths"]["description"]
+        assert tools[name].input_schema["properties"]["paths"]["description"]
 
 
 async def test_paid_tools_publish_budget_bounds():
     tools = await _tools_by_name()
     for name in PAID_TOOLS:
-        prop = tools[name].inputSchema["properties"]["max_budget_usd"]
+        prop = tools[name].input_schema["properties"]["max_budget_usd"]
         number_schema = next(
             branch for branch in prop.get("anyOf", [prop]) if branch.get("type") == "number"
         )
@@ -962,27 +970,27 @@ async def test_paid_tools_declare_cost_safety_hints():
     for name in PAID_TOOLS:
         ann = tools[name].annotations
         assert ann is not None, name
-        assert ann.readOnlyHint is False, name
-        assert ann.destructiveHint is True, name
-        assert ann.idempotentHint is False, name
+        assert ann.read_only_hint is False, name
+        assert ann.destructive_hint is True, name
+        assert ann.idempotent_hint is False, name
 
 
 async def test_job_tools_declare_state_hints():
     tools = await _tools_by_name()
-    assert tools["claude_review_changes_async"].annotations.readOnlyHint is False
-    assert tools["claude_review_changes_async"].annotations.idempotentHint is False
+    assert tools["claude_review_changes_async"].annotations.read_only_hint is False
+    assert tools["claude_review_changes_async"].annotations.idempotent_hint is False
     # Job polling performs lazy maintenance while reading (deadline kills,
     # TTL deletion), so it is not read-only, though it never alters a
     # terminal job's stored result.
-    assert tools["claude_job_status"].annotations.readOnlyHint is False
-    assert tools["claude_job_result"].annotations.readOnlyHint is False
+    assert tools["claude_job_status"].annotations.read_only_hint is False
+    assert tools["claude_job_result"].annotations.read_only_hint is False
     # Consume irreversibly deletes the stored record.
-    assert tools["claude_job_consume_result"].annotations.readOnlyHint is False
-    assert tools["claude_job_consume_result"].annotations.destructiveHint is True
-    assert tools["claude_job_consume_result"].annotations.idempotentHint is False
+    assert tools["claude_job_consume_result"].annotations.read_only_hint is False
+    assert tools["claude_job_consume_result"].annotations.destructive_hint is True
+    assert tools["claude_job_consume_result"].annotations.idempotent_hint is False
     # Cancel is idempotent: already-terminal jobs are returned unchanged.
-    assert tools["claude_job_cancel"].annotations.readOnlyHint is False
-    assert tools["claude_job_cancel"].annotations.idempotentHint is True
+    assert tools["claude_job_cancel"].annotations.read_only_hint is False
+    assert tools["claude_job_cancel"].annotations.idempotent_hint is True
 
 
 async def test_review_uses_workspace_root_over_cwd(fake_claude, monkeypatch, git_repo, tmp_path):
@@ -1018,7 +1026,7 @@ async def test_review_invalid_root_without_param_does_not_blame_workspace_root(
     fake_claude, tmp_path
 ):
     missing = tmp_path / "missing"
-    async with Client(mcp, roots=[missing.as_uri()]) as client:
+    async with Client(mcp, roots=[missing.as_uri()], mode="legacy") as client:
         result = await client.call_tool(
             "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
         )
@@ -1034,7 +1042,7 @@ async def test_review_workspace_outside_roots_is_structured_error(fake_claude, t
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    async with Client(mcp, roots=[root.as_uri()]) as client:
+    async with Client(mcp, roots=[root.as_uri()], mode="legacy") as client:
         result = await client.call_tool(
             "claude_review_changes",
             {"scope": "working_tree", "workspace_root": str(outside)},
@@ -1388,7 +1396,7 @@ async def test_dry_run_alias_input_schema_is_identical():
     change either signature."""
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert tools["claude_dry_run"].inputSchema == tools["claude_review_dry_run"].inputSchema
+    assert tools["claude_dry_run"].input_schema == tools["claude_review_dry_run"].input_schema
 
 
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
@@ -2255,7 +2263,7 @@ async def test_tool_schemas_expose_head():
         "claude_adversarial_review",
         "claude_review_dry_run",
     ):
-        props = tools[name].inputSchema["properties"]
+        props = tools[name].input_schema["properties"]
         assert "head" in props, name
         assert props["head"]["description"], name
 
@@ -2827,7 +2835,7 @@ async def test_workspace_outside_roots_publishes_the_allowed_roots(fake_claude, 
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    async with Client(mcp, roots=[root.as_uri()]) as client:
+    async with Client(mcp, roots=[root.as_uri()], mode="legacy") as client:
         res = await client.call_tool(
             "claude_review_changes",
             {"scope": "working_tree", "workspace_root": str(outside)},
@@ -2837,6 +2845,56 @@ async def test_workspace_outside_roots_publishes_the_allowed_roots(fake_claude, 
     assert err["details"]["allowed_roots"] == [str(root)]
     # The corrected call is spelled out, not left for the agent to infer.
     assert err["action"]["arguments"] == {"workspace_root": str(root)}
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_server_serves_both_protocol_eras(mode):
+    """FastMCP 4 (MCP SDK v2) negotiates the era per client: a default client
+    lands on the sessionless 2026-07-28 protocol, a legacy one on the
+    2025-11-25 handshake that the Codex CLI speaks. Both must see the same tools
+    and complete a free call."""
+    async with Client(mcp, mode=mode) as client:
+        assert client.protocol_version == ("2026-07-28" if mode == "auto" else "2025-11-25")
+        tools = {t.name for t in await client.list_tools()}
+        assert "claude_consult" in tools
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    assert data["name"] == "claude-in-codex"
+
+
+@pytest.mark.parametrize(("mode", "expected_source"), [("legacy", "roots"), ("auto", "cwd")])
+async def test_roots_default_workspace_depends_on_protocol_era(
+    fake_claude, git_repo, mode, expected_source
+):
+    """Handshake-era clients (MCP <= 2025-11-25) still get their first file://
+    root as the default workspace, now via the session's roots/list. The
+    sessionless 2026-07-28 era has no back-channel for that request, so a client
+    there resolves as if it had configured no roots — the cwd fallback — until
+    guard-pattern roots (#151) land."""
+    async with Client(mcp, roots=[git_repo.as_uri()], mode=mode) as client:
+        result = await client.call_tool(
+            "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
+        )
+    data = structured(result)
+    assert data["ok"] is True
+    assert data["meta"]["workspace_source"] == expected_source
+    if expected_source == "roots":
+        assert data["meta"]["cwd"] == str(git_repo)
+
+
+async def test_roots_lookup_keeps_the_sdk_deprecation_warning_quiet(fake_claude, git_repo):
+    """The SDK deprecates the roots capability (SEP-2577) and warns on every
+    roots/list. MCPDeprecationWarning is a UserWarning, so an unfiltered one
+    would reach the host's stderr on every tool call; `_file_roots` opts into
+    the deprecated request deliberately and must keep it quiet. Escalating the
+    warning to an error would make `_file_roots` swallow it and fall back to
+    cwd, so the roots-sourced workspace is the observable proof."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", MCPDeprecationWarning)
+        async with Client(mcp, roots=[git_repo.as_uri()], mode="legacy") as client:
+            result = await client.call_tool(
+                "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
+            )
+    assert structured(result)["meta"]["workspace_source"] == "roots"
 
 
 def test_every_error_carries_exactly_one_next_step():
@@ -3171,29 +3229,29 @@ async def test_annotation_contract():
     # arbitrary shell, non-idempotent (each call spends), open-world.
     for name in PAID_TOOLS:
         ann = tools[name].annotations
-        assert ann.readOnlyHint is False, name
-        assert ann.destructiveHint is True, name
-        assert ann.idempotentHint is False, name
-        assert ann.openWorldHint is True, name
+        assert ann.read_only_hint is False, name
+        assert ann.destructive_hint is True, name
+        assert ann.idempotent_hint is False, name
+        assert ann.open_world_hint is True, name
     # Job polling performs lazy maintenance while reading (deadline kills, TTL
     # deletion): not read-only, but never alters a terminal job's stored result.
     for name in ("claude_job_status", "claude_job_result", "claude_job_list"):
-        assert tools[name].annotations.readOnlyHint is False, name
+        assert tools[name].annotations.read_only_hint is False, name
     # Consume irreversibly deletes the stored result record.
     consume = tools["claude_job_consume_result"].annotations
-    assert consume.readOnlyHint is False
-    assert consume.destructiveHint is True
+    assert consume.read_only_hint is False
+    assert consume.destructive_hint is True
     # Cancel is idempotent: already-terminal jobs are returned unchanged.
     cancel = tools["claude_job_cancel"].annotations
-    assert cancel.readOnlyHint is False
-    assert cancel.idempotentHint is True
+    assert cancel.read_only_hint is False
+    assert cancel.idempotent_hint is True
     # Pure reads: no spend, no job-lifecycle side effects.
     for name in ("claude_status", "claude_capabilities", "claude_models", "claude_review_dry_run"):
         ann = tools[name].annotations
-        assert ann.readOnlyHint is True, name
-        assert ann.destructiveHint is None, name
-        assert ann.idempotentHint is None, name
-    assert tools["claude_status"].annotations.openWorldHint is False
+        assert ann.read_only_hint is True, name
+        assert ann.destructive_hint is None, name
+        assert ann.idempotent_hint is None, name
+    assert tools["claude_status"].annotations.open_world_hint is False
 
 
 def test_capabilities_documents_annotations_policy():
@@ -3251,10 +3309,10 @@ async def test_paid_tool_detail_params_point_at_the_capability_contract():
         "claude_adversarial_review",
         "claude_review_changes_async",
     ):
-        described = tools[name].inputSchema["properties"]["detail"]["description"]
+        described = tools[name].input_schema["properties"]["detail"]["description"]
         assert "claude_capabilities.detail_modes" in described, name
     for name in ("claude_job_result", "claude_job_consume_result"):
-        assert "detail" in tools[name].inputSchema["properties"], name
+        assert "detail" in tools[name].input_schema["properties"], name
 
 
 async def test_job_result_accepts_a_detail_override_over_mcp(monkeypatch, git_repo, tmp_path):
@@ -3320,8 +3378,8 @@ async def test_initialize_reports_application_version_and_name():
     silent framework-added field or a name drift away from claude_capabilities.
     """
     async with Client(mcp) as client:
-        server_info = client.initialize_result.serverInfo.model_dump(mode="json", exclude_none=True)
-        instructions = client.initialize_result.instructions
+        server_info = client.server_info.model_dump(mode="json", exclude_none=True)
+        instructions = client.instructions
     capabilities = _capabilities_payload()
 
     assert server_info == {"name": "claude-in-codex", "version": __version__}
@@ -3351,10 +3409,10 @@ async def test_deprecated_aliases_match_their_primaries(fake_claude):
 
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert tools["claude_ask"].inputSchema == tools["claude_consult"].inputSchema
-    assert tools["claude_ask"].outputSchema == tools["claude_consult"].outputSchema
-    assert tools["claude_review_dry_run"].inputSchema == tools["claude_dry_run"].inputSchema
-    assert tools["claude_review_dry_run"].outputSchema == tools["claude_dry_run"].outputSchema
+    assert tools["claude_ask"].input_schema == tools["claude_consult"].input_schema
+    assert tools["claude_ask"].output_schema == tools["claude_consult"].output_schema
+    assert tools["claude_review_dry_run"].input_schema == tools["claude_dry_run"].input_schema
+    assert tools["claude_review_dry_run"].output_schema == tools["claude_dry_run"].output_schema
 
 
 @pytest.mark.parametrize(
@@ -3784,7 +3842,7 @@ async def test_consult_async_cannot_answer_with_a_result():
         tools = {t.name: t for t in await client.list_tools()}
 
     def branches(name):
-        return tools[name].outputSchema["anyOf"]
+        return tools[name].output_schema["anyOf"]
 
     def has_result_branch(name):
         # `verdict` appears only on the SuccessResult branch, and _slim strips the

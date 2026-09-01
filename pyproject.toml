@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "pontonier==0.7.0",
     "anyio>=4",
-    "fastmcp>=3.4",
+    "fastmcp>=4",
     "pydantic>=2",
 ]
 

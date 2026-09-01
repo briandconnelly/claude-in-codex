@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal, cast, get_args
 from urllib.parse import unquote, urlparse
@@ -16,6 +17,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from mcp.shared.exceptions import MCPDeprecationWarning
 from pontonier.backend.protocol import RunRequest
 from pydantic import Field, ValidationError
 
@@ -700,16 +702,31 @@ def _workspace_error(
 async def _file_roots(ctx) -> list[str]:
     """Return filesystem paths from the client's file:// roots.
 
-    Returns [] if the client provides no roots or does not support the roots
-    capability (list_roots raises)."""
+    FastMCP 4 removed `Context.list_roots()`; the MCP SDK v2 session still
+    serves `roots/list` on handshake-era connections (MCP <= 2025-11-25, the era
+    Codex negotiates), so the request goes through `ctx.session`. Returns []
+    when the client provides no roots, does not support the roots capability,
+    or the connection is the sessionless 2026-07-28 era, which has no
+    back-channel for server-initiated requests (the SDK raises
+    NoBackChannelError). Roots on that era need the guard pattern
+    (InputRequiredResult), which is tracked separately; until then such a
+    client resolves the workspace as if it had configured no roots."""
     if ctx is None:
         return []
     try:
-        roots = await ctx.list_roots()
+        with warnings.catch_warnings():
+            # The SDK deprecates the roots capability as of 2026-07-28 and warns
+            # on every roots/list; this call is the deliberate handshake-era path.
+            # `@deprecated` warns when the coroutine is created, so only that
+            # synchronous step sits inside the filter — the await runs outside it
+            # and cannot swallow another task's warnings.
+            warnings.simplefilter("ignore", MCPDeprecationWarning)
+            pending = ctx.session.list_roots()
+        listed = await pending
     except Exception:
         return []
     paths = []
-    for root in roots or []:
+    for root in getattr(listed, "roots", None) or []:
         uri = str(getattr(root, "uri", ""))
         if uri.startswith("file://"):
             paths.append(unquote(urlparse(uri).path))

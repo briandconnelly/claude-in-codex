@@ -4,7 +4,15 @@ import json
 import os
 import subprocess
 
+import fastmcp
 import pytest
+
+# FastMCP 4 bridges the MCP SDK v1 camelCase field names (`inputSchema`,
+# `readOnlyHint`, ...) onto the SDK v2 snake_case fields with a deprecation
+# warning, and the bridge is scheduled for removal. Turn it off for the whole
+# suite so any remaining camelCase read fails as a hard AttributeError here
+# instead of surviving on a shim that a later upgrade drops.
+fastmcp.settings.mcp_camelcase_compat = False
 
 
 @pytest.fixture(autouse=True, scope="session")

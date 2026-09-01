@@ -102,12 +102,15 @@ the CLI is unavailable, and fails the build on a drift exit.
 | Plugin manifest (`mcpServers`, `skills`) | `.codex-plugin/plugin.json` | Codex marketplace schema |
 | MCP launch (`uvx --from git+…@tag`) | `.mcp.json` | pinned to a release tag (see below) |
 | Entry point `claude-in-codex-mcp` | `pyproject.toml [project.scripts]` | |
-| MCP roots as `file://` URIs | `server.py` `_file_roots` | already tolerant; falls back to server cwd |
+| MCP roots as `file://` URIs | `server.py` `_file_roots` | asked via the session's `roots/list` on handshake-era connections (MCP <= 2025-11-25); a sessionless 2026-07-28 connection has no back-channel, so roots resolve to none and the server falls back to `workspace_root`/cwd |
 
 ### Long-running calls: named job tools, not MCP tasks
 
-The server negotiates MCP 2025-11-25, which defines native tasks, and FastMCP
-3.4.7 can register a tool as task-capable. This server deliberately does not,
+The server is built on FastMCP 4 (MCP Python SDK v2), which serves both the
+handshake eras — Codex negotiates MCP 2025-11-25, which defines native tasks —
+and the sessionless MCP 2026-07-28 era, where tasks live in the
+`io.modelcontextprotocol/tasks` extension (`fastmcp[tasks]`). FastMCP can
+register a tool as task-capable on either. This server deliberately does not,
 and advertises neither a server `tasks` capability nor per-tool
 `execution.taskSupport`.
 

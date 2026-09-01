@@ -59,7 +59,7 @@ async def test_serverinfo_version_matches_the_release_lockstep():
     """
     declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     async with Client(mcp) as client:
-        reported = client.initialize_result.serverInfo.version
+        reported = client.server_info.version
 
     assert __version__ == declared
     assert reported == declared
