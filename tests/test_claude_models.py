@@ -2,7 +2,7 @@
 
 import json
 
-from fastmcp import Client
+from tests.support import Client
 
 from claude_in_codex import cli_contract
 from claude_in_codex.claude_models import read_model_catalog

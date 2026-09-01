@@ -20,20 +20,21 @@ camelCase keys and `_meta` a client actually receives), not the SDK's Python
 field names — MCP SDK v2 renamed those to snake_case while keeping the wire
 format, and a digest of field names would move on a framework upgrade that
 changed nothing an agent can see. The FastMCP 3 -> 4 upgrade moved this digest
-for exactly that reason: the by-alias surface was compared byte-for-byte against
-the 3.4.7 build and found identical, so FINGERPRINT did not bump.
+for that reason first (the by-alias surface was compared byte-for-byte against
+the 3.4.7 build and found identical) and then for a real contract change: the
+workspace_root descriptions now state that sessionless connections must pass it.
 """
 
 import hashlib
 import json
 from typing import get_args
 
-from fastmcp import Client
+from tests.support import Client
 
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "df4ed5279ab72fb6a3183c8ce6ff6d7c47b33b5b9e122c0932fb01716e516c11"
+EXPECTED_CONTRACT_DIGEST = "8359cafc46a657984cb86e1dfbf8a90f4ddd6d705479fd2555ca06a8ee2ef634"
 
 
 async def _contract_surface() -> dict:

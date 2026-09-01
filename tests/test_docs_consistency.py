@@ -2,7 +2,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from fastmcp import Client
+from tests.support import Client
 
 from claude_in_codex import __version__
 from claude_in_codex.schemas import FINGERPRINT

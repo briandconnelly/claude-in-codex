@@ -102,7 +102,7 @@ the CLI is unavailable, and fails the build on a drift exit.
 | Plugin manifest (`mcpServers`, `skills`) | `.codex-plugin/plugin.json` | Codex marketplace schema |
 | MCP launch (`uvx --from git+…@tag`) | `.mcp.json` | pinned to a release tag (see below) |
 | Entry point `claude-in-codex-mcp` | `pyproject.toml [project.scripts]` | |
-| MCP roots as `file://` URIs | `server.py` `_file_roots` | asked via the session's `roots/list` on handshake-era connections (MCP <= 2025-11-25); a sessionless 2026-07-28 connection has no back-channel, so roots resolve to none and the server falls back to `workspace_root`/cwd |
+| MCP roots as `file://` URIs | `server.py` `_file_roots` | asked via the session's `roots/list` on handshake-era connections (MCP <= 2025-11-25); a sessionless 2026-07-28 connection cannot be asked, so `workspace_root` is required there (no cwd fallback; guard-pattern roots: #151) |
 
 ### Long-running calls: named job tools, not MCP tasks
 

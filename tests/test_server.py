@@ -8,12 +8,12 @@ from typing import Literal, get_args
 
 import anyio
 import pytest
-from fastmcp import Client
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
-from mcp.shared.exceptions import MCPDeprecationWarning
+from mcp.shared.exceptions import MCPDeprecationWarning, NoBackChannelError
 from pydantic import ValidationError as PydanticValidationError
 from pydantic import create_model
 from tests.conftest import structured
+from tests.support import Client
 
 from claude_in_codex import __version__
 from claude_in_codex import claude as claude_mod
@@ -102,12 +102,15 @@ class _FakeRoots:
     returns a ListRootsResult-like object with a `.roots` list of Root-like
     objects carrying `.uri`."""
 
-    def __init__(self, uris=None, raises=False):
+    def __init__(self, uris=None, raises=False, no_backchannel=False):
         self._uris = uris or []
         self._raises = raises
+        self._no_backchannel = no_backchannel
         self.session = self
 
     async def list_roots(self):
+        if self._no_backchannel:
+            raise NoBackChannelError("roots/list")
         if self._raises:
             raise RuntimeError("client does not support roots")
         roots = [type("Root", (), {"uri": u})() for u in self._uris]
@@ -121,6 +124,24 @@ async def test_first_root_returns_path_from_file_uri():
 
 async def test_first_root_none_when_unsupported():
     assert await _first_root(_FakeRoots(raises=True)) is None
+
+
+async def test_first_root_none_when_connection_has_no_backchannel():
+    assert await _first_root(_FakeRoots(no_backchannel=True)) is None
+
+
+async def test_resolve_workspace_requires_param_when_roots_cannot_be_asked(tmp_path):
+    """A connection with no back-channel (sessionless MCP 2026-07-28) is not a
+    client without roots: the server cannot see roots the client may have, so an
+    omitted workspace_root fails closed instead of falling back to cwd. `roots`
+    comes back None (not []) so the error names the real cause."""
+    path, err, source, roots = await _resolve_workspace(None, _FakeRoots(no_backchannel=True))
+    assert (path, err, source, roots) == (None, "invalid_workspace_root", None, None)
+    # An explicit absolute directory is accepted with no containment to enforce.
+    path, err, source, roots = await _resolve_workspace(
+        str(tmp_path), _FakeRoots(no_backchannel=True)
+    )
+    assert (path, err, source, roots) == (str(tmp_path), None, "param", [])
 
 
 async def test_first_root_skips_non_file_uris():
@@ -584,7 +605,7 @@ async def test_claude_ask_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-41"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-42"
 
 
 async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1256,7 +1277,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-41"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-42"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -2861,24 +2882,48 @@ async def test_server_serves_both_protocol_eras(mode):
     assert data["name"] == "claude-in-codex"
 
 
-@pytest.mark.parametrize(("mode", "expected_source"), [("legacy", "roots"), ("auto", "cwd")])
-async def test_roots_default_workspace_depends_on_protocol_era(
-    fake_claude, git_repo, mode, expected_source
-):
+async def test_handshake_era_client_gets_its_first_root_as_default_workspace(fake_claude, git_repo):
     """Handshake-era clients (MCP <= 2025-11-25) still get their first file://
-    root as the default workspace, now via the session's roots/list. The
-    sessionless 2026-07-28 era has no back-channel for that request, so a client
-    there resolves as if it had configured no roots — the cwd fallback — until
-    guard-pattern roots (#151) land."""
-    async with Client(mcp, roots=[git_repo.as_uri()], mode=mode) as client:
+    root as the default workspace, now via the session's roots/list."""
+    async with Client(mcp, roots=[git_repo.as_uri()], mode="legacy") as client:
         result = await client.call_tool(
             "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
         )
     data = structured(result)
     assert data["ok"] is True
-    assert data["meta"]["workspace_source"] == expected_source
-    if expected_source == "roots":
-        assert data["meta"]["cwd"] == str(git_repo)
+    assert data["meta"]["workspace_source"] == "roots"
+    assert data["meta"]["cwd"] == str(git_repo)
+
+
+async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo):
+    """The sessionless 2026-07-28 era has no back-channel for roots/list, so the
+    server cannot see the roots this client configured. It fails closed before
+    spend rather than reviewing its own cwd, and names the cause; an explicit
+    workspace_root is accepted (guard-pattern roots for this era: #151)."""
+    async with Client(mcp, roots=[git_repo.as_uri()], mode="auto") as client:
+        assert client.protocol_version == "2026-07-28"
+        omitted = structured(
+            await client.call_tool(
+                "claude_review_changes", {"scope": "working_tree"}, raise_on_error=False
+            )
+        )
+        explicit = structured(
+            await client.call_tool(
+                "claude_review_changes",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        )
+    assert omitted["ok"] is False
+    assert omitted["error"]["code"] == "invalid_workspace_root"
+    assert omitted["error"]["details"] == {
+        "field": "workspace_root",
+        "reason": "roots_unavailable_on_connection",
+    }
+    assert "workspace_root" in omitted["error"]["repair"]
+    assert explicit["ok"] is True
+    assert explicit["meta"]["workspace_source"] == "param"
+    assert explicit["meta"]["cwd"] == str(git_repo)
 
 
 async def test_roots_lookup_keeps_the_sdk_deprecation_warning_quiet(fake_claude, git_repo):

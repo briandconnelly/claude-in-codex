@@ -9,8 +9,8 @@ import json
 from pathlib import Path
 
 import pytest
-from fastmcp import Client
 from jsonschema import validate
+from tests.support import Client
 
 from claude_in_codex.schemas import (
     DRY_RUN_SCHEMA,
