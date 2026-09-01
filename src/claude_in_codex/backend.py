@@ -253,9 +253,10 @@ class ClaudeBackend:
 BACKEND = ClaudeBackend()
 
 
-# Explicit, not substring matching: `"review" in tool` split claude_dry_run from
-# its own deprecated alias claude_review_dry_run. request.kind is inert today,
-# but an alias must never disagree with its canonical name.
+# Explicit, not substring matching: `"review" in tool` would sort claude_dry_run
+# in with the review tools on a shared substring rather than on what the tool
+# actually does. request.kind is inert today, but the mapping must not depend on
+# name spelling.
 _TOOL_KINDS = {
     "claude_review_changes": "review_changes",
     "claude_review_changes_async": "review_changes",

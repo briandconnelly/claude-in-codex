@@ -27,13 +27,13 @@ Do NOT call Claude in a loop, and never call Claude just because Claude suggeste
 
 ## Choosing the tool
 
-- `claude_consult` — a free-form second opinion or recommendation. (`claude_ask` remains as a deprecated alias until 0.9.0.)
+- `claude_consult` — a free-form second opinion or recommendation.
 - `claude_review_changes` — Claude reviews your git diff (`scope` = working_tree | staged | branch).
 - `claude_adversarial_review` — Claude attacks a plan/claim and lists the strongest counterarguments.
 - `claude_consult_async`, `claude_review_changes_async`, `claude_adversarial_review_async` — the same three calls as background jobs. These three are the only async forms; the deprecated aliases have none. A launch normally returns a `job_id`: poll `claude_job_status`, then `claude_job_result`, which returns the blocking tool's own envelope. Use `claude_job_consume_result` only when you want to fetch and delete the stored record; use `claude_job_cancel` to stop a run early.
 - Branch on `job_id` before polling. `claude_review_changes_async` and `claude_adversarial_review_async` skip the spend when the diff is empty and return the result itself, with no `job_id` to poll. `claude_consult_async` has no diff, so it always returns a handle.
 - `claude_status` — free readiness check: reports whether `claude` is installed, authenticated (`claude_authenticated`), version-compatible (`version_supported`), and overall `ready`, plus the resolved defaults a no-arg call would use. Run it first if a call fails, or to confirm readiness before spending.
-- `claude_dry_run` — free preview of what a diff review would send: resolved workspace, diff byte size, whether it would be truncated, and which paths would be redacted. No paid call. Run it before a large review to confirm scope and workspace. (`claude_review_dry_run` remains as a deprecated alias until 0.9.0.)
+- `claude_dry_run` — free preview of what a diff review would send: resolved workspace, diff byte size, whether it would be truncated, and which paths would be redacted. No paid call. Run it before a large review to confirm scope and workspace.
 - `claude_job_list` — free list of this workspace's background jobs (id, status, cost), newest first. Use it to recover a `job_id` lost across context compaction or interruption -- and pass `idempotency_key` on the launch so that a retry after a dropped connection replays the existing job instead of paying twice, whether or not you can still find its id.
 - `claude_models` — free, read-only catalog of the slugs you may pass as `model`: alias slugs (`kind="alias"`, e.g. `opus`/`sonnet`, which track the latest model) and pinned full IDs. Prefer an alias. The list is advisory and bundled-static — the `claude` CLI is the run-time authority, so an unlisted slug may work and a listed one may be unavailable to your account. Read it before passing `model`.
 - `claude_capabilities` — free capability contract: tool inventory, compact per-tool routing metadata, scope, prerequisites, and the fingerprint to pin.

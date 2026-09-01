@@ -38,7 +38,7 @@ async def test_status_live():
 async def test_ask_live_roundtrip():
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_ask",
+            "claude_consult",
             {
                 "prompt": "Reply that 2+2 equals 4 and give verdict pass.",
                 "model": "haiku",
@@ -47,7 +47,7 @@ async def test_ask_live_roundtrip():
             },
         )
     data = structured(result)
-    print("\n--- live claude_ask result ---")
+    print("\n--- live claude_consult result ---")
     import json
 
     print(json.dumps(data, indent=2))
@@ -62,7 +62,7 @@ async def test_ask_live_roundtrip():
 async def test_ask_live_safe_mode_roundtrip():
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_ask",
+            "claude_consult",
             {
                 "prompt": "Reply that safe mode works and give verdict pass.",
                 "config_mode": "safe",
@@ -72,7 +72,7 @@ async def test_ask_live_safe_mode_roundtrip():
             },
         )
     data = structured(result)
-    print("\n--- live claude_ask safe-mode result ---")
+    print("\n--- live claude_consult safe-mode result ---")
     import json
 
     print(json.dumps(data, indent=2))

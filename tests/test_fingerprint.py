@@ -34,7 +34,7 @@ from tests.support import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "ed93a2d6c5b55de24278befd9e5bad1c80772bd3e4170e64ef66bc6d7f814f58"
+EXPECTED_CONTRACT_DIGEST = "02dbc9246a64a3f1a8fb2111116f669fa27f3beaabb31041e2d9341a7e85a071"
 
 
 async def _contract_surface() -> dict:
@@ -121,7 +121,6 @@ async def test_contract_surface_pins_annotations_and_descriptions():
     surface = await _contract_surface()
     for name in (
         "claude_consult",
-        "claude_ask",  # deprecated alias; must keep the paid annotations + disclosures
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",

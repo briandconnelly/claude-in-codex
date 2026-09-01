@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import os
 import shutil
@@ -129,7 +128,7 @@ CAPABILITY_SUMMARY = (
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
     "config_mode=bare disable hooks. Paid tools send context to Anthropic; check "
     "claude_status first. claude_models lists model slugs. "
-    "Paid tools have claude_*_async forms (deprecated aliases do not): a job_id to "
+    "Every paid tool has a claude_*_async form: a job_id to "
     "poll/result/cancel, absent on an empty diff. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
@@ -1482,26 +1481,6 @@ async def claude_consult(
         return _result(too_large)
     out = await _execute("claude_consult", payload, r, cwd, workspace_source=ws_source)
     return _result(out)
-
-
-# Deprecated alias (removal in 0.9.0): the canonical verb set shared across the
-# agent bridges names this tool claude_consult. Same function, same schema, same
-# envelope — only the wire name and the deprecation notice differ.
-mcp.tool(
-    claude_consult,
-    name="claude_ask",
-    annotations=_PAID_ANNOTATIONS,
-    output_schema=RESULT_SCHEMA,
-    title="Ask Claude (second opinion) — deprecated alias",
-    description=(
-        "[DEPRECATED alias of claude_consult; removal planned for 0.9.0 — call "
-        "claude_consult instead.] Identical parameters, schema, and envelope. "
-        "Paid; sends context to Anthropic. The server grants no Bash/write tools; "
-        "workspace hooks may run shell in config_mode=inherit or config_mode=scoped; "
-        "config_mode=safe and config_mode=bare disable hooks. Egress: prompt/context "
-        "and access=readonly reads are verbatim; reply redaction is best effort."
-    ),
-)
 
 
 @mcp.tool(
@@ -2942,7 +2921,6 @@ async def claude_job_cancel(
 
 
 async def _dry_run_impl(
-    tool_name,
     scope,
     base,
     head,
@@ -2951,10 +2929,12 @@ async def _dry_run_impl(
     workspace_root,
     ctx,
 ) -> ToolResult:
-    """Do the dry-run preview for one of the two registered tool names.
+    """Do the dry-run preview.
 
-    The parameters have no annotations. Only the registered wrappers carry the
-    schema-bearing annotations.
+    The parameters have no annotations. Only the registered wrapper carries the
+    schema-bearing annotations. This took a `tool_name` argument while
+    claude_review_dry_run was registered as a second name for it; that alias was
+    removed in 0.9.0, so there is one name to echo and no argument for it.
     """
     cwd, ws_err, ws_source, ws_roots = await _resolve_workspace(workspace_root, ctx)
     if ws_err:
@@ -3006,7 +2986,7 @@ async def _dry_run_impl(
     fs = preflight.flag_support()
     effective_head, diff_range = branch_range(scope, base, head)
     result = DryRunResult(
-        tool=tool_name,
+        tool="claude_dry_run",
         cwd=cwd,
         workspace_source=ws_source,
         workspace_warning=workspace_warning_for(ws_source, cwd),
@@ -3066,7 +3046,6 @@ async def claude_dry_run(
     files would be redacted. Read-only; makes no paid call.
     """
     return await _dry_run_impl(
-        "claude_dry_run",
         scope=scope,
         base=base,
         head=head,
@@ -3075,28 +3054,6 @@ async def claude_dry_run(
         workspace_root=workspace_root,
         ctx=ctx,
     )
-
-
-# Deprecated alias (removal in 0.9.0): the canonical verb set shared across the
-# agent bridges names this tool claude_dry_run. Same parameters and same schema.
-# The envelope's `tool` field echoes the name the caller invoked.
-@functools.wraps(claude_dry_run)
-async def _claude_review_dry_run(**kwargs) -> ToolResult:
-    return await _dry_run_impl("claude_review_dry_run", **kwargs)
-
-
-mcp.tool(
-    _claude_review_dry_run,
-    name="claude_review_dry_run",
-    annotations=_FREE_READ_ANNOTATIONS,
-    output_schema=DRY_RUN_SCHEMA,
-    title="Preview review context (no spend) — deprecated alias",
-    description=(
-        "[DEPRECATED alias of claude_dry_run; removal planned for 0.9.0 — call "
-        "claude_dry_run instead.] Identical parameters and schema; the envelope's "
-        "`tool` field echoes the name you called."
-    ),
-)
 
 
 @mcp.tool(
@@ -3429,12 +3386,8 @@ _TOOL_ERROR_CODES: dict[str, list[str]] = {
     "claude_capabilities": [],
     "claude_models": [],
     "claude_dry_run": _DRY_RUN_ERRORS,
-    # Deprecated alias (removal in 0.9.0): same envelope as claude_dry_run.
-    "claude_review_dry_run": _DRY_RUN_ERRORS,
     # No diff gathering: context_too_large here is the user-supplied-text cap.
     "claude_consult": [*_PAID_SYNC_ERRORS, "context_too_large"],
-    # Deprecated alias (removal in 0.9.0): same envelope as claude_consult.
-    "claude_ask": [*_PAID_SYNC_ERRORS, "context_too_large"],
     "claude_review_changes": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
     "claude_adversarial_review": [*_PAID_SYNC_ERRORS, *_GIT_ERRORS],
     # Preflight only: a started job's own failures arrive via claude_job_result.
@@ -3714,9 +3667,8 @@ _ASYNC_LIFECYCLE = AsyncLifecycle(
         "An expired record is deleted, so it reports job_not_found rather than a "
         "distinct expired state.",
         "start_tools is the complete list: claude_consult, claude_review_changes, "
-        "and claude_adversarial_review each have one, and the deprecated "
-        "claude_ask alias has none (use claude_consult_async). No canonical paid "
-        "call therefore has to be made blocking. Prefer the *_async form whenever "
+        "and claude_adversarial_review each have one, so no paid call has to be "
+        "made blocking. Prefer the *_async form whenever "
         "the run may outlive the caller's patience: a blocking call that is "
         "cancelled or loses its connection loses the work it already paid for, "
         "and a job does not.",
@@ -3793,15 +3745,11 @@ def _capabilities_payload() -> dict:
             "claude_review_changes_async",
             "claude_consult_async",
             "claude_adversarial_review_async",
-            # Deprecated alias of claude_consult; removal planned for 0.9.0.
-            "claude_ask",
         ],
         free_tools=[
             "claude_status",
             "claude_capabilities",
             "claude_dry_run",
-            # Deprecated alias of claude_dry_run; removal planned for 0.9.0.
-            "claude_review_dry_run",
             "claude_job_status",
             "claude_job_result",
             "claude_job_consume_result",
@@ -3826,34 +3774,10 @@ def _capabilities_payload() -> dict:
                 optional=["base", "head", "paths", "config_mode", "workspace_root"],
             ),
             tool_detail(
-                "claude_review_dry_run",
-                "free",
-                "[DEPRECATED alias of claude_dry_run; removal planned for 0.9.0.] "
-                "Identical schema; the envelope's `tool` field echoes the name "
-                "you called.",
-                "same as claude_dry_run, except `tool`",
-                required=["scope"],
-                optional=["base", "head", "paths", "config_mode", "workspace_root"],
-            ),
-            tool_detail(
                 "claude_consult",
                 "paid",
                 "Ask for a second opinion on a question or design choice.",
                 "structured verdict, findings, questions, assumptions, next steps, cost, and usage",
-                required=["prompt"],
-                optional=[
-                    "context",
-                    "workspace_root",
-                    "system_prompt_append",
-                    *sync_execution_knobs,
-                ],
-            ),
-            tool_detail(
-                "claude_ask",
-                "paid",
-                "[DEPRECATED alias of claude_consult; removal planned for 0.9.0.] "
-                "Identical schema and envelope.",
-                "same as claude_consult",
                 required=["prompt"],
                 optional=[
                     "context",
@@ -4091,8 +4015,8 @@ def _capabilities_payload() -> dict:
         annotations_policy=(
             "Static annotations represent the worst case across config modes. "
             "readOnlyHint tracks observable effects: the paid tools (claude_consult, "
-            "claude_review_changes, claude_adversarial_review, each of their "
-            "claude_*_async forms, and the deprecated claude_ask) spend money and "
+            "claude_review_changes, claude_adversarial_review, and each of their "
+            "claude_*_async forms) spend money and "
             "send context to Anthropic, so they are not read-only; their "
             "destructiveHint is true "
             "because config_mode=inherit or config_mode=scoped may execute "

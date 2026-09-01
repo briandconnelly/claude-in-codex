@@ -209,7 +209,7 @@ def test_normalize_summary_omits_raw_text():
         "questions": [],
         "assumptions": [],
     }
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert "text" not in res["raw_response"]
 
 
@@ -228,7 +228,7 @@ def test_normalize_clamps_bad_enums():
             }
         ],
     }
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert res["verdict"] == "unknown"
     assert res["confidence"] == "low"
     assert res["findings"][0]["severity"] == "low"
@@ -241,33 +241,35 @@ def test_normalize_drops_incomplete_findings():
         "confidence": "high",
         "findings": [{"severity": "high", "title": "only a title"}],
     }
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert res["findings"] == []
 
 
 def test_normalize_permission_denial_with_empty_result():
     env = _env("", permission_denials=[{"tool": "Bash"}])
-    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "claude_permission_error"
 
 
 def test_normalize_invalid_outer_json():
-    res = normalize_envelope("claude_ask", "not json", _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", "not json", _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "invalid_json"
 
 
 @pytest.mark.parametrize("stdout", ["[]", '"hello"', "123", "true", "null"])
 def test_normalize_valid_non_object_json_returns_structured_error(stdout):
-    res = normalize_envelope("claude_ask", stdout, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", stdout, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "invalid_json"
     assert "JSON object" in res["error"]["message"]
 
 
 def test_normalize_unstructured_inner_falls_back():
-    res = normalize_envelope("claude_ask", _env("I think this is fine."), _meta(), detail="full")
+    res = normalize_envelope(
+        "claude_consult", _env("I think this is fine."), _meta(), detail="full"
+    )
     assert res["ok"] is True
     assert res["verdict"] == "unknown"
     assert "fine" in res["summary"]
@@ -291,7 +293,7 @@ def test_normalize_denials_recorded_on_success():
 
 def test_normalize_is_error_uses_result_text_not_subtype():
     env = _env("", is_error=True, subtype="success", result="Rate limited; try later.")
-    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "nonzero_exit"
     assert res["error"]["retryable"] is True
@@ -311,7 +313,7 @@ def test_normalize_is_error_uses_result_text_not_subtype():
 )
 def test_zero_exit_is_error_uses_failure_classifier(result, expected_code, retryable):
     env = _env("", is_error=True, subtype="error", result=result)
-    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == expected_code
     assert res["error"].get("retryable", False) is retryable
@@ -319,7 +321,7 @@ def test_zero_exit_is_error_uses_failure_classifier(result, expected_code, retry
 
 def test_non_success_subtype_without_is_error_uses_result_text():
     env = _env("", is_error=False, subtype="error", result="the model declined to answer")
-    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "nonzero_exit"
     assert "the model declined" in res["error"]["message"]
@@ -328,7 +330,7 @@ def test_non_success_subtype_without_is_error_uses_result_text():
 
 def test_non_success_subtype_without_is_error_detects_contract_drift():
     env = _env("", is_error=False, subtype="error", result="error: unknown option '--effort'")
-    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["error"]["code"] == "cli_contract_changed"
 
@@ -342,7 +344,7 @@ def test_normalize_string_questions_not_exploded():
         "questions": "not a list",
         "assumptions": [],
     }
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert res["questions"] == []  # a stray string is ignored, not split into chars
 
 
@@ -399,7 +401,7 @@ def test_normalize_reports_cost_on_error_envelope():
         total_cost_usd=0.004,
         usage={"input_tokens": 20, "output_tokens": 0},
     )
-    res = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert res["ok"] is False
     assert res["meta"]["cost_usd"] == 0.004
     assert res["meta"]["usage"]["input_tokens"] == 20
@@ -478,7 +480,7 @@ def test_list_fields_are_redacted():
         "assumptions": [f"assumed {_SECRET}"],
         "next_steps": [f"revoke {_SECRET}"],
     }
-    out = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    out = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     for field in ("questions", "assumptions", "next_steps"):
         assert _SECRET not in out[field][0], field
         assert "[redacted: secret value]" in out[field][0], field
@@ -486,14 +488,16 @@ def test_list_fields_are_redacted():
 
 def test_raw_response_text_is_redacted_on_detail_full():
     inner = {"summary": f"saw {_SECRET}", "verdict": "concerns", "confidence": "high"}
-    out = normalize_envelope("claude_ask", _env(inner), _meta(), detail="full")
+    out = normalize_envelope("claude_consult", _env(inner), _meta(), detail="full")
     assert _SECRET not in out["raw_response"]["text"]
     assert "[redacted: secret value]" in out["raw_response"]["text"]
 
 
 def test_unstructured_fallback_summary_is_redacted_before_truncation():
     # No JSON object in result -> fallback summary path (text.strip()[:500]).
-    out = normalize_envelope("claude_ask", _env(f"just prose with {_SECRET}"), _meta(), "summary")
+    out = normalize_envelope(
+        "claude_consult", _env(f"just prose with {_SECRET}"), _meta(), "summary"
+    )
     assert _SECRET not in out["summary"]
     assert "[redacted: secret value]" in out["summary"]
 
@@ -530,7 +534,7 @@ def test_error_envelope_result_text_is_redacted():
             "session_id": "s",
         }
     )
-    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    out = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert out["ok"] is False
     assert _SECRET not in json.dumps(out)
 
@@ -571,7 +575,7 @@ def test_permission_denials_are_redacted_in_error_message():
             "permission_denials": [{"tool": "Bash", "input": {"command": f"echo {_SECRET}"}}],
         }
     )
-    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    out = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert out["ok"] is False
     assert _SECRET not in json.dumps(out)
 
@@ -625,7 +629,7 @@ def test_permission_denials_are_redacted_in_meta():
             "permission_denials": [{"tool": "Bash", "input": {"command": f"echo {_SECRET}"}}],
         }
     )
-    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    out = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert out["ok"] is True
     assert _SECRET not in json.dumps(out["meta"]["permission_denials"])
 
@@ -644,7 +648,7 @@ def test_permission_denials_secret_in_dict_key_is_redacted_in_meta():
             "permission_denials": [{"tool_input": {_SECRET: "x"}}],
         }
     )
-    out = normalize_envelope("claude_ask", env, _meta(), detail="summary")
+    out = normalize_envelope("claude_consult", env, _meta(), detail="summary")
     assert _SECRET not in json.dumps(out["meta"]["permission_denials"])
 
 
@@ -676,7 +680,7 @@ def _bulk_inner(n_findings=0, n_items=0, summary="ok", severity="low", text="e")
 def test_bounds_are_inert_for_a_small_result():
     """The instrument must be able to report 'not truncated' — otherwise every
     assertion below would pass against a function that truncates unconditionally."""
-    res = normalize_envelope("claude_ask", _env(_bulk_inner(2, 2)), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(_bulk_inner(2, 2)), _meta(), detail="summary")
     assert "truncation" not in res
     assert len(res["findings"]) == 2
     assert res["questions"] == ["q0", "q1"]
@@ -706,7 +710,7 @@ def test_summary_caps_strings_and_marks_them():
     long_summary = "S" * (bounds.max_summary_chars + 50)
     long_evidence = "E" * (bounds.max_finding_text_chars + 10)
     inner = _bulk_inner(2, 0, summary=long_summary, text=long_evidence)
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert res["summary"] == "S" * bounds.max_summary_chars + TRUNCATION_MARKER
     assert res["findings"][0]["evidence"].endswith(TRUNCATION_MARKER)
     reported = {f["field"]: f for f in res["truncation"]["fields"]}
@@ -727,8 +731,8 @@ def test_summary_is_a_strict_subset_of_full():
     inner = _bulk_inner(bounds.max_findings + 5, bounds.max_list_items + 5, severity="high")
     env = _env(inner)
     ctx = ContextSummary(files_changed=1, lines_added=2, lines_removed=3)
-    summary = normalize_envelope("claude_ask", env, _meta(), "summary", ctx)
-    full = normalize_envelope("claude_ask", env, _meta(), "full", ctx)
+    summary = normalize_envelope("claude_consult", env, _meta(), "summary", ctx)
+    full = normalize_envelope("claude_consult", env, _meta(), "full", ctx)
     # Same field names and types; full adds only the documented full-only fields.
     # `truncation` is metadata ABOUT the bounding, not content, so it is compared
     # separately below.
@@ -763,8 +767,8 @@ def test_subsetting_holds_when_caps_actually_fire_at_summary_only():
         "next_steps": [],
     }
     env = _env(inner)
-    summary = normalize_envelope("claude_ask", env, _meta(), detail="summary")
-    full = normalize_envelope("claude_ask", env, _meta(), detail="full")
+    summary = normalize_envelope("claude_consult", env, _meta(), detail="summary")
+    full = normalize_envelope("claude_consult", env, _meta(), detail="full")
     assert "truncation" in summary and "truncation" not in full
 
     def content(value):
@@ -785,7 +789,7 @@ def test_findings_are_ordered_most_severe_first_so_caps_drop_the_least_severe():
     order = ["nit", "low", "medium", "high", "critical"]
     findings = [_finding(order[i % len(order)], f"t{i}") for i in range(bounds.max_findings + 5)]
     inner = {"summary": "x", "verdict": "pass", "confidence": "high", "findings": findings}
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     severities = [f["severity"] for f in res["findings"]]
     assert severities == sorted(severities, key=["critical", "high", "medium", "low", "nit"].index)
     assert "critical" in severities
@@ -795,7 +799,7 @@ def test_findings_are_ordered_most_severe_first_so_caps_drop_the_least_severe():
 def test_full_mode_bounds_raw_text_and_reports_it():
     bounds = OUTPUT_BOUNDS["full"]
     huge = "x" * (bounds.max_raw_text_chars + 100)
-    res = normalize_envelope("claude_ask", _env(huge), _meta(), detail="full")
+    res = normalize_envelope("claude_consult", _env(huge), _meta(), detail="full")
     assert len(res["raw_response"]["text"]) == bounds.max_raw_text_chars + len(TRUNCATION_MARKER)
     reported = {f["field"]: f for f in res["truncation"]["fields"]}
     assert reported["raw_response.text"]["total"] == len(huge)
@@ -863,7 +867,7 @@ def test_finding_file_paths_are_capped():
         "confidence": "high",
         "findings": [{**_finding(), "file": long_path}],
     }
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert res["findings"][0]["file"] == long_path[: bounds.max_finding_title_chars] + (
         TRUNCATION_MARKER
     )
@@ -903,7 +907,7 @@ def test_collective_counts_cover_only_the_shortened_occurrences():
         "confidence": "high",
         "findings": [_finding(text=over), _finding(text="short")],
     }
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     reported = {f["field"]: f for f in res["truncation"]["fields"]}
     assert reported["findings[].evidence"]["returned"] == bounds.max_finding_text_chars
     assert reported["findings[].evidence"]["total"] == len(over)  # NOT len(over) + 5
@@ -913,7 +917,7 @@ def test_bounds_run_after_redaction_so_a_cap_cannot_re_expose_a_secret():
     bounds = OUTPUT_BOUNDS["summary"]
     secret = "sk-ant-api03-" + "A" * 95
     inner = _bulk_inner(0, 0, summary=secret + " " + "B " * bounds.max_summary_chars)
-    res = normalize_envelope("claude_ask", _env(inner), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(inner), _meta(), detail="summary")
     assert secret not in res["summary"]
     # The cap fired, and still no fragment of the secret survives at its edge.
     assert res["truncation"]["fields"][0]["field"] == "summary"
@@ -927,7 +931,7 @@ def test_unstructured_reply_is_capped_with_a_signal_not_silently_clipped():
     must go through the same caps and report what it dropped."""
     bounds = OUTPUT_BOUNDS["summary"]
     prose = "P" * (bounds.max_summary_chars + 5_000)
-    res = normalize_envelope("claude_ask", _env(prose), _meta(), detail="summary")
+    res = normalize_envelope("claude_consult", _env(prose), _meta(), detail="summary")
     assert res["summary"] == "P" * bounds.max_summary_chars + TRUNCATION_MARKER
     assert res["truncation"]["fields"] == [
         {
@@ -938,7 +942,7 @@ def test_unstructured_reply_is_capped_with_a_signal_not_silently_clipped():
         }
     ]
     # A short unstructured reply still comes back whole, unmarked.
-    short = normalize_envelope("claude_ask", _env("just a sentence"), _meta(), detail="summary")
+    short = normalize_envelope("claude_consult", _env("just a sentence"), _meta(), detail="summary")
     assert short["summary"] == "just a sentence"
     assert "truncation" not in short
 

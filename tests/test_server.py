@@ -8,6 +8,7 @@ from typing import Literal, get_args
 
 import anyio
 import pytest
+from fastmcp.exceptions import ToolError
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from mcp.shared.exceptions import MCPDeprecationWarning, NoBackChannelError
 from pydantic import ValidationError as PydanticValidationError
@@ -76,7 +77,7 @@ def _statically_reachable_error_codes() -> dict[str, set[str]]:
 
 
 PAID_TOOLS = (
-    "claude_ask",
+    "claude_consult",
     "claude_review_changes",
     "claude_adversarial_review",
     "claude_review_changes_async",
@@ -250,7 +251,7 @@ async def _tools_by_name():
 async def test_list_tools():
     names = set(await _tools_by_name())
     assert {
-        "claude_ask",
+        "claude_consult",
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_status",
@@ -270,7 +271,7 @@ async def test_tools_publish_real_output_schema():
 
 async def test_paid_tool_output_schema_describes_both_outcomes():
     # F1: success and error shapes are both discoverable from the schema.
-    schema = (await _tools_by_name())["claude_ask"].output_schema
+    schema = (await _tools_by_name())["claude_consult"].output_schema
     blob = json.dumps(schema)
     assert "summary" in blob and "verdict" in blob  # success branch
     assert "error" in blob and "repair" in blob  # error branch
@@ -279,7 +280,7 @@ async def test_paid_tool_output_schema_describes_both_outcomes():
 async def test_fixed_value_inputs_use_enums():
     # F2: choices are JSON Schema enums, not prose like "inherit|scoped|safe|bare".
     props = (await _tools_by_name())["claude_review_changes"].input_schema["properties"]
-    dry_props = (await _tools_by_name())["claude_review_dry_run"].input_schema["properties"]
+    dry_props = (await _tools_by_name())["claude_dry_run"].input_schema["properties"]
     assert props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert dry_props["scope"]["enum"] == ["working_tree", "staged", "branch"]
     assert props["detail"]["enum"] == ["summary", "full"]
@@ -324,10 +325,6 @@ async def test_tool_descriptions_are_concise_and_disambiguating():
     for tool in tools.values():
         assert len(tool.description or "") <= 450, tool.name
     assert "question or design choice" in tools["claude_consult"].description
-    assert tools["claude_ask"].description.startswith("[DEPRECATED alias of claude_consult")
-    assert tools["claude_review_dry_run"].description.startswith(
-        "[DEPRECATED alias of claude_dry_run"
-    )
     assert "git diff" in tools["claude_review_changes"].description
     assert "background" in tools["claude_review_changes_async"].description
     assert "without deleting" in tools["claude_job_result"].description
@@ -346,7 +343,7 @@ async def test_paid_tool_descriptions_disclose_hook_boundary():
 
 async def test_common_optional_params_are_described():
     tools = await _tools_by_name()
-    for name in ("claude_ask", "claude_review_changes", "claude_adversarial_review"):
+    for name in ("claude_consult", "claude_review_changes", "claude_adversarial_review"):
         props = tools[name].input_schema["properties"]
         assert props["model"]["description"]
         assert props["max_budget_usd"]["description"]
@@ -356,7 +353,7 @@ async def test_common_optional_params_are_described():
         "claude_review_changes",
         "claude_review_changes_async",
         "claude_adversarial_review",
-        "claude_review_dry_run",
+        "claude_dry_run",
     ):
         assert tools[name].input_schema["properties"]["paths"]["description"]
 
@@ -617,7 +614,7 @@ async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_ask",
+            "claude_consult",
             {"prompt": "x", "config_mode": "safe", "workspace_root": str(tmp_path)},
             raise_on_error=False,
         )
@@ -627,16 +624,16 @@ async def test_safe_mode_rejected_before_paid_call_when_help_omits_flag(
     assert "--safe-mode" in data["error"]["message"]
 
 
-async def test_claude_ask_returns_normalized(fake_claude):
+async def test_claude_consult_returns_normalized(fake_claude):
     async with Client(mcp) as client:
-        result = await client.call_tool("claude_ask", {"prompt": "is this safe?"})
+        result = await client.call_tool("claude_consult", {"prompt": "is this safe?"})
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-43"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-44"
 
 
-async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
+async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
     import claude_in_codex.server as srv
 
     async def fail_run(*args, **kwargs):
@@ -646,7 +643,7 @@ async def test_claude_ask_rejects_oversized_prompt_before_paid_call(monkeypatch,
     monkeypatch.setattr(srv, "run_claude_async", fail_run)
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_ask",
+            "claude_consult",
             {"prompt": "x" * 1500, "workspace_root": str(tmp_path)},
             raise_on_error=False,
         )
@@ -681,7 +678,7 @@ async def test_invalid_enum_param_rejected_by_schema(fake_claude):
     # validate locally) rather than round-tripping to a structured error.
     async with Client(mcp) as client:
         with pytest.raises(Exception) as exc:
-            await client.call_tool("claude_ask", {"prompt": "x", "config_mode": "bogus"})
+            await client.call_tool("claude_consult", {"prompt": "x", "config_mode": "bogus"})
     assert "inherit" in str(exc.value)
 
 
@@ -690,7 +687,7 @@ async def test_bogus_env_config_mode_is_structured_error(fake_claude, monkeypatc
     # env default (not a schema-validated parameter).
     monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "bogus")
     async with Client(mcp) as client:
-        result = await client.call_tool("claude_ask", {"prompt": "x"}, raise_on_error=False)
+        result = await client.call_tool("claude_consult", {"prompt": "x"}, raise_on_error=False)
     # F3: error envelope rides on a native is_error result, not a "success".
     assert result.is_error is True
     data = structured(result)
@@ -701,7 +698,7 @@ async def test_bogus_env_config_mode_is_structured_error(fake_claude, monkeypatc
 async def test_bogus_env_access_is_structured_error(fake_claude, monkeypatch):
     monkeypatch.setenv("CLAUDE_IN_CODEX_ACCESS", "bogus")
     async with Client(mcp) as client:
-        result = await client.call_tool("claude_ask", {"prompt": "x"}, raise_on_error=False)
+        result = await client.call_tool("claude_consult", {"prompt": "x"}, raise_on_error=False)
     data = structured(result)
     assert data["error"]["code"] == "unsupported_access"
 
@@ -710,7 +707,7 @@ async def test_bare_without_api_key_errors(fake_claude, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_ask", {"prompt": "x", "config_mode": "bare"}, raise_on_error=False
+            "claude_consult", {"prompt": "x", "config_mode": "bare"}, raise_on_error=False
         )
     data = structured(result)
     assert data["error"]["code"] == "api_key_missing"
@@ -719,7 +716,7 @@ async def test_bare_without_api_key_errors(fake_claude, monkeypatch):
 async def test_success_response_carries_request_id(fake_claude):
     # F7: successful responses also carry a correlation id in meta.
     async with Client(mcp) as client:
-        result = await client.call_tool("claude_ask", {"prompt": "is this safe?"})
+        result = await client.call_tool("claude_consult", {"prompt": "is this safe?"})
     assert structured(result)["meta"]["request_id"]
 
 
@@ -808,7 +805,7 @@ async def test_status_not_ready_when_logged_out(monkeypatch):
 async def test_env_default_config_mode_used(fake_claude, monkeypatch):
     monkeypatch.setenv("CLAUDE_IN_CODEX_CLAUDE_CONFIG", "scoped")
     async with Client(mcp) as client:
-        result = await client.call_tool("claude_ask", {"prompt": "x"})
+        result = await client.call_tool("claude_consult", {"prompt": "x"})
     data = structured(result)
     assert data["meta"]["config_mode"] == "scoped"  # env default applied (param was None)
 
@@ -1305,7 +1302,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-43"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-44"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -1314,8 +1311,6 @@ async def test_capabilities_tool_returns_structured_contract():
         "claude_review_changes_async",
         "claude_consult_async",
         "claude_adversarial_review_async",
-        # Deprecated alias of claude_consult; removal planned for 0.9.0.
-        "claude_ask",
     }
     assert "claude_status" in data["free_tools"]
     for lifecycle in (
@@ -1332,7 +1327,7 @@ async def test_capabilities_tool_returns_structured_contract():
     assert details["claude_review_changes"]["cost"] == "paid"
     assert details["claude_review_changes"]["required_params"] == ["scope"]
     assert {"config_mode", "access", "model", "max_budget_usd"} <= set(
-        details["claude_ask"]["key_optional_params"]
+        details["claude_consult"]["key_optional_params"]
     )
     assert {"config_mode", "access", "model", "timeout_seconds"} <= set(
         details["claude_review_changes"]["key_optional_params"]
@@ -1340,7 +1335,7 @@ async def test_capabilities_tool_returns_structured_contract():
     assert "paths" in details["claude_review_changes"]["key_optional_params"]
     assert "paths" in details["claude_review_changes_async"]["key_optional_params"]
     assert "paths" in details["claude_adversarial_review"]["key_optional_params"]
-    assert {"config_mode", "paths"} <= set(details["claude_review_dry_run"]["key_optional_params"])
+    assert {"config_mode", "paths"} <= set(details["claude_dry_run"]["key_optional_params"])
     assert details["claude_status"]["cost"] == "free"
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
@@ -1388,7 +1383,7 @@ async def test_returned_model_output_is_redacted(monkeypatch):
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
     async with Client(mcp) as client:
-        data = structured(await client.call_tool("claude_ask", {"prompt": "hi"}))
+        data = structured(await client.call_tool("claude_consult", {"prompt": "hi"}))
     assert secret not in data["summary"]  # returned output is scrubbed
     assert "[redacted: secret value]" in data["summary"]
 
@@ -1399,7 +1394,7 @@ async def test_returned_model_output_is_redacted(monkeypatch):
 
 async def test_paid_tool_docstrings_disclose_egress():
     paid = (
-        "claude_ask",
+        "claude_consult",
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",
@@ -1414,38 +1409,34 @@ async def test_paid_tool_docstrings_disclose_egress():
 
 async def test_list_tools_includes_new_free_tools():
     names = set(await _tools_by_name())
-    assert {"claude_review_dry_run", "claude_job_list", "claude_capabilities"} <= names
+    assert {"claude_dry_run", "claude_job_list", "claude_capabilities"} <= names
 
 
 async def test_claude_capabilities_returns_expected_free_tools():
     async with Client(mcp) as client:
         data = structured(await client.call_tool("claude_capabilities", {}))
-    assert "claude_review_dry_run" in data["free_tools"]
+    assert "claude_dry_run" in data["free_tools"]
     assert "claude_job_list" in data["free_tools"]
     assert "claude_models" in data["free_tools"]
     # The readonly redaction-bypass caveat is now in the negative scope.
     assert any("readonly" in s for s in data["negative_scope"])
 
 
-async def test_dry_run_envelopes_echo_the_invoked_name(monkeypatch, git_repo):
-    """Request name and envelope `tool` must agree, for BOTH registered names."""
+async def test_dry_run_envelope_echoes_the_invoked_name(monkeypatch, git_repo):
+    """Request name and envelope `tool` must agree.
+
+    This looped over both registered names while claude_dry_run existed;
+    that alias was removed in 0.9.0, so there is one name and `tool` is a
+    single-value Literal. The assertion is kept because the field is still a
+    claim about which tool answered."""
     monkeypatch.chdir(git_repo)
-    for name in ("claude_dry_run", "claude_review_dry_run"):
-        async with Client(mcp) as client:
-            data = structured(
-                await client.call_tool(
-                    name, {"scope": "working_tree", "workspace_root": str(git_repo)}
-                )
-            )
-        assert data["tool"] == name
-
-
-async def test_dry_run_alias_input_schema_is_identical():
-    """The alias promises identical parameters. Pin that the split did not
-    change either signature."""
     async with Client(mcp) as client:
-        tools = {t.name: t for t in await client.list_tools()}
-    assert tools["claude_dry_run"].input_schema == tools["claude_review_dry_run"].input_schema
+        data = structured(
+            await client.call_tool(
+                "claude_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+            )
+        )
+    assert data["tool"] == "claude_dry_run"
 
 
 async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
@@ -1454,11 +1445,11 @@ async def test_dry_run_previews_without_spending(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+                "claude_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
             )
         )
     assert data["ok"] is True
-    assert data["tool"] == "claude_review_dry_run"
+    assert data["tool"] == "claude_dry_run"
     assert data["cwd"] == str(git_repo)
     assert data["workspace_source"] == "param"
     assert data["diff_bytes"] > 0
@@ -1476,7 +1467,7 @@ async def test_dry_run_echoes_paths_and_filtered_summary(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {
                     "scope": "working_tree",
                     "paths": ["other.py"],
@@ -1497,7 +1488,7 @@ async def test_dry_run_reports_redaction_count(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+                "claude_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
             )
         )
     assert data["redacted_paths_count"] >= 1
@@ -1512,7 +1503,7 @@ async def test_dry_run_reports_workspace_hooks(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+                "claude_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
             )
         )
     assert data["resolved_config_mode"] == "inherit"
@@ -1527,7 +1518,7 @@ async def test_dry_run_does_not_claim_hooks_disabled_when_bare_unavailable(monke
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+                "claude_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
             )
         )
     assert data["resolved_config_mode"] == "bare"
@@ -1541,7 +1532,7 @@ async def test_dry_run_claims_hooks_disabled_for_safe_without_api_key(monkeypatc
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
+                "claude_dry_run", {"scope": "working_tree", "workspace_root": str(git_repo)}
             )
         )
     assert data["resolved_config_mode"] == "safe"
@@ -1554,7 +1545,7 @@ async def test_dry_run_accepts_per_call_safe_config(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {
                     "scope": "working_tree",
                     "workspace_root": str(git_repo),
@@ -1579,7 +1570,7 @@ async def test_dry_run_rejects_safe_when_help_omits_flag(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {
                     "scope": "working_tree",
                     "workspace_root": str(git_repo),
@@ -1703,7 +1694,7 @@ async def test_dry_run_bad_base_is_structured_error(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {
                     "scope": "branch",
                     "base": "-badref",
@@ -1722,7 +1713,7 @@ async def test_dry_run_nonexistent_base_is_invalid_base(git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {
                     "scope": "branch",
                     "base": "definitely-not-a-real-branch",
@@ -1764,7 +1755,7 @@ async def test_meta_echoes_requested_budget(fake_claude, monkeypatch, git_repo):
     monkeypatch.chdir(git_repo)
     async with Client(mcp) as client:
         data = structured(
-            await client.call_tool("claude_ask", {"prompt": "x", "max_budget_usd": 0.25})
+            await client.call_tool("claude_consult", {"prompt": "x", "max_budget_usd": 0.25})
         )
     assert data["meta"]["requested_max_budget_usd"] == 0.25
     assert data["meta"]["effective_max_budget_usd"] == 0.25
@@ -1777,7 +1768,9 @@ async def test_meta_distinguishes_raw_env_budget_from_effective_budget(
     monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_BUDGET_USD", "99")
     async with Client(mcp) as client:
         data = structured(
-            await client.call_tool("claude_ask", {"prompt": "x", "workspace_root": str(git_repo)})
+            await client.call_tool(
+                "claude_consult", {"prompt": "x", "workspace_root": str(git_repo)}
+            )
         )
     assert "requested_max_budget_usd" not in data["meta"]
     assert data["meta"]["configured_max_budget_usd"] == 99.0
@@ -1818,7 +1811,7 @@ async def test_paid_prompt_is_passed_over_stdin_not_argv(monkeypatch, tmp_path):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_ask", {"prompt": prompt, "workspace_root": str(tmp_path)}
+                "claude_consult", {"prompt": prompt, "workspace_root": str(tmp_path)}
             )
         )
     assert data["ok"] is True
@@ -1929,7 +1922,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
     async with Client(mcp) as client:
-        result = await client.call_tool("claude_ask", {"prompt": "x"}, raise_on_error=False)
+        result = await client.call_tool("claude_consult", {"prompt": "x"}, raise_on_error=False)
     data = structured(result)
     assert data["ok"] is False
     assert data["error"]["code"] == "budget_exceeded"
@@ -1942,7 +1935,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
 @pytest.mark.parametrize(
     "tool,args",
     [
-        ("claude_ask", {"prompt": "x"}),
+        ("claude_consult", {"prompt": "x"}),
         ("claude_adversarial_review", {"target": "x"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
         ("claude_consult_async", {"prompt": "x"}),
@@ -1951,7 +1944,7 @@ async def test_paid_failure_reports_cost_on_error_meta(monkeypatch):
         ("claude_job_result", {"job_id": "d" * 32}),
         ("claude_job_consume_result", {"job_id": "d" * 32}),
         ("claude_job_cancel", {"job_id": "d" * 32}),
-        ("claude_review_dry_run", {"scope": "working_tree"}),
+        ("claude_dry_run", {"scope": "working_tree"}),
         ("claude_job_list", {}),
     ],
 )
@@ -2029,7 +2022,7 @@ def _fake_ctx(**over):
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
         ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
-        ("claude_review_dry_run", {"scope": "working_tree"}),
+        ("claude_dry_run", {"scope": "working_tree"}),
     ],
 )
 async def test_invalid_scope_from_gather_context(tool, args, monkeypatch, git_repo, tmp_path):
@@ -2055,7 +2048,7 @@ async def test_invalid_scope_from_gather_context(tool, args, monkeypatch, git_re
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
         ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
-        ("claude_review_dry_run", {"scope": "working_tree"}),
+        ("claude_dry_run", {"scope": "working_tree"}),
     ],
 )
 async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_repo, tmp_path):
@@ -2092,7 +2085,7 @@ async def test_internal_error_from_gather_context(tool, args, monkeypatch, git_r
         ("claude_adversarial_review", {"target": "x", "scope": "working_tree"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
         ("claude_adversarial_review_async", {"target": "x", "scope": "working_tree"}),
-        ("claude_review_dry_run", {"scope": "working_tree"}),
+        ("claude_dry_run", {"scope": "working_tree"}),
     ],
 )
 async def test_git_environment_errors_from_gather_context(
@@ -2207,7 +2200,7 @@ async def test_execute_nonzero_exit_non_json_stdout(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "claude_ask", {"prompt": "x", "workspace_root": str(tmp_path)}, raise_on_error=False
+            "claude_consult", {"prompt": "x", "workspace_root": str(tmp_path)}, raise_on_error=False
         )
     assert structured(result)["ok"] is False
 
@@ -2311,7 +2304,7 @@ async def test_tool_schemas_expose_head():
         "claude_review_changes",
         "claude_review_changes_async",
         "claude_adversarial_review",
-        "claude_review_dry_run",
+        "claude_dry_run",
     ):
         props = tools[name].input_schema["properties"]
         assert "head" in props, name
@@ -2326,7 +2319,7 @@ async def test_capabilities_include_head():
         "claude_review_changes",
         "claude_review_changes_async",
         "claude_adversarial_review",
-        "claude_review_dry_run",
+        "claude_dry_run",
     ):
         assert "head" in details[name]["key_optional_params"], name
 
@@ -2520,7 +2513,7 @@ async def test_dry_run_reports_effective_head_and_range(monkeypatch, git_repo):
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {
                     "scope": "branch",
                     "base": base,
@@ -2538,7 +2531,7 @@ async def test_dry_run_non_branch_leaves_head_and_range_unset(monkeypatch, git_r
     async with Client(mcp) as client:
         data = structured(
             await client.call_tool(
-                "claude_review_dry_run",
+                "claude_dry_run",
                 {"scope": "working_tree", "workspace_root": str(git_repo)},
             )
         )
@@ -2617,7 +2610,7 @@ async def test_async_threads_head_into_meta_and_job(monkeypatch, git_repo, tmp_p
     assert res["meta"]["diff_range"] == f"{base}...{head}"
 
 
-def _call_validation_error(title: str = "call[claude_ask]") -> PydanticValidationError:
+def _call_validation_error(title: str = "call[claude_consult]") -> PydanticValidationError:
     """A pydantic ValidationError shaped like FastMCP's call-adapter failure."""
     model = create_model(title, effort=(Literal["low", "high"], ...))
     with pytest.raises(PydanticValidationError) as excinfo:
@@ -2656,9 +2649,7 @@ def test_argument_error_ignores_a_tool_body_model_error():
 
 async def test_invalid_enum_argument_returns_envelope():
     async with Client(mcp) as client:
-        res = await client.call_tool(
-            "claude_review_dry_run", {"scope": "bogus"}, raise_on_error=False
-        )
+        res = await client.call_tool("claude_dry_run", {"scope": "bogus"}, raise_on_error=False)
     assert res.is_error is True
     payload = structured(res)
     assert payload["ok"] is False
@@ -2672,7 +2663,7 @@ async def test_invalid_enum_argument_returns_envelope():
 @pytest.mark.parametrize(
     ("tool", "arguments"),
     [
-        ("claude_ask", {"prompt": "x"}),
+        ("claude_consult", {"prompt": "x"}),
         ("claude_review_changes", {"scope": "working_tree"}),
         ("claude_adversarial_review", {"target": "x"}),
         ("claude_review_changes_async", {"scope": "working_tree"}),
@@ -2735,7 +2726,7 @@ async def test_invalid_job_id_returns_validation_envelope(job_id):
 
 async def test_missing_required_argument_returns_envelope():
     async with Client(mcp) as client:
-        res = await client.call_tool("claude_review_dry_run", {}, raise_on_error=False)
+        res = await client.call_tool("claude_dry_run", {}, raise_on_error=False)
     assert res.is_error is True
     err = structured(res)["error"]
     assert err["code"] == "invalid_arguments"
@@ -2747,9 +2738,7 @@ async def test_missing_required_argument_returns_envelope():
 
 async def test_invalid_enum_argument_carries_allowed_values():
     async with Client(mcp) as client:
-        res = await client.call_tool(
-            "claude_review_dry_run", {"scope": "bogus"}, raise_on_error=False
-        )
+        res = await client.call_tool("claude_dry_run", {"scope": "bogus"}, raise_on_error=False)
     err = structured(res)["error"]
     assert err["code"] == "invalid_arguments"
     assert err["details"]["allowed_values"] == ["working_tree", "staged", "branch"]
@@ -2803,7 +2792,7 @@ async def test_job_not_found_carries_repair_tool(tmp_path):
 async def test_invalid_enum_repair_rebuilds_the_call_minus_the_bad_field():
     async with Client(mcp) as client:
         res = await client.call_tool(
-            "claude_review_dry_run",
+            "claude_dry_run",
             {"scope": "bogus", "base": "main", "paths": ["src"]},
             raise_on_error=False,
         )
@@ -2811,7 +2800,7 @@ async def test_invalid_enum_repair_rebuilds_the_call_minus_the_bad_field():
     action = err["action"]
     assert err["retryable"] is False  # the identical call can never succeed
     assert action["next_step"] == "retry_with_changes"
-    assert action["tool"] == "claude_review_dry_run"
+    assert action["tool"] == "claude_dry_run"
     # Every still-valid argument survives; only the invalid one is dropped.
     assert action["arguments"] == {"base": "main", "paths": ["src"]}
     assert err["details"]["value"] == "bogus"
@@ -2823,13 +2812,13 @@ async def test_oversized_repair_arguments_are_omitted_not_echoed(monkeypatch):
 
     async with Client(mcp) as client:
         res = await client.call_tool(
-            "claude_ask",
+            "claude_consult",
             {"prompt": "x" * (REPAIR_ARGS_MAX_BYTES + 1), "effort": "bogus"},
             raise_on_error=False,
         )
     err = structured(res)["error"]
     assert err["action"]["next_step"] == "retry_with_changes"
-    assert err["action"]["tool"] == "claude_ask"
+    assert err["action"]["tool"] == "claude_consult"
     assert "arguments" not in err["action"]
 
 
@@ -2852,7 +2841,7 @@ async def test_oversized_user_input_reports_typed_sizes(monkeypatch):
     # 1_000 is max_input_bytes' hard floor, so it is the smallest testable cap.
     monkeypatch.setenv("CLAUDE_IN_CODEX_MAX_INPUT_BYTES", "1000")
     async with Client(mcp) as client:
-        res = await client.call_tool("claude_ask", {"prompt": "y" * 2000}, raise_on_error=False)
+        res = await client.call_tool("claude_consult", {"prompt": "y" * 2000}, raise_on_error=False)
     err = structured(res)["error"]
     assert err["code"] == "context_too_large"
     details = err["details"]
@@ -3344,7 +3333,7 @@ async def test_annotation_contract():
     assert cancel.read_only_hint is False
     assert cancel.idempotent_hint is True
     # Pure reads: no spend, no job-lifecycle side effects.
-    for name in ("claude_status", "claude_capabilities", "claude_models", "claude_review_dry_run"):
+    for name in ("claude_status", "claude_capabilities", "claude_models", "claude_dry_run"):
         ann = tools[name].annotations
         assert ann.read_only_hint is True, name
         assert ann.destructive_hint is None, name
@@ -3402,7 +3391,7 @@ async def test_capabilities_publishes_the_detail_contract():
 async def test_paid_tool_detail_params_point_at_the_capability_contract():
     tools = await _tools_by_name()
     for name in (
-        "claude_ask",
+        "claude_consult",
         "claude_review_changes",
         "claude_adversarial_review",
         "claude_review_changes_async",
@@ -3484,33 +3473,6 @@ async def test_initialize_reports_application_version_and_name():
     assert server_info["name"] == capabilities["name"]
     assert server_info["version"] == capabilities["version"]
     assert instructions == CAPABILITY_SUMMARY
-
-
-async def test_deprecated_aliases_match_their_primaries(fake_claude):
-    """Both deprecated aliases take the same arguments and publish the same
-    schemas as their primaries. Removal planned for 0.9.0.
-
-    The envelope claim holds for claude_ask only, and that is deliberate: a
-    dry-run envelope echoes the NAME the caller invoked, so claude_review_dry_run
-    and claude_dry_run differ in exactly that one field. This test asserts full
-    envelope equality for the consult pair and schema equality for both pairs;
-    test_dry_run_envelopes_echo_the_invoked_name owns the difference.
-    """
-    async with Client(mcp) as client:
-        primary = structured(await client.call_tool("claude_consult", {"prompt": "is this safe?"}))
-        alias = structured(await client.call_tool("claude_ask", {"prompt": "is this safe?"}))
-    # Identical modulo the genuinely per-call meta fields.
-    for envelope in (primary, alias):
-        for per_call in ("request_id", "elapsed_ms"):
-            envelope["meta"].pop(per_call, None)
-    assert alias == primary
-
-    async with Client(mcp) as client:
-        tools = {t.name: t for t in await client.list_tools()}
-    assert tools["claude_ask"].input_schema == tools["claude_consult"].input_schema
-    assert tools["claude_ask"].output_schema == tools["claude_consult"].output_schema
-    assert tools["claude_review_dry_run"].input_schema == tools["claude_dry_run"].input_schema
-    assert tools["claude_review_dry_run"].output_schema == tools["claude_dry_run"].output_schema
 
 
 @pytest.mark.parametrize(
@@ -3787,7 +3749,7 @@ async def test_every_paid_tool_has_a_recoverable_execution_path():
     """
     data = _capabilities_payload()
     starters = set(data["async_lifecycle"]["start_tools"])
-    aliases = {"claude_ask": "claude_consult"}
+    aliases = {"claude_consult": "claude_consult"}
     for tool in data["paid_tools"]:
         canonical = aliases.get(tool, tool)
         assert canonical in starters or f"{canonical}_async" in starters, (
@@ -4280,19 +4242,22 @@ async def test_a_keyed_retry_that_changes_only_system_prompt_append_conflicts(
     assert same["job_id"] == first["job_id"]
 
 
-async def test_capability_summary_does_not_promise_an_alias_async_form():
+async def test_no_paid_tool_ships_blocking_only():
     """CAPABILITY_SUMMARY is first-read instruction text, so a universal claim in
-    it sends agents to tools that do not exist. `paid_tools` includes the
-    deprecated `claude_ask`, and there is no `claude_ask_async`."""
+    it sends agents to tools that do not exist.
+
+    The claim is now unconditional: every paid tool has an async form. It used to
+    carry an exception for the deprecated claude_ask, which had none, and that
+    alias was removed in 0.9.0 -- so the carve-out went with it, and this asserts
+    the stronger property instead. Any name reaching `blocking` means a new paid
+    tool shipped blocking-only, which loses paid work on a dropped connection."""
     data = _capabilities_payload()
     starters = set(data["async_lifecycle"]["start_tools"])
     blocking = [t for t in data["paid_tools"] if t not in starters]
-    # The deprecated alias is the ONE blocking paid tool with no async form, and
-    # it is deprecated rather than missing one. Any other name reaching this list
-    # means a new paid tool shipped blocking-only.
-    assert [t for t in blocking if f"{t}_async" not in starters] == ["claude_ask"]
+    assert [t for t in blocking if f"{t}_async" not in starters] == []
     summary = CAPABILITY_SUMMARY.lower()
-    assert "deprecated aliases do not" in summary
+    assert "every paid tool has a claude_*_async form" in summary
+    assert "deprecated" not in summary
     # And it must not tell a caller to assume the handle it may not get.
     assert "absent on an empty diff" in summary
 
@@ -6104,3 +6069,38 @@ async def test_review_still_pays_for_path_match_probes(fake_claude, git_repo, mo
             {"scope": "working_tree", "paths": ["app.py"], "workspace_root": str(git_repo)},
         )
     assert probes == [["app.py"]]
+
+
+# --- 0.9.0: the deprecated aliases are removed ---
+
+
+@pytest.mark.parametrize("alias", ["claude_ask", "claude_review_dry_run"])
+async def test_deprecated_aliases_are_no_longer_registered(alias):
+    """Both aliases were deprecated in 0.8.0 for removal in 0.9.0.
+
+    A deprecation window that never closes is not a window. The canonical verbs
+    -- claude_consult and claude_dry_run -- are the shared set across the agent
+    bridges; these names carried duplicate copies of their primaries' full
+    schemas in every tools/list."""
+    async with Client(mcp) as client:
+        names = {t.name for t in await client.list_tools()}
+
+    assert alias not in names
+
+
+@pytest.mark.parametrize("canonical", ["claude_consult", "claude_dry_run", "claude_consult_async"])
+async def test_canonical_verbs_survive_the_alias_removal(canonical):
+    """The control: removal must take the aliases and nothing else.
+
+    Without this, deleting both primaries would satisfy the assertion above."""
+    async with Client(mcp) as client:
+        names = {t.name for t in await client.list_tools()}
+
+    assert canonical in names
+
+
+async def test_calling_a_removed_alias_fails(git_repo):
+    """A caller still on the old name gets a hard error, not a silent no-op."""
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError):
+            await client.call_tool("claude_ask", {"prompt": "hi", "workspace_root": str(git_repo)})
