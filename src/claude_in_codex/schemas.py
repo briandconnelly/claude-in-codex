@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-42"
+FINGERPRINT = "claude-in-codex/0.1/schema-43"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -301,6 +301,26 @@ class Meta(BaseModel):
     head: str | None = None
     diff_range: str | None = None  # effective base...head for scope=branch
     paths: list[str] | None = None
+    # How many changed files each `paths` entry selected, aligned index-for-index
+    # with `paths` above. `paths` alone cannot report this: it echoes the caller's
+    # list, so it agrees with their typo (#149).
+    #
+    # A zero means the pathspec selected no CHANGED files -- nothing more. It does
+    # not establish that the review missed anything: the entry may be a typo, or
+    # may name a real path with no changes in it, and a diff query over an
+    # unchanged path covered it correctly. Entries may also overlap and represent
+    # very different amounts of the tree, so the counts describe the filter's
+    # shape, not the review's coverage. Read a zero as "look at this entry", not
+    # as "this scope was skipped".
+    #
+    # None has exactly three causes: there was no filter; the list exceeded
+    # MAX_PATH_MATCH_PROBES; or the envelope was rebuilt from a background-job
+    # record written before this field existed. The third is a real post-upgrade
+    # case -- records outlive a release by their TTL -- and it is NOT recomputed at
+    # fetch time on purpose: the counts describe the diff as gathered at launch,
+    # and the working tree may have moved since. A legacy record is recognizable
+    # by `paths` being present and non-empty while this is absent.
+    paths_matched: list[int] | None = None
     timeout_seconds: int
     elapsed_ms: int
     # The explicit per-call argument. None when the caller omitted it and the
@@ -840,7 +860,7 @@ _META_STUB = {
     "type": "object",
     "description": (
         "Execution metadata: cwd, workspace_source/warning, config_mode, access, "
-        "scope, base/head/diff_range, paths, timeout_seconds, elapsed_ms, "
+        "scope, base/head/diff_range, paths, paths_matched, timeout_seconds, elapsed_ms, "
         "requested/configured/effective_max_budget_usd, truncated/truncation_hint, "
         "command_exit_code, "
         "permission_denials, compat/security warnings, redacted_paths, cost_usd, "

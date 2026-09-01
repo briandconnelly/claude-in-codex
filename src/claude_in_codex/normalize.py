@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 from claude_in_codex import cli_contract
 from claude_in_codex.claude import ClaudeRun, classify_failure
 from claude_in_codex.config import compose_focus
-from claude_in_codex.context import redact_text, sanitize_echo_prose
+from claude_in_codex.context import ContextResult, redact_text, sanitize_echo_prose
 from claude_in_codex.schemas import (
     OUTPUT_BOUNDS,
     TRUNCATION_MARKER,
@@ -88,6 +88,45 @@ _PATH_FILTER_NOTE = (
     "reads, material outside the diff is context only and does not widen the review."
 )
 
+
+# The unmatched-entry clause, appended to _PATH_FILTER_NOTE (#149). Server-authored
+# end to end and made of two integers, so it carries no caller bytes and is not an
+# injection channel.
+#
+# What a zero does NOT establish: that the review is missing anything. An entry
+# that selected no changed files may be a typo, or may be a perfectly good path
+# with nothing changed in it -- `paths=["src", "docs"]` on a branch that did not
+# touch docs is the ordinary case, not a defect. Entries are not equal-sized units
+# of scope either, and they may overlap, so counting them measures the filter's
+# shape and not the diff's. The clause therefore reports the fact and names the
+# ambiguity, and explicitly tells Claude not to treat it as a coverage gap. An
+# earlier draft asserted missing coverage and was wrong to.
+#
+# It DOES publish the number of filter entries, which #147 declined to send. That
+# is a deliberate divergence: #147 left it out because alone it "would describe
+# the filter, not the review", and the bare unmatched count has the same problem
+# in reverse -- "1 selected nothing" reads very differently at 2 entries than at
+# 30. The denominator calibrates how much of the filter is in question. It is NOT
+# a coverage ratio and must not be described as one.
+#
+# Emitted only when something actually matched nothing, so an ordinary filtered
+# review is unchanged.
+def _unmatched_clause(counts: list[int] | None) -> str:
+    if not counts:
+        return ""
+    unmatched = sum(1 for count in counts if count == 0)
+    if unmatched == 0:
+        return ""
+    return (
+        f" Of the entries the caller supplied, {unmatched} of {len(counts)} selected no "
+        "changed files. That is ambiguous on its own: such an entry may be a typo, or may "
+        "name a real path that simply has no changes in it. Entries are not equal-sized "
+        "units of scope, so this is not by itself evidence that anything is missing from "
+        "the diff. Raise it in `questions` or `assumptions`; do not treat it as a "
+        "coverage gap or let it move the verdict."
+    )
+
+
 _VALID_VERDICT = {"pass", "concerns", "fail", "unknown"}
 _VALID_CONFIDENCE = {"low", "medium", "high"}
 _VALID_SEVERITY = {"critical", "high", "medium", "low", "nit"}
@@ -131,9 +170,33 @@ def _sanitize_denials_tree(value: object) -> object:
     return value
 
 
-def build_prompt(tool: str, payload: dict[str, Any], context_text: str) -> str:
+def build_prompt(
+    tool: str,
+    payload: dict[str, Any],
+    context_text: str,
+    context: ContextResult | None = None,
+) -> str:
+    """Compose the prompt for one tool.
+
+    `context` carries the server's own measurement of which path-filter entries
+    actually selected files. It is optional because claude_consult builds a
+    prompt with no gathered diff at all; when it is absent, the unmatched-entry
+    clause simply does not fire.
+
+    There is deliberately no truncation notice here. A truncated diff never
+    reaches Claude: every paid path refuses it with `context_too_large` before
+    spend, which is what makes _PATH_FILTER_NOTE's "the diff names every file it
+    contains" true unconditionally. That refusal is pinned by
+    tests/test_server.py::test_a_truncated_diff_never_reaches_claude -- if it is
+    ever softened into a warning, a notice belongs here and that test fails first
+    (#148).
+    """
     parts = [_LEAD.get(tool, _LEAD["claude_consult"])]
-    paths_note = _PATH_FILTER_NOTE if payload.get("paths") else ""
+    paths_note = ""
+    if payload.get("paths"):
+        paths_note = _PATH_FILTER_NOTE + _unmatched_clause(
+            context.path_match_counts if context else None
+        )
     if tool == "claude_consult":
         parts.append(payload["prompt"])
         if payload.get("context"):

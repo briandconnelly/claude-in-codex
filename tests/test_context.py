@@ -948,3 +948,118 @@ def test_classify_failure_does_not_echo_a_wedged_secret_in_structured_result():
 
     ansi_message = classify_failure(ansi_run).message
     assert chr(27) not in ansi_message
+
+
+# --- #149: which path-filter entries actually selected files ---
+
+
+def test_path_match_counts_align_positionally_with_the_requested_paths(git_repo):
+    """A filter entry matching nothing must be visible as a zero in its own slot.
+
+    `meta.paths` echoes the caller's list verbatim, so the counts are only
+    readable if index i describes entry i. `normalize_paths` raises rather than
+    dropping entries, which is what keeps the two lists the same length."""
+    (git_repo / "other.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "-Nf", "other.py"], cwd=git_repo, check=True)
+
+    res = gather_context(
+        str(git_repo), scope="working_tree", base="main", paths=["other.py", "tets", "app.py"]
+    )
+
+    assert res.path_match_counts == [1, 0, 1]
+
+
+def test_path_match_counts_are_none_without_a_path_filter(git_repo):
+    """The control: an unfiltered review has no entries to report on.
+
+    Without it, a counts list built unconditionally (e.g. `[]`) would read as
+    'the filter selected nothing' on every unfiltered call."""
+    res = gather_context(str(git_repo), scope="working_tree", base="main")
+
+    assert res.path_match_counts is None
+
+
+def test_path_match_counts_are_none_when_there_are_too_many_entries(git_repo, monkeypatch):
+    """Above the probe cap the server reports nothing rather than running N diffs.
+
+    Each entry costs its own git diff, and `paths` has no maxItems, so an
+    unbounded caller list would otherwise turn one review into arbitrarily many
+    git invocations."""
+    import claude_in_codex.context as ctx
+
+    monkeypatch.setattr(ctx, "MAX_PATH_MATCH_PROBES", 2)
+
+    res = gather_context(
+        str(git_repo), scope="working_tree", base="main", paths=["app.py", "a", "b"]
+    )
+
+    assert res.path_match_counts is None
+    # The filter itself still applied -- only the reporting was skipped.
+    assert "app.py" in res.text
+
+
+def test_path_match_counts_survive_truncation(git_repo, monkeypatch):
+    """The counts describe what the filter SELECTED, not what fit in the prompt.
+
+    They are measured per entry with git, so a byte slice applied afterwards
+    cannot silently turn a matched entry into a zero."""
+    import claude_in_codex.context as ctx
+
+    (git_repo / "big.py").write_text("x = 1\n" * 1000)
+    subprocess.run(["git", "add", "-Nf", "big.py"], cwd=git_repo, check=True)
+    monkeypatch.setattr(ctx, "MAX_DIFF_BYTES", 50)
+
+    res = gather_context(
+        str(git_repo), scope="working_tree", base="main", paths=["big.py", "app.py"]
+    )
+
+    assert res.truncated is True
+    assert res.path_match_counts == [1, 1]
+
+
+def test_path_match_probes_can_be_skipped_by_the_caller(git_repo):
+    """A caller that will not surface the counts must not pay for them.
+
+    claude_dry_run is the free preview: it gathers the same diff but has no
+    field to report the counts in yet (#155), so probing there is work that is
+    measured and thrown away."""
+    res = gather_context(
+        str(git_repo),
+        scope="working_tree",
+        base="main",
+        paths=["app.py"],
+        measure_paths=False,
+    )
+
+    assert res.path_match_counts is None
+    # The filter itself still applied -- only the measurement was skipped.
+    assert "app.py" in res.text
+
+
+def test_path_match_probes_stop_at_an_aggregate_time_budget(git_repo, monkeypatch):
+    """The count cap bounds how MANY probes run, not how long they take.
+
+    Each probe is its own git process under the 60s per-process timeout, so a
+    count cap alone permits 32x that in the worst case. The aggregate budget is
+    what actually bounds the amplification; over it the counts are reported
+    absent rather than partially."""
+    import claude_in_codex.context as ctx
+
+    monkeypatch.setattr(ctx, "MAX_PATH_MATCH_SECONDS", 0.0)
+
+    res = gather_context(
+        str(git_repo), scope="working_tree", base="main", paths=["app.py", "other.py"]
+    )
+
+    assert res.path_match_counts is None
+    assert "app.py" in res.text
+
+
+def test_path_match_counts_are_measured_under_a_normal_budget(git_repo):
+    """The control: the budget must not be so tight that it never measures.
+
+    Without this, the assertion above would pass against an implementation that
+    always gave up, and paths_matched would silently never appear in practice."""
+    res = gather_context(str(git_repo), scope="working_tree", base="main", paths=["app.py"])
+
+    assert res.path_match_counts == [1]

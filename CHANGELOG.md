@@ -7,6 +7,106 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- A path-filter entry that matches nothing is no longer invisible. `paths=["src",
+  "tets"]` reviewed `src` and said nothing about the typo: `meta.paths` echoes the
+  list the caller sent, so it agrees with them, and since #147 Claude no longer
+  receives the values and so cannot remark on one that looks wrong. The failure
+  mode was a confident `pass` scoped to less than the caller believed, with no
+  signal anywhere in the envelope. `meta.paths_matched` now reports one file count
+  per entry, aligned index-for-index with `meta.paths`, so a zero names the
+  offending entry by position; it is absent (like `paths` itself, under
+  `exclude_none`) when there was no filter. The counts are asked of git, one
+  `--name-only` diff per entry, rather than derived from the gathered diff:
+  pathspec matching is exact-or-directory-prefix until an entry contains a
+  wildcard, and reimplementing that here to attribute a file list back to entries
+  would be a second, divergent copy of a subtlety this module has no reason to
+  own. `paths` has no `maxItems`, so the probe is capped at 32 entries and the
+  field is reported absent above it -- never guessed. Probing is additionally bounded
+  by a 5s aggregate wall-clock budget, because the count cap bounds how MANY probes
+  run and not how long they take: each is its own git process under the 60s
+  per-process git timeout, so a count cap alone permits 32x that in the worst case.
+  Over budget the counts are reported absent rather than partially, since a partial
+  list would still be positionally aligned and a zero could not be told from "never
+  measured". `claude_dry_run` skips the probe entirely: it has no field to report
+  the counts in yet (#155), and paying per-entry git processes for a measurement
+  that is then discarded is the wrong trade on the one tool whose purpose is to be
+  the cheap look before spending.
+
+  A zero means the pathspec selected no CHANGED files, and nothing more. It does
+  NOT establish that the review missed anything -- the entry may be a typo, or may
+  name a real path with no changes in it, and `paths=["src", "docs"]` on a branch
+  that did not touch docs is the ordinary case rather than a defect. Entries may
+  also overlap and cover very different amounts of the tree, so the counts describe
+  the filter's shape, not the review's coverage. The prompt clause therefore states
+  the fact, names the ambiguity, and tells Claude explicitly not to treat it as a
+  coverage gap or let it move the verdict; the field docs and the shipped skill say
+  the same. The clause does publish the number of filter entries, which #147
+  declined to send: a deliberate divergence, since "1 selected nothing" reads very
+  differently at 2 entries than at 30, so the denominator calibrates how much of the
+  filter is in question. It is not a coverage ratio and is not described as one.
+  Emitted only when an entry actually selected nothing, so an ordinary filtered
+  review is unchanged.
+  Because async meta is rebuilt from the job record at fetch time, the counts are
+  persisted there as well, so a fetched result does not silently lose a field its
+  launch envelope showed. Every tool builds this `meta` at its own call site, so
+  the no-spend empty-diff early return is covered by its own parametrized test
+  across all four paid tools rather than by inspection -- an empty diff under a
+  filter is exactly when the caller most needs to know which entry selected
+  nothing, since "no changes in scope" and "you misspelled every entry" are
+  otherwise the same envelope. Absence has exactly three causes -- no filter, a
+  list over the probe cap, or an envelope rebuilt from a background-job record
+  written before the field existed. That third case is real after an in-place
+  upgrade, since records outlive a release by their TTL, and it is deliberately
+  not recomputed at fetch time: the counts describe the diff as gathered at
+  launch, and the working tree may have moved since. A legacy record is
+  recognizable by `meta.paths` being present while this is absent. Bumps
+  `FINGERPRINT` to `claude-in-codex/0.1/schema-43`.
+- Pinned the refusal that makes a diff-truncation notice unnecessary. #148 asked
+  for a prompt notice telling Claude a gathered diff had been cut, on the grounds
+  that truncation was reported in `meta` only -- to the caller, not to the model
+  being asked for a verdict. That is true of `gather_context`, but not of the
+  server: all four paid paths (`claude_review_changes`,
+  `claude_adversarial_review`, and both `_async` forms) already refuse an
+  over-cap diff with `context_too_large` before any spend, so a truncated diff
+  never reaches Claude and the notice would have been unreachable. Verified
+  against the running server rather than read off the source, with a control
+  showing an under-cap diff on the same path is reviewed normally. The guarantee
+  is now pinned as a property rather than left as an accident of four separate
+  call sites: it is what makes the #147 path-filter notice's "the diff names
+  every file it contains" true unconditionally. A refusal test already existed,
+  but it asserted only the error code, which a server that invoked Claude and
+  THEN returned `context_too_large` would satisfy just as well; the new test
+  drives a real over-cap diff through all four tools with a spy standing in for
+  the runner, so any invocation at all fails it. Both halves were verified by
+  breaking them: softening the refusal fails all four cases, and a control
+  proves the spy can observe a call at all -- an assertion that nothing was
+  invoked is worthless from a spy that could never have seen anything.
+  `meta.paths_matched` rides these refusal envelopes too (the counts are measured
+  before the size cap is applied), because absence otherwise stops meaning what
+  the field says it means.
+- Brought the shipped `collaborating-with-claude` skill up to the current surface
+  (#79). It was missing `claude_models` -- the one tool that tells an agent what
+  to pass to `model`, and so the omission most likely to cause a bad call -- and
+  named no resource URIs at all, neither `claude-in-codex://models` and
+  `claude-in-codex://capabilities` nor the fact that `claude://models` is a
+  deprecated alias on a compatibility window. Its redaction guardrail still
+  described the 0.6.0 scope, understating what the server does: since #66,
+  best-effort redaction also covers Claude's returned output -- the structured
+  fields, the `detail=full` raw text, and model-derived error messages -- so the
+  line now says both what is covered and, explicitly, that caller-supplied text
+  is not. The job-recovery bullet now points at `idempotency_key` beside it, and
+  the `paths` guardrail at the new `meta.paths_matched`. Both copies updated; the
+  marketplace mirror stays byte-identical.
+- Raised the `tools/list` discovery budget from 82,700 to 83,000 bytes (+0.28%)
+  for `meta.paths_matched`. The entire cost is one field name added to the
+  hand-maintained enumeration in `_META_STUB`, which FastMCP inlines into every
+  tool entry. The previous note asked the next feature to slim a schema instead;
+  the only slimming available was abbreviating names in an enumeration whose
+  purpose is to let an agent read the field list, so the readable name was kept
+  and the ceiling moved by the smallest amount that restores headroom. The much
+  larger reclaim is already scheduled: removing the `claude_ask` and
+  `claude_review_dry_run` aliases in 0.9.0 frees ~9KB.
+
 - Settled how MCP roots work on sessionless (MCP 2026-07-28) connections: such a
   connection must pass `workspace_root`, and that is the standing contract rather
   than a stopgap. The protocol's replacement for the missing back-channel is the
