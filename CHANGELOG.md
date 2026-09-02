@@ -43,6 +43,14 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   spot existed. A test now pins that the disclosure names it, so the two cannot
   drift apart the way the description and the model did.
 
+  A golden-envelope test lands with it, as `AGENTS.md` requires of any
+  agent-visible surface change: every `meta` key on a real envelope must be both
+  a declared `Meta` field and a name the advertised enumeration discloses. That
+  closes the same class of drift one layer down -- generation already rules out
+  model-vs-description divergence, and this adds envelope-vs-both, which is what
+  would catch a key reaching `meta` without being declared. The digest cannot see
+  that, precisely because `meta` is advertised as an opaque stub.
+
   Also corrected a claim in that test's own comments while working there: it said
   stripping the capabilities fingerprint keeps the digest independent of
   `FINGERPRINT`. It does not -- the value is a schema DEFAULT on every result

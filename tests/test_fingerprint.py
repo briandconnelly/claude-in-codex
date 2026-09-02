@@ -34,7 +34,7 @@ from tests.support import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "recompute"
+EXPECTED_CONTRACT_DIGEST = "50194ed53d669d35eb544b62c5be2c9b34b792594a3fd8b9435dae47b101fd8f"
 
 
 async def _contract_surface() -> dict:
@@ -51,8 +51,12 @@ async def _contract_surface() -> dict:
     # bump moves the digest on its own. That is harmless in the intended
     # workflow -- you bump because the contract changed, then re-pin -- but it
     # means a failure here does not prove the SHAPE moved, only that something
-    # in this surface did. Stripping it here still earns its keep by keeping the
-    # capabilities payload itself shape-only.
+    # in this surface did. Stripping these two still earns its keep -- it keeps a
+    # FINGERPRINT/version bump from moving the digest through the capabilities
+    # payload as well -- but it does NOT make that payload shape-only: what
+    # remains is mostly value-level contract TEXT (scope, negative_scope,
+    # prerequisites, tool_details, annotations_policy, deprecation_policy), and
+    # editing any of it moves the digest, which is the intent.
     capabilities.pop("fingerprint", None)
     capabilities.pop("version", None)
     # Same reason the capabilities version is stripped: serverInfo.version tracks
@@ -185,7 +189,7 @@ def test_advertised_meta_description_enumerates_every_meta_field():
     assert described == list(schemas.Meta.model_fields)
 
 
-async def test_fingerprint_covers_discloses_the_meta_field_coverage():
+async def test_fingerprint_disclosure_names_the_meta_field_coverage():
     """The public disclosure must name what the digest actually pins.
 
     FINGERPRINT_COVERS is agent-readable and its own comment requires it to stay
