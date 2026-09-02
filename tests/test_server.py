@@ -4250,17 +4250,25 @@ async def test_no_paid_tool_ships_blocking_only():
     """CAPABILITY_SUMMARY is first-read instruction text, so a universal claim in
     it sends agents to tools that do not exist.
 
-    The claim is now unconditional: every paid tool has an async form. It used to
-    carry an exception for the deprecated claude_ask, which had none, and that
-    alias was removed in 0.9.0 -- so the carve-out went with it, and this asserts
-    the stronger property instead. Any name reaching `blocking` means a new paid
-    tool shipped blocking-only, which loses paid work on a dropped connection."""
+    The claim is now unconditional: every BLOCKING paid operation has an async
+    form. It used to carry an exception for the deprecated claude_ask, which had
+    none, and that alias was removed in 0.9.0 -- so the carve-out went with it,
+    and this asserts the stronger property instead. Any name reaching `blocking`
+    means a new paid tool shipped blocking-only, which loses paid work on a
+    dropped connection.
+
+    "Blocking paid operation", not "paid tool": `paid_tools` lists the three
+    _async starters too, and they do not each have a further async form --
+    claude_consult_async_async does not exist. The prose has to say which half of
+    that list it quantifies over, or it points agents at names that are not
+    there."""
     data = _capabilities_payload()
     starters = set(data["async_lifecycle"]["start_tools"])
     blocking = [t for t in data["paid_tools"] if t not in starters]
+    assert blocking, "an empty blocking list would make the next assertion vacuous"
     assert [t for t in blocking if f"{t}_async" not in starters] == []
     summary = CAPABILITY_SUMMARY.lower()
-    assert "every paid tool has a claude_*_async form" in summary
+    assert "every blocking paid operation has a claude_*_async form" in summary
     assert "deprecated" not in summary
     # And it must not tell a caller to assume the handle it may not get.
     assert "absent on an empty diff" in summary

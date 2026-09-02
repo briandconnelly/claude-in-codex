@@ -32,8 +32,12 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   a `tool_name` argument -- it existed only so two registered names could echo
   themselves -- and `DryRunResult.tool` narrows from a two-value `Literal` to
   one. `CAPABILITY_SUMMARY` drops its carve-out: "Paid tools have claude_*_async
-  forms (deprecated aliases do not)" becomes the unconditional "Every paid tool
-  has a claude_*_async form", because the alias was the one exception. The test
+  forms (deprecated aliases do not)" becomes the unconditional "Every blocking
+  paid operation has a claude_*_async form", because the alias was the one
+  exception. "Blocking paid operation" rather than "paid tool": `paid_tools`
+  lists the three `_async` starters as well, and they are not nested further --
+  there is no `claude_consult_async_async`, and first-read prose implying one
+  points agents at names that do not exist. The test
   that pinned that exception now asserts the stronger property -- that no paid
   tool ships blocking-only -- which is a better guard than the one it replaces,
   since a blocking-only paid tool loses work it already paid for on a dropped

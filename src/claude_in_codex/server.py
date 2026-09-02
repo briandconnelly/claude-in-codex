@@ -128,7 +128,7 @@ CAPABILITY_SUMMARY = (
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
     "config_mode=bare disable hooks. Paid tools send context to Anthropic; check "
     "claude_status first. claude_models lists model slugs. "
-    "Every paid tool has a claude_*_async form: a job_id to "
+    "Every blocking paid operation has a claude_*_async form: a job_id to "
     "poll/result/cancel, absent on an empty diff. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
