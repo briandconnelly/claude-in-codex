@@ -7,6 +7,43 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **Error messages no longer echo caller input unbounded (#150).**
+  `normalize_paths` built its rejection messages with an uncapped `repr()` of the
+  offending entry. `ErrorDetails.value` caps echoed caller text at 200
+  characters; `message` did not, so one oversized `paths` entry came back
+  verbatim and error size was a function of caller input.
+
+  The same asymmetry turned out to run through three more builders, so the fix is
+  a sweep rather than a patch to one call site: the `invalid_base`/`invalid_head`
+  messages interpolated the caller's ref; both `workspace_root` messages
+  interpolated the caller's path, and the outside-roots branch assigned that raw
+  string straight to `details.value` -- the one field the contract promises is
+  bounded; and the argument-validation middleware echoed the rejected argument
+  NAME three times (message, repair, `details.field`), which for an unknown
+  keyword is caller-invented text rather than a name from this server's schema. A
+  5,000-character argument name produced a 5,049-character message, and a
+  10,000-character `workspace_root` a 10,062-character one.
+
+  Every one of those sites now goes through a single `bounded_repr` helper, which
+  lives in `schemas.py` next to the error contract because `context.py` raises
+  the errors and cannot import `server.py`. It shrinks the raw value until its
+  `repr()` fits the same 200-character cap, then appends `…`. Neither obvious
+  bound is right on its own: slicing the finished `repr()` can sever an escape
+  mid-token and drop the closing quote, while slicing the raw value first bounds
+  the input rather than the output, since 200 code points of `\xNN` escapes
+  render an order of magnitude past the cap. Keeping `repr()` is what renders a
+  control character or terminal escape in an agent-visible message inert, and
+  what flattens a lone surrogate to ASCII before the envelope's own
+  `backslashreplace` pass could expand it past the cap.
+
+  No contract change: the wire shape, the error codes, and the published
+  `detail_fields` are untouched, so `FINGERPRINT` does not move. `job_id`,
+  `scope`, `config_mode` and the other pattern- or enum-constrained arguments
+  were already bounded by input validation and are unchanged. `meta.paths` still
+  echoes the caller's list untruncated on both the success and the rejection
+  path, so the response as a whole is not yet bounded; that is tracked
+  separately.
+
 - **`*_async` starters now return an explicit `outcome` discriminator (#80).**
   A successful launch had three shapes -- a `JobStarted` handle, a `JobStatus`
   for an idempotency-key replay, and, on an empty diff, a `SuccessResult` with no

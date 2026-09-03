@@ -78,6 +78,7 @@ from claude_in_codex.schemas import (
     CAPABILITIES_SCHEMA,
     CONSULT_JOB_START_SCHEMA,
     DEFAULT_NEXT_STEP,
+    DETAIL_VALUE_MAX_CHARS,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
     FINGERPRINT_COVERS,
@@ -117,6 +118,7 @@ from claude_in_codex.schemas import (
     SystemPromptAppend,
     ToolCapability,
     Verdict,
+    bounded_repr,
     branch_range,
     workspace_warning_for,
 )
@@ -360,8 +362,6 @@ def _meta(
 # Ceiling on the reconstructed repair call. Above it the corrected arguments are
 # omitted rather than echoed, so an oversized input cannot be returned twice.
 REPAIR_ARGS_MAX_BYTES = 8192
-# Ceiling on the echoed rejected value in ErrorDetails.value.
-DETAIL_VALUE_MAX_CHARS = 200
 
 
 def _render_value(value: object) -> str | None:
@@ -439,13 +439,19 @@ class ValidationEnvelopeMiddleware(Middleware):
             first = argument_error.errors()[0]
             loc = first.get("loc") or ("arguments",)
             field = ".".join(str(part) for part in loc)
+            # An UNKNOWN argument's name is caller-invented, and pydantic reports
+            # it as the loc -- so `field` is caller text here, not a name from
+            # this server's own schema. It is echoed three times (message,
+            # repair, details.field), so an oversized key would otherwise
+            # multiply into the envelope (#150).
+            shown = bounded_repr(field)
             expected = (first.get("ctx") or {}).get("expected")
-            message = f"Invalid argument '{field}': {first.get('msg', 'invalid value')}."
+            message = f"Invalid argument {shown}: {first.get('msg', 'invalid value')}."
             if expected:
-                repair = f"Set {field} to one of: {expected}, then retry the same call."
+                repair = f"Set {shown} to one of: {expected}, then retry the same call."
             else:
                 repair = (
-                    f"Fix the '{field}' argument to match the tool's inputSchema, "
+                    f"Fix the {shown} argument to match the tool's inputSchema, "
                     "then retry the same call."
                 )
             allowed = await self._allowed_values(context, loc)
@@ -464,7 +470,7 @@ class ValidationEnvelopeMiddleware(Middleware):
                     message,
                     repair,
                     meta,
-                    offending=field,
+                    offending=_render_value(field),
                     allowed_values=allowed,
                     details=ErrorDetails(value=_render_value(rejected)),
                     action=self._repair_action(context, loc),
@@ -582,9 +588,11 @@ _INVALID_BASE_REPAIR = (
 
 
 def _invalid_base_error(meta: Meta, base: str | None) -> dict:
+    # bounded_repr, not a bare interpolation: `base` is caller text, and an error
+    # message must not be an unbounded function of caller input (#150).
     return _err(
         "invalid_base",
-        f"Invalid base ref '{base}'.",
+        f"Invalid base ref {bounded_repr(base or '')}.",
         _INVALID_BASE_REPAIR,
         meta,
         offending="base",
@@ -627,7 +635,7 @@ def _context_error_result(
     if isinstance(exc, InvalidBaseError):
         return _invalid_base_error(meta, base)
     if isinstance(exc, InvalidHeadError):
-        return _invalid_head_error(meta, f"Invalid head ref '{head}'.")
+        return _invalid_head_error(meta, f"Invalid head ref {bounded_repr(head or '')}.")
     if isinstance(exc, InvalidScopeError):
         return _invalid_scope_error(meta, scope, scope_optional=scope_optional)
     if isinstance(exc, NotAGitRepoError):
@@ -672,13 +680,17 @@ def _workspace_error(
     if code == "workspace_outside_roots":
         return _err(
             code,
-            f"workspace_root '{workspace_root}' is outside the client's MCP roots.",
+            f"workspace_root {bounded_repr(workspace_root or '')} is outside the "
+            "client's MCP roots.",
             "Pass a workspace_root contained by an MCP root, omit workspace_root to "
             "use the first root, or configure the intended directory as a root.",
             meta,
             details=ErrorDetails(
                 field="workspace_root",
-                value=workspace_root,
+                # Through the same cap as every other echoed value: this branch
+                # assigned the caller's raw string straight to details.value,
+                # the one field the contract promises IS bounded (#150).
+                value=_render_value(workspace_root),
                 reason="outside_mcp_roots",
                 allowed_roots=roots or None,
             ),
@@ -712,7 +724,7 @@ def _workspace_error(
     repair += "." if roots is None else ", or configure an MCP root."
     return _err(
         code,
-        f"workspace_root '{workspace_root}' is not an existing absolute directory.",
+        f"workspace_root {bounded_repr(workspace_root)} is not an existing absolute directory.",
         repair,
         meta,
         offending="workspace_root",

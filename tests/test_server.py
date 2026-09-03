@@ -922,6 +922,94 @@ async def test_invalid_paths_are_structured_error(fake_claude, git_repo):
     assert "repo-relative" in data["error"]["repair"]
 
 
+async def test_invalid_paths_message_is_bounded_end_to_end(fake_claude, git_repo):
+    """error.message must not be an unbounded function of caller input (#150).
+
+    `ErrorDetails.value` already caps echoed caller text at
+    DETAIL_VALUE_MAX_CHARS; the message did not, so one oversized `paths` entry
+    came back verbatim. A 10x longer entry must now produce the same message.
+    """
+    messages = []
+    for length in (1_000, 10_000):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "working_tree",
+                    "paths": ["../" + "a" * length],
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        data = structured(result)
+        assert data["error"]["code"] == "invalid_paths"
+        messages.append(data["error"]["message"])
+    assert messages[0] == messages[1]
+    assert len(messages[0]) < 1_000
+
+
+async def test_invalid_base_message_is_bounded_end_to_end(fake_claude, git_repo):
+    """Same bound on the ref echo: base is caller text on the same error path."""
+    messages = []
+    for length in (1_000, 10_000):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "claude_review_changes",
+                {
+                    "scope": "branch",
+                    "base": "-" + "b" * length,
+                    "workspace_root": str(git_repo),
+                },
+                raise_on_error=False,
+            )
+        data = structured(result)
+        assert data["error"]["code"] == "invalid_base"
+        messages.append(data["error"]["message"])
+    assert messages[0] == messages[1]
+    assert len(messages[0]) < 1_000
+
+
+async def test_invalid_workspace_root_message_is_bounded(fake_claude):
+    """workspace_root is caller text on the same error path as paths/base (#150)."""
+    messages = []
+    for length in (1_000, 10_000):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "claude_job_list",
+                {"workspace_root": "/nope/" + "z" * length},
+                raise_on_error=False,
+            )
+        data = structured(result)
+        assert data["error"]["code"] == "invalid_workspace_root"
+        messages.append(data["error"]["message"])
+    assert messages[0] == messages[1]
+    assert len(messages[0]) < 1_000
+
+
+async def test_unknown_argument_name_is_bounded(fake_claude):
+    """An UNKNOWN argument's name is caller-invented, and it is echoed three times.
+
+    pydantic reports the unexpected keyword as the error `loc`, so `field` here
+    is caller text rather than a name from this server's own schema -- it reached
+    `message`, `repair`, and `details.field` uncapped (#150).
+    """
+    seen = []
+    for length in (1_000, 10_000):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "claude_job_status",
+                {"job_id": "0" * 32, "u" * length: 1},
+                raise_on_error=False,
+            )
+        data = structured(result)
+        assert data["error"]["code"] == "invalid_arguments"
+        seen.append(data["error"])
+    assert seen[0]["message"] == seen[1]["message"]
+    assert len(seen[0]["message"]) < 1_000
+    assert len(seen[0]["repair"]) < 1_000
+    assert len(seen[0]["details"]["field"]) < 1_000
+
+
 async def test_adversarial_empty_attached_diff_skips_paid_call(monkeypatch, git_repo):
     import subprocess as _sp
 
