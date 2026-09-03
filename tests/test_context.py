@@ -3,6 +3,7 @@ import subprocess
 import pytest
 
 from claude_in_codex import context
+from claude_in_codex.config import git_timeout_seconds
 from claude_in_codex.context import (
     ContextResult,
     DiffOptions,
@@ -1053,6 +1054,94 @@ def test_path_match_probes_stop_at_an_aggregate_time_budget(git_repo, monkeypatc
 
     assert res.path_match_counts is None
     assert "app.py" in res.text
+
+
+def test_each_probe_gets_the_remaining_budget_as_its_process_timeout(git_repo, monkeypatch):
+    """The budget must bound what the pass COSTS, not just when probes start.
+
+    Checking the deadline only between probes leaves the gap this pins shut: one
+    slow git could run a full git_timeout_seconds (60s by default) past a 5s
+    budget and still return counts. Reproduced before fixing -- three probes of
+    4s each against a 5s budget ran 8.0s wall clock and were handed the full 60s
+    timeout apiece. Raised by an external review of #155, which put these probes
+    on the free preview tool where the overrun is least affordable."""
+    import claude_in_codex.context as ctx
+
+    monkeypatch.setattr(ctx, "MAX_PATH_MATCH_SECONDS", 5.0)
+    timeouts = []
+    real = ctx.subprocess.run
+
+    def spy(*args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ctx.subprocess, "run", spy)
+
+    res = gather_context(
+        str(git_repo), scope="working_tree", base="main", paths=["app.py", "other.py"]
+    )
+
+    assert res.path_match_counts is not None
+    probe_timeouts = [t for t in timeouts if t is not None and t <= 5.0]
+    # Both probes, each capped by what was left of the budget rather than by the
+    # 60s process default -- and the second no larger than the first, because
+    # time was spent.
+    assert len(probe_timeouts) == 2
+    assert probe_timeouts[1] <= probe_timeouts[0]
+    # Not the per-process default: that is the whole bug.
+    assert all(t < git_timeout_seconds() for t in probe_timeouts)
+
+
+def test_a_probe_that_times_out_drops_the_counts_instead_of_failing_the_gather(
+    git_repo, monkeypatch
+):
+    """A slow measurement must not cost the caller the diff they asked for.
+
+    The probes are an extra: the gather itself is the product. Letting
+    GitTimeoutError escape would turn a slow-but-healthy repo into a failed
+    review, which is strictly worse than the missing counts the contract already
+    documents as a possible outcome."""
+    import claude_in_codex.context as ctx
+
+    calls = {"n": 0}
+    real = ctx._git
+
+    def flaky(cwd, *args, timeout=None):
+        # Only the --name-only probes time out; the real gather still runs.
+        if "--name-only" in args:
+            calls["n"] += 1
+            raise ctx.GitTimeoutError("git diff --name-only timed out after 0.1s")
+        return real(cwd, *args, timeout=timeout)
+
+    monkeypatch.setattr(ctx, "_git", flaky)
+
+    res = gather_context(str(git_repo), scope="working_tree", base="main", paths=["app.py"])
+
+    assert calls["n"] == 1  # the probe really was attempted
+    assert res.path_match_counts is None
+    assert "app.py" in res.text  # and the gather survived it
+
+
+def test_git_timeout_override_never_loosens_the_configured_budget(git_repo, monkeypatch):
+    """An override may only make git give up SOONER.
+
+    `_git` takes the override to serve a caller with a tighter deadline; if it
+    could also raise the ceiling, that parameter would become a way to exceed
+    CLAUDE_IN_CODEX_GIT_TIMEOUT_SECONDS from inside the process."""
+    import claude_in_codex.context as ctx
+
+    seen = []
+    real = ctx.subprocess.run
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ctx.subprocess, "run", spy)
+
+    ctx._git(str(git_repo), "status", "--porcelain", timeout=10_000)
+
+    assert seen == [git_timeout_seconds()]
 
 
 def test_path_match_counts_are_measured_under_a_normal_budget(git_repo):

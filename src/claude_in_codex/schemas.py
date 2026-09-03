@@ -804,7 +804,24 @@ class DryRunResult(BaseModel):
     # MAX_PATH_MATCH_SECONDS. Unlike Meta there is no fourth cause: a dry run is
     # always computed fresh, never rebuilt from a stored job record, so a caller
     # need not tell a legacy envelope apart from a filter-less one here.
-    paths_matched: list[int] | None = None
+    #
+    # The one field on this result carrying a `description`: the advertised
+    # outputSchema is all a generic MCP client gets, and the names around it
+    # (`diff_bytes`, `truncated`) say what they are while a bare integer list
+    # does not -- a caller who reads a zero as "this scope was skipped" acts on
+    # it, which is precisely the misreading the comment above exists to prevent.
+    paths_matched: list[int] | None = Field(
+        default=None,
+        description=(
+            "Changed-file count per `paths` entry, aligned index-for-index with "
+            "`paths`. A zero means that entry selected no changed files -- a typo, "
+            "or a real path with nothing changed in it -- so read it as 'check "
+            "this entry', not 'this scope was skipped'. Entries may overlap; the "
+            "counts describe the filter, not the review's coverage. Absent when "
+            "there was no filter, the list was too long to probe, or probing "
+            "timed out."
+        ),
+    )
     context_summary: ContextSummary
     diff_bytes: int  # full UTF-8 size of the redacted diff that would be sent
     max_diff_bytes: int  # the server's truncation threshold

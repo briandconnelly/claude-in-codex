@@ -3042,7 +3042,9 @@ async def claude_dry_run(
 
     Use before a paid claude_review_changes to confirm the resolved workspace,
     diff byte size, whether it would be truncated, and how many secret-looking
-    files would be redacted. Read-only; makes no paid call.
+    files would be redacted. With `paths`, also returns paths_matched: one count
+    of changed files per entry, so a filter that selects nothing is visible here
+    rather than after paying. Read-only; makes no paid call.
     """
     return await _dry_run_impl(
         scope=scope,

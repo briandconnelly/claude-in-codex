@@ -6072,6 +6072,31 @@ async def test_capabilities_advertise_the_dry_run_paths_matched_output():
     assert len(CAPABILITY_SUMMARY) < 1200
 
 
+async def test_advertised_dry_run_schema_describes_paths_matched():
+    """A generic MCP client sees the outputSchema and nothing else.
+
+    Python comments and the shipped skill are not part of tools/list, so without
+    a `description` here a client is handed a bare integer list whose zeros it
+    can misread as "this scope was skipped" -- the exact reading the contract
+    spends a paragraph forbidding. Raised by an external review of #155. The
+    other fields on this result are self-describing by name (`diff_bytes`,
+    `truncated`); this one is not, which is why it carries the only description.
+    """
+    async with Client(mcp) as client:
+        tool = {t.name: t for t in await client.list_tools()}["claude_dry_run"]
+    variants = [
+        v for v in tool.output_schema["anyOf"] if "paths_matched" in v.get("properties", {})
+    ]
+    assert variants, "the success variant must advertise the field at all"
+    described = variants[0]["properties"]["paths_matched"].get("description", "")
+
+    assert "index-for-index" in described  # positional alignment
+    assert "zero" in described  # what a 0 means
+    assert "Absent" in described  # and when it is missing
+    # The tool description an agent reads before calling must name it too.
+    assert "paths_matched" in " ".join((tool.description or "").split())
+
+
 async def test_dry_run_paths_matched_is_absent_without_a_path_filter(git_repo):
     """The control: an unfiltered preview reports no counts rather than zeros.
 

@@ -40,9 +40,37 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   field there measured 1,214, and the remaining budget is better spent on
   security disclosures than on a field the inventory documents one hop away.
 
+  The advertised `outputSchema` describes the field, and the `claude_dry_run`
+  tool description names it. Raised by an external review: Python comments and
+  the shipped skill are not part of `tools/list`, so a generic MCP client was
+  handed a bare integer list whose zeros it could misread as "this scope was
+  skipped" -- the exact reading the contract spends a paragraph forbidding. It
+  is the only described field on that result; the others (`diff_bytes`,
+  `truncated`) say what they are by name.
+
+  **Fixes a real gap in the probe deadline while it was at it.**
+  `MAX_PATH_MATCH_SECONDS` (5s) claimed to bound the whole probe pass, but
+  `_path_match_counts` checked it only BETWEEN probes while each `git` ran under
+  the 60s per-process timeout. One slow probe could therefore overrun the budget
+  and still return counts. Reproduced before fixing: three 4s probes against a
+  5s budget ran 8.0s wall clock, each handed the full 60s. Each probe now
+  receives the REMAINING budget as its own process timeout (an override that can
+  only lower `git_timeout_seconds`, never raise it), and a probe that times out
+  drops the counts instead of failing the gather -- the probes are an extra, and
+  losing the diff the caller actually asked for to a slow measurement would be
+  strictly worse than the absent counts the contract already documents. The same
+  pass now measures 5.0s. This affects the four paid review tools too, which have
+  carried the gap since #149; it surfaced here because #155 puts the probes on
+  the free preview, where an overrun is least affordable.
+
   Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-46` and re-pins the contract
-  digest. Discovery cost measured 73,515 bytes against the 75,000 ceiling
-  (+200 for the new property), so the ceiling is unchanged.
+  digest. Discovery cost measured 74,101 bytes and the ceiling moves 75,000 ->
+  76,000, the smallest step that restores the ~2% headroom that file asks for.
+  The field itself was cheap (+200 bytes); the cost is its description. Slimming
+  was looked for first and is not available: the dominant repeated cost is the
+  `Meta` field enumeration (485 bytes x 14 records), and the only compression
+  there is abbreviating the names -- exactly what #143 removed on purpose to
+  make the sentence checkable against `Meta.model_fields`.
 
   Also corrects a related comment error found while writing this: `Meta`'s own
   `paths_matched` comment enumerated "exactly three causes" for `None` and
