@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from claude_in_codex import cli_contract
 
@@ -57,6 +58,87 @@ MAX_SYSTEM_PROMPT_APPEND_BYTES = 4096
 # focus string can eat nearly all of it, crowding out the diff it claims to focus and
 # diluting the framing that keeps it inert.
 MAX_FOCUS_BYTES = 4096
+
+# Caps on the caller-supplied diff SELECTORS (`paths`, `base`, `head`). Unlike the
+# two caps above, these do not exist to bound what reaches Claude -- a pathspec is
+# argv, not prompt text. They exist because `meta` echoes these arguments back and
+# `diff_range` composes `base...head` from them, so without a ceiling the RESPONSE
+# is an unbounded function of the request -- on success as much as on rejection
+# (#162). Bounding the input rather than the echo keeps `meta.paths` literally what
+# the caller sent, which `meta.paths_matched` is positionally aligned against (#149).
+#
+# 4096 bytes is the common PATH_MAX, used here as a service policy limit rather than
+# a claim about git: git's index format supports pathnames past its 12-bit length
+# field, and git-check-ref-format documents no general ref-name maximum. It is orders
+# of magnitude past observed use (paths in this repo: median 36 bytes, longest 96).
+MAX_PATH_ENTRY_BYTES = 4096
+MAX_REF_BYTES = 4096
+
+# A list cap and a per-entry cap still permit a ~1 MiB echo together (256 x 4096), so
+# the aggregate is capped separately. 32 KiB is ~128 bytes per entry at the entry cap
+# -- well above real pathnames -- so a generated call naming every changed file passes
+# and only a pathological one is refused.
+MAX_PATHS_ENTRIES = 256
+MAX_PATHS_TOTAL_BYTES = 32_768
+
+
+def _utf8_bytes(value: str) -> int:
+    """UTF-8 length, counting a lone surrogate rather than raising.
+
+    The caps are in bytes because that is what the response transport and PATH_MAX
+    measure; a character cap would let a 3-byte code point buy three times the
+    ceiling. `replace` matches how unencodable input is sized elsewhere -- such a
+    value is refused by its own validator, and this must not raise before it gets
+    there."""
+    return len(value.encode("utf-8", "replace"))
+
+
+def ref_within_bounds(ref: str | None) -> bool:
+    """True when `base`/`head` is absent or fits MAX_REF_BYTES."""
+    return ref is None or _utf8_bytes(ref) <= MAX_REF_BYTES
+
+
+class PathsBoundViolation(NamedTuple):
+    """Which selector cap `paths` broke, with the numbers the error detail reports.
+
+    `limit`/`actual` are counts for the entry-count cap and bytes for the two size
+    caps; `bytes_valued` says which, so the error builder can populate the typed
+    `limit_bytes`/`actual_bytes` pair rather than mislabeling a count as a size."""
+
+    reason: str
+    limit: int
+    actual: int
+    bytes_valued: bool
+    entry: str | None
+
+
+def paths_bound_violation(paths: list[str] | None) -> PathsBoundViolation | None:
+    """The first selector cap `paths` breaks, or None when it fits all three.
+
+    Order is deliberate: the entry-count cap is checked first because it is the
+    cheapest, and the per-entry cap before the aggregate so a single absurd entry is
+    named as such instead of being reported as a total the caller cannot locate."""
+    if not paths:
+        return None
+    if len(paths) > MAX_PATHS_ENTRIES:
+        return PathsBoundViolation("too_many_entries", MAX_PATHS_ENTRIES, len(paths), False, None)
+    total = 0
+    for entry in paths:
+        size = _utf8_bytes(entry)
+        if size > MAX_PATH_ENTRY_BYTES:
+            return PathsBoundViolation("entry_too_large", MAX_PATH_ENTRY_BYTES, size, True, entry)
+        total += size
+    if total > MAX_PATHS_TOTAL_BYTES:
+        return PathsBoundViolation(
+            "paths_total_too_large", MAX_PATHS_TOTAL_BYTES, total, True, None
+        )
+    return None
+
+
+def paths_within_bounds(paths: list[str] | None) -> bool:
+    """True when `paths` breaks none of the three selector caps."""
+    return paths_bound_violation(paths) is None
+
 
 # Wrapper around caller-supplied system-prompt text. The guardrails above it are
 # the floor. Two deliberate choices:

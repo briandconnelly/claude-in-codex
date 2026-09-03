@@ -68,7 +68,7 @@ from claude_in_codex.schemas import (
     Meta,
     RepairAction,
     SystemPromptAppend,
-    branch_range,
+    bounded_selectors,
     workspace_warning_for,
 )
 
@@ -697,8 +697,25 @@ def _build_meta(meta: dict) -> Meta:
     source = c.get("workspace_source")
     scope = c.get("scope")
     # Recompute diff_range from the stored base+head inputs so it cannot drift from
-    # what the job was started with; head defaults to HEAD for branch scope.
-    head, diff_range = branch_range(scope, c.get("base"), c.get("head"))
+    # what the job was started with; head defaults to HEAD for branch scope. Bounded
+    # for the same reason the live path is (#162), and here the bound can actually
+    # bite: a record written before the caps existed, or hand-edited since, can carry
+    # a selector the live boundary would now refuse. Withholding it degrades the echo
+    # on a PAID result rather than failing its retrieval, so the finding survives; the
+    # warning below is what keeps the omission from reading as "none was supplied".
+    sel = bounded_selectors(
+        scope, c.get("base"), c.get("head"), c.get("paths"), c.get("paths_matched")
+    )
+    if sel.dropped:
+        security_warnings.append(
+            "this job record carries "
+            + ", ".join(sel.dropped)
+            + " past the server's selector size caps, so "
+            + ("that field is" if len(sel.dropped) == 1 else "those fields are")
+            + " withheld from meta; the review itself ran with the values the record "
+            "stores. Read the record, or re-run the review, to see them."
+        )
+    head, diff_range = sel.head, sel.diff_range
     return Meta(
         cwd=cwd,
         workspace_source=source,
@@ -706,11 +723,11 @@ def _build_meta(meta: dict) -> Meta:
         config_mode=c.get("config_mode", "inherit"),
         access=c.get("access", "toolless"),
         scope=scope,
-        base=c.get("base"),
+        base=sel.base,
         head=head,
         diff_range=diff_range,
-        paths=c.get("paths"),
-        paths_matched=c.get("paths_matched"),
+        paths=sel.paths,
+        paths_matched=sel.paths_matched,
         timeout_seconds=c.get("timeout_seconds", max_seconds()),
         requested_max_budget_usd=c.get("requested_max_budget_usd"),
         configured_max_budget_usd=c.get("configured_max_budget_usd"),

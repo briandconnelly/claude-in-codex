@@ -10,7 +10,12 @@ from dataclasses import dataclass, field
 
 from pontonier.core import redaction as _redaction
 
-from claude_in_codex.config import git_timeout_seconds, unencodable_reason
+from claude_in_codex.config import (
+    git_timeout_seconds,
+    paths_bound_violation,
+    ref_within_bounds,
+    unencodable_reason,
+)
 from claude_in_codex.schemas import ContextSummary, bounded_repr
 
 MAX_DIFF_BYTES = 200_000
@@ -88,8 +93,20 @@ class GitTimeoutError(RuntimeError):
 
 
 def _valid_ref(ref: str) -> bool:
-    """A conservative git ref/commit check: no leading dash, no option/shell chars."""
-    return bool(ref) and not ref.startswith("-") and bool(_REF_RE.match(ref))
+    """A conservative git ref/commit check: no leading dash, no option/shell chars,
+    and no longer than MAX_REF_BYTES.
+
+    The size cap is not about git -- git-check-ref-format documents no general
+    length maximum -- but about the response: `meta` echoes `base` and `head` and
+    composes `diff_range` from them, so an unbounded ref is an unbounded envelope
+    (#162). Enforced here, the single predicate both refs pass through, so the sync
+    tools, the async starters and the dry run inherit it without five copies."""
+    return (
+        bool(ref)
+        and not ref.startswith("-")
+        and ref_within_bounds(ref)
+        and bool(_REF_RE.match(ref))
+    )
 
 
 # The redaction ENGINE is pontonier's (`pontonier.core.redaction`) — this bridge's
@@ -181,9 +198,30 @@ def _git_env() -> dict[str, str]:
 
 
 def normalize_paths(paths: list[str] | None) -> list[str] | None:
-    """Validate path filters before they reach git argv."""
+    """Validate path filters before they reach git argv.
+
+    The size caps (entry count, per-entry bytes, aggregate bytes) come first and are
+    about the RESPONSE, not about git: `meta.paths` echoes this list back, so without
+    them the envelope is an unbounded function of the request -- on a successful
+    review as much as on a rejection (#162). Enforced here rather than at the echo so
+    that `meta.paths` stays literally what the caller sent, which `meta.paths_matched`
+    is aligned against index-for-index (#149).
+
+    The server maps the violation to typed `limit`/`limit_bytes` details before this
+    runs; the message here is what a direct (non-MCP) caller of this function gets."""
     if not paths:
         return None
+    violation = paths_bound_violation(paths)
+    if violation is not None:
+        unit = "bytes" if violation.bytes_valued else "entries"
+        subject = (
+            f"a paths entry is {violation.actual} {unit}"
+            if violation.reason == "entry_too_large"
+            else f"paths is {violation.actual} {unit}"
+        )
+        raise InvalidPathsError(
+            f"{subject}; the cap is {violation.limit} {unit}", entry=violation.entry
+        )
     normalized: list[str] = []
     for path in paths:
         if path == "":
