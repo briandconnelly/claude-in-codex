@@ -6,10 +6,10 @@ digest of that contract surface — the initialize serverInfo identity (minus th
 release-tracking version), the full normalized tool records (names,
 descriptions, titles, annotations, input/output schemas), resource and
 resource-template records, prompt scaffolds, the capabilities payload (minus the
-fingerprint/version fields themselves), the error-code catalog, and the capability
-summary. Adding/removing/renaming a tool, changing a schema or description or
-annotation, or editing the scope text moves the digest and fails this test; an
-internal-only refactor does not.
+fingerprint/version fields themselves), the error-code catalog, the capability
+summary, and `Meta`'s field names. Adding/removing/renaming a tool, changing a
+schema or description or annotation, adding a `Meta` field, or editing the scope
+text moves the digest and fails this test; an internal-only refactor does not.
 
 When this test fails on an intentional contract change:
   1. bump FINGERPRINT in src/claude_in_codex/schemas.py (the `schema-NN` suffix), and
@@ -34,7 +34,7 @@ from tests.support import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "99cba7c008d2fdd7b196b763a11efe01cdcacb05a3928d38041609b90fc15f22"
+EXPECTED_CONTRACT_DIGEST = "50194ed53d669d35eb544b62c5be2c9b34b792594a3fd8b9435dae47b101fd8f"
 
 
 async def _contract_surface() -> dict:
@@ -45,8 +45,18 @@ async def _contract_surface() -> dict:
         templates = await client.list_resource_templates()
         prompts = await client.list_prompts()
     capabilities = _capabilities_payload()
-    # Strip the bump-tracked fields so the digest reflects contract SHAPE only;
-    # otherwise bumping FINGERPRINT/version would circularly change the digest.
+    # Strip capabilities' own bump-tracked fields. Note this does NOT make the
+    # digest independent of FINGERPRINT: the value is also a schema DEFAULT on
+    # every result model, so it appears ~13 times in the advertised records and a
+    # bump moves the digest on its own. That is harmless in the intended
+    # workflow -- you bump because the contract changed, then re-pin -- but it
+    # means a failure here does not prove the SHAPE moved, only that something
+    # in this surface did. Stripping these two still earns its keep -- it keeps a
+    # FINGERPRINT/version bump from moving the digest through the capabilities
+    # payload as well -- but it does NOT make that payload shape-only: what
+    # remains is mostly value-level contract TEXT (scope, negative_scope,
+    # prerequisites, tool_details, annotations_policy, deprecation_policy), and
+    # editing any of it moves the digest, which is the intent.
     capabilities.pop("fingerprint", None)
     capabilities.pop("version", None)
     # Same reason the capabilities version is stripped: serverInfo.version tracks
@@ -79,6 +89,15 @@ async def _contract_surface() -> dict:
         "capabilities": capabilities,
         "error_codes": sorted(get_args(schemas.ErrorCode)),
         "capability_summary": CAPABILITY_SUMMARY,
+        # Meta's field names, digested DIRECTLY rather than only by way of the
+        # advertised description that enumerates them (#143). `meta` is stubbed
+        # in the tools' output schemas, so before this the only trace of a new
+        # Meta field in the digest was that sentence -- which meant the gate
+        # depended on an author remembering to edit prose, the same manual step
+        # the fingerprint bump is. That description is now generated from these
+        # names, so the two signals agree by construction; this one is kept
+        # because it holds even if the description is ever hand-written again.
+        "meta_fields": list(schemas.Meta.model_fields),
     }
 
 
@@ -134,3 +153,50 @@ async def test_contract_surface_pins_annotations_and_descriptions():
     assert "description" in models
     assert "resource_templates" in surface
     assert "prompts" in surface
+
+
+async def test_contract_surface_covers_meta_field_names():
+    """#143: the digest was blind to fields added to `Meta`.
+
+    `meta` is advertised as an opaque object whose DESCRIPTION enumerates the
+    field names, so the gate fired only if the author remembered to edit that
+    prose -- the same manual step the fingerprint bump itself is, and this test
+    exists precisely because manual steps get skipped. Probed on this branch
+    before the fix: adding a field to `Meta` left all six tests green, while
+    editing an advertised description failed them, so the instrument was live in
+    general and blind to exactly this.
+
+    Digesting the field names directly makes the coverage structural rather than
+    a consequence of someone updating a sentence."""
+    surface = await _contract_surface()
+
+    assert surface["meta_fields"] == list(schemas.Meta.model_fields)
+    # Not a tautology against an empty list: these are load-bearing names an
+    # agent reads off the envelope.
+    for name in ("cwd", "paths", "paths_matched", "cost_usd", "fingerprint"):
+        assert name in surface["meta_fields"]
+
+
+def test_advertised_meta_description_enumerates_every_meta_field():
+    """The advertised enumeration must BE the field list, not a copy of it.
+
+    Option (2) of #143: the sentence agents read is generated from
+    `Meta.model_fields`, so it cannot drift from the model. This test pins that
+    property against a future hand-written replacement -- if someone reverts the
+    description to prose, it fails as soon as the two disagree."""
+    described = schemas.meta_fields_from_description(schemas._META_STUB["description"])
+
+    assert described == list(schemas.Meta.model_fields)
+
+
+async def test_fingerprint_disclosure_names_the_meta_field_coverage():
+    """The public disclosure must name what the digest actually pins.
+
+    FINGERPRINT_COVERS is agent-readable and its own comment requires it to stay
+    in sync with the pinned surface here. #143 added `Meta`'s field names to that
+    surface, and the pre-existing "tool records ... input/output schemas" entry
+    does not describe it -- `meta` is advertised as an opaque stub, which is the
+    whole reason the blind spot existed."""
+    covers = _capabilities_payload()["fingerprint_covers"]
+
+    assert any("meta field names" in item for item in covers), covers

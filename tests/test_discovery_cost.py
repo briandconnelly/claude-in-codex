@@ -90,14 +90,23 @@ from claude_in_codex.server import mcp
 # is set from the measurement with the ~2% headroom this file's own policy asks
 # for -- 74_000 leaves 1,581 bytes / 2.2% -- rather than from a stale number.
 # A ceiling is a ratchet against unnoticed growth, not a memory of a past size.
-WIRE_BUDGET_BYTES = 74_000
+#
+# Raised from 74_000 to 75_000 for the generated Meta enumeration (#143):
+# measured 73,315 (+896 bytes / +1.2%), which left only 0.9% headroom under the
+# 74_000 above. The cost is spelling the field names out instead of compressing
+# them ("workspace_source, workspace_warning" for "workspace_source/warning"),
+# which is what makes the sentence checkable against Meta.model_fields and so
+# what closes the blind spot -- the compressions were the reason the enumeration
+# could only ever be prose. Bought with the alias removal's reclaim in the same
+# release: net across both, this ceiling is 8,000 bytes BELOW where it stood.
+WIRE_BUDGET_BYTES = 75_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and moves in step with WIRE_BUDGET_BYTES (ceil(74,000/4)).
-TOKEN_PROXY_BUDGET = 18_500  # see WIRE_BUDGET_BYTES note
+# against, and moves in step with WIRE_BUDGET_BYTES (ceil(75,000/4)).
+TOKEN_PROXY_BUDGET = 18_750  # see WIRE_BUDGET_BYTES note
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -125,7 +134,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (18,500 == 74,000/4) and the proxy is
+    The budgets are currently proportional (18,750 == 75,000/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""

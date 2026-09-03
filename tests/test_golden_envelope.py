@@ -8,7 +8,12 @@ legitimately changes."""
 from pathlib import Path
 
 from claude_in_codex.normalize import normalize_envelope
-from claude_in_codex.schemas import FINGERPRINT, Meta
+from claude_in_codex.schemas import (
+    _META_STUB,
+    FINGERPRINT,
+    Meta,
+    meta_fields_from_description,
+)
 
 _GOLDEN = (Path(__file__).parent / "golden" / "claude_envelope.json").read_text()
 
@@ -53,3 +58,29 @@ def test_golden_envelope_summary_is_bounded_and_a_subset_of_full():
     assert summary["findings"] == full["findings"]
     assert "text" not in summary["raw_response"]
     assert full["raw_response"]["text"]
+
+
+def test_golden_envelope_meta_keys_are_declared_and_disclosed():
+    """Every `meta` key on a real envelope must be a declared, advertised field.
+
+    Required by AGENTS.md: an agent-visible surface change updates the
+    golden-envelope tests in the same PR. This is the coverage that earns its
+    place here rather than a re-pin -- it ties the envelope an agent actually
+    receives to both the model and the advertised enumeration agents read to
+    know what `meta` holds.
+
+    It closes the same class of drift as #143 one layer down. The enumeration is
+    generated from `Meta.model_fields`, so model-vs-description cannot diverge;
+    this adds envelope-vs-both, which would catch a key that reached `meta`
+    without being declared -- exactly what the fingerprint digest cannot see,
+    because `meta` is advertised as an opaque stub.
+
+    Subset, not equality: `meta` is dumped with `exclude_none`, so a real
+    envelope carries only the fields that were set."""
+    out = normalize_envelope("claude_review_changes", _GOLDEN, _meta(), detail="full")
+    described = meta_fields_from_description(_META_STUB["description"])
+
+    keys = set(out["meta"])
+    assert keys, "an empty meta would make both assertions below vacuous"
+    assert keys <= set(Meta.model_fields), keys - set(Meta.model_fields)
+    assert keys <= set(described), keys - set(described)
