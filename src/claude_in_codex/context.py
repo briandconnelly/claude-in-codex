@@ -11,13 +11,14 @@ from dataclasses import dataclass, field
 from pontonier.core import redaction as _redaction
 
 from claude_in_codex.config import (
+    MAX_ECHO_PROSE_BYTES,
     git_timeout_seconds,
     paths_bound_violation,
     ref_within_bounds,
     unencodable_reason,
+    utf8_len,
 )
 from claude_in_codex.schemas import (
-    DETAIL_VALUE_MAX_CHARS,
     ContextSummary,
     bounded_repr,
 )
@@ -395,7 +396,38 @@ def sanitize_echo_prose(text: str) -> str:
     return _redaction.sanitize_echo_prose(text) or ""
 
 
-def bounded_echo_prose(text: str, limit: int = DETAIL_VALUE_MAX_CHARS) -> str:
+def _cut_to_bytes(text: str, budget: int, *, keep_tail: bool = False) -> str:
+    """Trim `text` to at most `budget` UTF-8 bytes, never splitting a code point.
+
+    Code points are dropped whole, from whichever end is not being kept, so the
+    result is always decodable. Slicing the encoded bytes directly would be shorter
+    and wrong: it can sever a multi-byte character and produce text that no longer
+    round-trips."""
+    if utf8_len(text) <= budget:
+        return text
+    while text and utf8_len(text) > budget:
+        text = text[1:] if keep_tail else text[:-1]
+    return text
+
+
+def _drop_severed_marker(text: str) -> str:
+    """Remove a redaction marker's tail fragment left at the start of a cut.
+
+    Cutting inside `[redacted: secret value]` leaves something like
+    `cted: secret value] ...`, which reads as stray prose rather than as evidence
+    that redaction happened -- the same objection `bounded_repr` makes to slicing a
+    finished repr(). A closing bracket before any opening one means the cut landed
+    inside a marker, so the fragment goes."""
+    close = text.find("]")
+    if close == -1:
+        return text
+    opening = text.find("[")
+    if opening != -1 and opening < close:
+        return text
+    return text[close + 1 :].lstrip()
+
+
+def bounded_echo_prose(text: str, limit_bytes: int = MAX_ECHO_PROSE_BYTES) -> str:
     """Sanitize foreign text AND bound it, for an agent-visible error message (#163).
 
     `sanitize_echo_prose` deliberately does not truncate -- callers own their own
@@ -404,18 +436,28 @@ def bounded_echo_prose(text: str, limit: int = DETAIL_VALUE_MAX_CHARS) -> str:
     failure produced a 12,688-byte message carrying a raw ANSI escape and a secret
     that appeared in git's stderr.
 
-    The TAIL is kept, not the head: a failing command's last lines are the ones that
-    say what went wrong, while the head is usually the invocation the caller can
-    already see. `jobs._stderr_tail` applies the same policy to job diagnostics; it
-    predates this helper and keeps its own copy because it reads from disk and has a
-    legacy-record branch to answer for first.
+    HEAD AND TAIL, not the tail alone. A tail-only bound was the first attempt and
+    it is wrong for this input: git leads with the diagnosis (`fatal: ...`) and
+    follows with usage or hints, so keeping only the tail drops the one line worth
+    reading and keeps the noise. Compilers and stack traces put the answer last;
+    git does not, and this helper exists for git. So the first line survives, up to
+    half the budget, and the remaining budget goes to the tail.
 
-    The marker is a leading ellipsis, so a reader can tell a bounded tail from a
-    complete short message rather than inferring it from length."""
+    The budget is in UTF-8 BYTES and INCLUDES the marker, matching every other cap
+    in this server (#162): a character limit lets 200 four-byte code points render
+    at 800 bytes, and a limit the marker is added to afterwards is not a limit.
+
+    `jobs._stderr_tail` applies an older tail-only version of this policy to job
+    diagnostics; it reads from disk and has a legacy-record branch to answer for
+    first, so it keeps its own copy."""
     sanitized = sanitize_echo_prose(text).strip()
-    if len(sanitized) <= limit:
+    if utf8_len(sanitized) <= limit_bytes:
         return sanitized
-    return "\u2026" + sanitized[-limit:]
+    marker = " \u2026 "
+    head = _cut_to_bytes(sanitized.splitlines()[0], limit_bytes // 2)
+    tail_budget = limit_bytes - utf8_len(head) - utf8_len(marker)
+    tail = _drop_severed_marker(_cut_to_bytes(sanitized, tail_budget, keep_tail=True))
+    return f"{head}{marker}{tail}" if tail else head
 
 
 def redact_tree(value: object) -> object:

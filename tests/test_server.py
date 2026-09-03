@@ -20,6 +20,8 @@ from claude_in_codex import __version__
 from claude_in_codex import claude as claude_mod
 from claude_in_codex import jobs as jobs_mod
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
+from claude_in_codex.config import MAX_ECHO_PROSE_BYTES
+from claude_in_codex.context import bounded_echo_prose
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
 from claude_in_codex.server import (
@@ -6772,8 +6774,8 @@ async def test_git_failure_prose_is_sanitized_and_bounded(fake_claude, git_repo,
     from claude_in_codex import context as _ctx
 
     nasty = (
-        "\x1b[31mfatal: \x1b[0m"
-        + "verbose git noise " * 700
+        "\x1b[31mfatal: bad object HEAD\x1b[0m\n"
+        + "hint: verbose git noise " * 700
         + "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
     )
     real = _sp.run
@@ -6794,11 +6796,21 @@ async def test_git_failure_prose_is_sanitized_and_bounded(fake_claude, git_repo,
 
     message = data["error"]["message"]
     assert data["error"]["code"] == "internal_error"
-    assert len(message) < 300
+    assert len(message.encode()) <= len("git failed: ") + MAX_ECHO_PROSE_BYTES
     assert "\x1b" not in message
+    # Redaction asserted in BOTH directions: the key is gone AND the marker is there.
+    # Absence alone would also hold if the message were empty or the echo removed.
     assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in message
-    # The TAIL survives: a failing command's last lines say what went wrong.
-    assert message.startswith("git failed: …")
+    assert "[redacted: secret value]" in message
+    # The DIAGNOSIS survives, not just the tail. git leads with `fatal:` and follows
+    # with hints, so a tail-only bound kept the noise and dropped the one line worth
+    # reading -- which is what the first version of this fix did.
+    # `fatal: bad object HEAD` is the head of the message, ahead of the marker. Not
+    # `startswith`: sanitization strips the ESC byte but leaves the printable `[31m`
+    # of the escape sequence, which is the intended outcome -- the sequence is
+    # defanged, not deleted, and asserting on its absence would be asserting the
+    # wrong property.
+    assert "fatal: bad object HEAD" in message.split("…")[0]
 
 
 async def test_a_short_git_failure_is_echoed_intact(fake_claude, git_repo, monkeypatch):
@@ -6856,5 +6868,52 @@ async def test_async_start_oserror_prose_is_sanitized_and_bounded(
     # starter bails earlier with claude_not_found (which it does wherever `claude` is
     # not on PATH, e.g. CI), and would then assert nothing about this echo site.
     assert message.startswith("Failed to start async job: ")
-    assert len(message) < 300
+    assert len(message.encode()) <= len("Failed to start async job: ") + MAX_ECHO_PROSE_BYTES
     assert "\x1b" not in message
+
+
+def test_bounded_echo_prose_redacts_without_a_control_character_present():
+    """Redaction and control-stripping asserted independently.
+
+    The end-to-end test above feeds text carrying both, so a regression that broke
+    one while keeping the other could hide behind the other's assertion.
+    """
+    out = bounded_echo_prose("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY")
+
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in out
+    assert "[redacted: secret value]" in out
+
+
+def test_bounded_echo_prose_bounds_bytes_not_code_points():
+    """#162 moved every cap in this server to UTF-8 bytes for this reason: 200
+    four-byte code points render at 800 bytes, so a character limit is not one."""
+    out = bounded_echo_prose("中" * 5_000)
+
+    assert len(out.encode()) <= MAX_ECHO_PROSE_BYTES
+    assert len(out) < 5_000
+
+
+def test_bounded_echo_prose_counts_its_own_marker_against_the_budget():
+    """A limit the marker is added to afterwards is not a limit."""
+    out = bounded_echo_prose("fatal: bad object\n" + "n" * 5_000)
+
+    assert len(out.encode()) <= MAX_ECHO_PROSE_BYTES
+    assert "…" in out
+    assert out.startswith("fatal: bad object")
+
+
+def test_bounded_echo_prose_passes_short_text_through_untouched():
+    """The bound must not be doing its work by mangling ordinary diagnostics."""
+    assert bounded_echo_prose("fatal: bad revision") == "fatal: bad revision"
+
+
+def test_bounded_echo_prose_drops_a_redaction_marker_it_cut_into():
+    """Cutting inside `[redacted: ...]` leaves a fragment that reads as stray prose
+    rather than as evidence that redaction happened -- the same objection
+    `bounded_repr` makes to slicing a finished repr()."""
+    secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE"
+    for pad in range(150, 200, 8):
+        out = bounded_echo_prose(f"fatal: x\n{secret} " + "z" * pad + " " + "q" * 300)
+        tail = out.split(" … ", 1)[1]
+        assert not tail.startswith(("cted:", "ted:", "ed:", "value]", " value]"))
+        assert "]" not in tail.split("[")[0]

@@ -24,11 +24,24 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
   Both sites that interpolated a foreign exception into a message now go through
   `bounded_echo_prose`: this one and the `OSError` branch of the async-job
-  starter, whose text is the OS's and names paths the server did not choose. The
-  helper keeps the TAIL — a failing command's last lines are the ones that say
-  what went wrong — and marks truncation with a leading ellipsis so a bounded tail
-  is distinguishable from a complete short message. `jobs._stderr_tail` already
-  applied the same policy to job diagnostics and is unchanged.
+  starter, whose text is the OS's and names paths the server did not choose.
+
+  The helper keeps the first line AND a bounded tail, joined by an ellipsis. A
+  tail-only bound was the first attempt and it is wrong for this input: git leads
+  with the diagnosis (`fatal: ...`) and follows with hints, so keeping only the
+  tail dropped the one line worth reading and kept the noise. Compilers and stack
+  traces put the answer last; git does not, and this helper exists for git.
+
+  The budget is 400 UTF-8 bytes and includes the marker, matching every other cap
+  in this server (#162) — a character limit lets 200 four-byte code points render
+  at 800 bytes, and a limit the marker is added to afterwards is not a limit. A
+  cut that lands inside a `[redacted: ...]` marker drops the fragment rather than
+  emitting `cted: secret value]` as though it were prose, which is the objection
+  `bounded_repr` already makes to slicing a finished `repr()`.
+
+  `jobs._stderr_tail` applies an older tail-only version of this policy to job
+  diagnostics; it reads from disk and has a legacy-record branch to answer for
+  first, so it keeps its own copy.
 
 - **The response is now bounded by the server, not by caller input (#162).**
   Fingerprint `claude-in-codex/0.1/schema-49`.
