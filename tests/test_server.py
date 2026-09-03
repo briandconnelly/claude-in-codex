@@ -21,7 +21,7 @@ from claude_in_codex import claude as claude_mod
 from claude_in_codex import jobs as jobs_mod
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
 from claude_in_codex.config import MAX_ECHO_PROSE_BYTES
-from claude_in_codex.context import bounded_echo_prose
+from claude_in_codex.context import bounded_echo_prose, sanitize_echo_prose
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
 from claude_in_codex.server import (
@@ -6910,10 +6910,74 @@ def test_bounded_echo_prose_passes_short_text_through_untouched():
 def test_bounded_echo_prose_drops_a_redaction_marker_it_cut_into():
     """Cutting inside `[redacted: ...]` leaves a fragment that reads as stray prose
     rather than as evidence that redaction happened -- the same objection
-    `bounded_repr` makes to slicing a finished repr()."""
+    `bounded_repr` makes to slicing a finished repr().
+
+    The padding range is not arbitrary: it is where the tail cut actually lands
+    inside the marker at this budget. An earlier version swept 150-200, where the cut
+    falls in the padding every time -- it passed with the repair deleted, which is
+    the definition of decoration."""
     secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE"
-    for pad in range(150, 200, 8):
-        out = bounded_echo_prose(f"fatal: x\n{secret} " + "z" * pad + " " + "q" * 300)
+    for pad in range(360, 390):
+        out = bounded_echo_prose(f"fatal: x\n{secret} " + "z" * pad)
         tail = out.split(" … ", 1)[1]
-        assert not tail.startswith(("cted:", "ted:", "ed:", "value]", " value]"))
-        assert "]" not in tail.split("[")[0]
+        # Nothing before an opening bracket may close one.
+        assert "]" not in tail.split("[")[0], (pad, tail[:40])
+
+
+def test_bounded_echo_prose_keeps_bracketed_text_that_is_not_a_marker():
+    """The repair keys on the ACTUAL redaction markers, not on the shape "a `]`
+    before any `[`". git usage text is full of brackets, and the shape rule deleted
+    up to the whole tail budget of real diagnostics."""
+    out = bounded_echo_prose(
+        "error: unknown option\n" + "usage: git diff [<options>] [<commit>] [--] [<path>...] " * 20
+    )
+
+    assert out.endswith("[<path>...]")
+    assert "usage: git diff" in out
+
+
+@pytest.mark.parametrize("limit", [40, 60, 120, 400])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "y" * 600 + "]",
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE " + "z" * 380,
+        "usage: git diff [<options>] [<commit>] [--] [<path>...] " * 20,
+        "z" * 600,
+    ],
+)
+def test_bounded_echo_prose_always_marks_a_truncation(body, limit):
+    """A cut message must never read as a complete one.
+
+    An earlier version returned a bare head when the marker repair emptied the tail,
+    so a cut message read as a complete one. The guarantee is now structural -- the
+    marker is concatenated unconditionally -- so this pins the PROPERTY across
+    budgets rather than that one bug, which is no longer reachable to reproduce."""
+    text = "fatal: x\n" + body
+    out = bounded_echo_prose(text, limit_bytes=limit)
+
+    assert len(out.encode()) <= limit
+    if out != sanitize_echo_prose(text).strip():
+        assert "…" in out, out
+
+
+def test_bounded_echo_prose_is_linear_in_its_input():
+    """It runs on the event-loop thread, so a slow bound is not one slow error -- it
+    is every concurrent call and job poll waiting behind it.
+
+    Dropping one code point at a time until the encoding fit was quadratic: measured
+    0.675s for 200 KB of git stderr, and 2 MB never returned. Stderr in the hundreds
+    of KB is ordinary (one `LF will be replaced by CRLF` line per file)."""
+    import time
+
+    line = "warning: LF will be replaced by CRLF in some/file.txt\n"
+    big = "fatal: x\n" + line * (2_000_000 // len(line))
+
+    start = time.perf_counter()
+    out = bounded_echo_prose(big)
+    elapsed = time.perf_counter() - start
+
+    assert len(out.encode()) <= MAX_ECHO_PROSE_BYTES
+    # ~0.35s measured, against 300s+ (killed) for the quadratic version: this asserts
+    # the complexity class, not a benchmark.
+    assert elapsed < 5.0

@@ -19,8 +19,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
   Measured on a git failure whose stderr carried an ANSI escape, 700 repetitions
   of a noise string, and an `AWS_SECRET_ACCESS_KEY=` line: a 12,688-byte
-  `error.message` containing the live escape and the key in full. Now 213 bytes,
-  escape stripped, key redacted.
+  `error.message` containing the live escape and the key in full. Now 412 bytes,
+  escape defanged (the ESC byte is stripped; the printable `[31m` remains), key
+  redacted.
 
   Both sites that interpolated a foreign exception into a message now go through
   `bounded_echo_prose`: this one and the `OSError` branch of the async-job
@@ -32,12 +33,31 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   tail dropped the one line worth reading and kept the noise. Compilers and stack
   traces put the answer last; git does not, and this helper exists for git.
 
-  The budget is 400 UTF-8 bytes and includes the marker, matching every other cap
-  in this server (#162) — a character limit lets 200 four-byte code points render
-  at 800 bytes, and a limit the marker is added to afterwards is not a limit. A
-  cut that lands inside a `[redacted: ...]` marker drops the fragment rather than
-  emitting `cted: secret value]` as though it were prose, which is the objection
-  `bounded_repr` already makes to slicing a finished `repr()`.
+  The budget is 400 UTF-8 bytes and includes the marker: a character limit lets
+  200 four-byte code points render at 800 bytes, and a limit the marker is added
+  to afterwards is not a limit. This is the stricter unit, not the house-wide one
+  — #162 converted the INPUT caps to bytes, while the other echo caps
+  (`DETAIL_VALUE_MAX_CHARS`, `jobs._stderr_tail`, the `claude.py` result echoes)
+  remain character-based.
+
+  Cutting is linear. Dropping one code point at a time until the encoding fit was
+  quadratic — measured 0.675s for 200 KB of git stderr, and 2 MB never returned —
+  and this runs on the event-loop thread, so the cost would have been paid by every
+  concurrent call and job poll, not just the failing one. Stderr in the hundreds of
+  KB is ordinary (one `LF will be replaced by CRLF` line per file). Now 0.34s for
+  2 MB.
+
+  A cut landing inside a `[redacted: ...]` marker drops the fragment rather than
+  emitting `cted: secret value]` as prose — the objection `bounded_repr` already
+  makes to slicing a finished `repr()`. The repair matches the engine's actual
+  marker strings: keying on the shape "a `]` before any `[`" deleted up to the
+  whole tail budget of real diagnostics, because git usage text is full of
+  brackets (`usage: git diff [<options>] [--] [<path>...]`). Truncation always
+  shows the marker, so a cut message never reads as a complete one.
+
+  Sanitization runs on the whole text before any cutting, deliberately: pre-cutting
+  to save the redactor work would hand it a secret severed mid-value, which it can
+  no longer recognize — turning a bounded echo into a partial-secret leak.
 
   `jobs._stderr_tail` applies an older tail-only version of this policy to job
   diagnostics; it reads from disk and has a legacy-record branch to answer for

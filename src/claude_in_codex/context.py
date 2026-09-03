@@ -396,35 +396,66 @@ def sanitize_echo_prose(text: str) -> str:
     return _redaction.sanitize_echo_prose(text) or ""
 
 
+# The redaction markers this module may have to repair a cut through. Imported from
+# the engine rather than retyped: a marker whose text drifts from pontonier's would
+# make the repair below silently stop matching, which is invisible in the output.
+_REDACTION_MARKERS = (_redaction._SECRET_VALUE_MARKER, _redaction._PARTIAL_SECRET_VALUE_MARKER)
+
+
 def _cut_to_bytes(text: str, budget: int, *, keep_tail: bool = False) -> str:
     """Trim `text` to at most `budget` UTF-8 bytes, never splitting a code point.
 
-    Code points are dropped whole, from whichever end is not being kept, so the
-    result is always decodable. Slicing the encoded bytes directly would be shorter
-    and wrong: it can sever a multi-byte character and produce text that no longer
-    round-trips."""
-    if utf8_len(text) <= budget:
+    Slice the ENCODED bytes and let the decoder drop whatever partial code point the
+    cut severed. The obvious alternative -- dropping one code point at a time until
+    the encoding fits -- is quadratic, because each step re-copies and re-encodes the
+    whole string: measured at 0.004s for 10 KB of git stderr but 0.675s for 200 KB,
+    and it never returned for 2 MB. This function runs on the event-loop thread (the
+    `except` around `gather_context` is outside `run_sync`), so that cost is not one
+    slow error, it is every concurrent call and job poll waiting on it. Byte-slicing
+    does the same job in linear time -- and it is what `gather_context` already does
+    to bound the diff itself."""
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= budget:
         return text
-    while text and utf8_len(text) > budget:
-        text = text[1:] if keep_tail else text[:-1]
-    return text
+    cut = encoded[-budget:] if keep_tail else encoded[:budget]
+    # errors="ignore" discards only the severed code point at the cut edge; every
+    # whole code point on the kept side survives.
+    return cut.decode("utf-8", "ignore")
 
 
-def _drop_severed_marker(text: str) -> str:
-    """Remove a redaction marker's tail fragment left at the start of a cut.
+def _drop_severed_marker_head(text: str) -> str:
+    """Drop a redaction marker's leading fragment left at the START of a cut.
 
-    Cutting inside `[redacted: secret value]` leaves something like
-    `cted: secret value] ...`, which reads as stray prose rather than as evidence
-    that redaction happened -- the same objection `bounded_repr` makes to slicing a
-    finished repr(). A closing bracket before any opening one means the cut landed
-    inside a marker, so the fragment goes."""
+    Cutting inside `[redacted: secret value]` leaves `cted: secret value]`, which
+    reads as stray prose rather than as evidence that redaction happened -- the same
+    objection `bounded_repr` makes to slicing a finished repr().
+
+    Matched against the ACTUAL markers, not by the shape "a `]` before any `[`". That
+    shape was the first attempt and it is far too eager: git usage text is full of
+    brackets (`usage: git diff [<options>] [--] [<path>...]`), and a cut landing
+    inside one would silently delete up to the whole tail budget of real diagnostics."""
     close = text.find("]")
     if close == -1:
         return text
-    opening = text.find("[")
-    if opening != -1 and opening < close:
+    fragment = text[: close + 1]
+    if any(marker.endswith(fragment) for marker in _REDACTION_MARKERS):
+        return text[close + 1 :].lstrip()
+    return text
+
+
+def _drop_severed_marker_tail(text: str) -> str:
+    """Drop a redaction marker's trailing fragment left at the END of a cut.
+
+    The mirror of the above, for the head half of a head+tail bound: a cut there
+    leaves `...KEY=[reda`, which is the same fragment-as-prose problem seen from the
+    other side."""
+    opening = text.rfind("[")
+    if opening == -1 or "]" in text[opening:]:
         return text
-    return text[close + 1 :].lstrip()
+    fragment = text[opening:]
+    if any(marker.startswith(fragment) for marker in _REDACTION_MARKERS):
+        return text[:opening].rstrip()
+    return text
 
 
 def bounded_echo_prose(text: str, limit_bytes: int = MAX_ECHO_PROSE_BYTES) -> str:
@@ -436,28 +467,34 @@ def bounded_echo_prose(text: str, limit_bytes: int = MAX_ECHO_PROSE_BYTES) -> st
     failure produced a 12,688-byte message carrying a raw ANSI escape and a secret
     that appeared in git's stderr.
 
-    HEAD AND TAIL, not the tail alone. A tail-only bound was the first attempt and
-    it is wrong for this input: git leads with the diagnosis (`fatal: ...`) and
-    follows with usage or hints, so keeping only the tail drops the one line worth
-    reading and keeps the noise. Compilers and stack traces put the answer last;
-    git does not, and this helper exists for git. So the first line survives, up to
-    half the budget, and the remaining budget goes to the tail.
+    HEAD AND TAIL, not the tail alone. Which end carries the diagnosis depends on the
+    failure: `error: unknown option` and `fatal: ambiguous argument` lead with it and
+    trail usage or hints, while a corrupt object reports `error: object file ... is
+    empty` first and the actionable `fatal: unable to read ...` last. Keeping both
+    ends covers all three; either end alone loses one of them.
 
-    The budget is in UTF-8 BYTES and INCLUDES the marker, matching every other cap
-    in this server (#162): a character limit lets 200 four-byte code points render
-    at 800 bytes, and a limit the marker is added to afterwards is not a limit.
+    The budget is in UTF-8 BYTES and INCLUDES the marker: a character limit lets 200
+    four-byte code points render at 800 bytes, and a limit the marker is added to
+    afterwards is not a limit. (The other ECHO caps in this server are still
+    character-based -- `DETAIL_VALUE_MAX_CHARS`, `jobs._stderr_tail` -- so this is
+    the stricter unit, not the house-wide one.)
 
-    `jobs._stderr_tail` applies an older tail-only version of this policy to job
-    diagnostics; it reads from disk and has a legacy-record branch to answer for
-    first, so it keeps its own copy."""
+    Truncation ALWAYS shows the marker. An earlier version dropped it along with a
+    tail that the marker repair had emptied, so a cut message read as a complete one.
+
+    Sanitization runs on the WHOLE text before any cutting, deliberately. Pre-cutting
+    to save the redactor work would hand it a secret severed mid-value, which it can
+    no longer recognize -- turning a bounded echo into a partial-secret leak."""
     sanitized = sanitize_echo_prose(text).strip()
     if utf8_len(sanitized) <= limit_bytes:
         return sanitized
     marker = " \u2026 "
-    head = _cut_to_bytes(sanitized.splitlines()[0], limit_bytes // 2)
+    head = _drop_severed_marker_tail(_cut_to_bytes(sanitized.splitlines()[0], limit_bytes // 2))
     tail_budget = limit_bytes - utf8_len(head) - utf8_len(marker)
-    tail = _drop_severed_marker(_cut_to_bytes(sanitized, tail_budget, keep_tail=True))
-    return f"{head}{marker}{tail}" if tail else head
+    tail = _drop_severed_marker_head(_cut_to_bytes(sanitized, tail_budget, keep_tail=True))
+    # `.rstrip()` so an emptied tail leaves "head …", never a bare head that reads
+    # as the complete message.
+    return f"{head}{marker}{tail}".rstrip()
 
 
 def redact_tree(value: object) -> object:
