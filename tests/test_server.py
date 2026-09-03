@@ -3996,6 +3996,61 @@ async def test_started_and_existing_job_both_carry_the_invoked_tool(
         assert payload["kind"] == tool.removesuffix("_async")
 
 
+async def test_an_existing_job_replay_can_already_be_terminal(monkeypatch, git_repo, tmp_path):
+    """claude_capabilities warns that an existing_job replay MAY ALREADY BE
+    TERMINAL, so a caller must read `status`/`result_available` before polling.
+
+    That warning is only worth publishing if it is true, and it is: a keyed retry
+    sent after the job finished replays a `done` record with the result already
+    available. A caller that saw `outcome=existing_job` and went straight to
+    claude_job_status would be polling a job that is not running."""
+    import json as _json
+    import time as _time
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    inner = {
+        "summary": "s",
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [],
+        "questions": [],
+        "assumptions": [],
+    }
+    envelope = _json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": _json.dumps(inner),
+        }
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
+    )
+    ws = str(git_repo)
+    call = {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "K"}
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool("claude_review_changes_async", call))
+        assert started["outcome"] == "started"
+        deadline = _time.time() + 5
+        while _time.time() < deadline:
+            st = structured(
+                await client.call_tool(
+                    "claude_job_status", {"job_id": started["job_id"], "workspace_root": ws}
+                )
+            )
+            if st["status"] == "done":
+                break
+            await anyio.sleep(0.05)
+        replay = structured(await client.call_tool("claude_review_changes_async", call))
+
+    assert replay["outcome"] == "existing_job"
+    assert replay["status"] == "done", "the premise of the published warning no longer holds"
+    assert replay["result_available"] is True
+
+
 async def test_job_status_does_not_carry_the_async_start_discriminator(
     monkeypatch, git_repo, tmp_path
 ):
