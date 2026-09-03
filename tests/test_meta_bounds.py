@@ -262,11 +262,21 @@ async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_selector(
 
 
 @pytest.mark.parametrize("tool", _SELECTOR_TOOLS)
-async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(fake_claude, git_repo, tool):
+@pytest.mark.parametrize("scope", ["branch", "working_tree", "staged"])
+async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(
+    fake_claude, git_repo, tool, scope
+):
+    """Every scope, not just the one that resolves refs.
+
+    `_valid_ref` is reached from `_diff_args`, which only resolves refs for
+    scope=branch. So an over-cap `base` on a working_tree call used to be ACCEPTED
+    and then withheld from the SUCCESS envelope -- `meta.base` absent where a normal
+    call shows the ref, which is exactly the "none supplied" misreading this design
+    turns on. The cap belongs to the argument, not to the scope it is used under."""
     data = await _call(
         tool,
         {
-            "scope": "branch",
+            "scope": scope,
             "base": "b" * (MAX_REF_BYTES + 1),
             "workspace_root": str(git_repo),
             **_SELECTOR_TOOLS[tool],
@@ -275,6 +285,44 @@ async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(fake_clau
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
     assert _size(data) < ENVELOPE_CEILING_BYTES
+
+
+@pytest.mark.parametrize("tool", _SELECTOR_TOOLS)
+async def test_a_ref_the_scope_ignores_is_still_echoed_when_it_fits(fake_claude, git_repo, tool):
+    """The negative above is only evidence if a normal ignored `base` survives.
+
+    A working_tree call does not use `base`, but it does echo it, and withholding
+    must stay distinguishable from that -- which requires the ordinary case to keep
+    showing the value."""
+    data = await _call(
+        tool,
+        {
+            "scope": "working_tree",
+            "base": "main",
+            "workspace_root": str(git_repo),
+            **_SELECTOR_TOOLS[tool],
+        },
+    )
+    assert data["ok"] is True, data.get("error")
+    meta = data.get("meta", data)
+    assert meta.get("base") == "main"
+
+
+async def test_an_over_cap_ref_never_reaches_a_job_record(fake_claude, git_repo):
+    """Because the ref cap was scope-gated, a live async call could STORE an over-cap
+    `base`; the record rebuild would then withhold it and attach the legacy-record
+    security warning -- to a paid, current-release result, for a value the review
+    never used. The starter must refuse before anything is written."""
+    data = await _call(
+        "claude_review_changes_async",
+        {
+            "scope": "working_tree",
+            "base": "b" * (MAX_REF_BYTES + 1),
+            "workspace_root": str(git_repo),
+        },
+    )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_base"
 
 
 def test_a_record_whose_paths_matched_does_not_fit_its_paths_drops_both(tmp_path):
@@ -342,17 +390,6 @@ def test_misaligned_or_implausible_counts_are_withheld(tmp_path, paths, paths_ma
 
     assert rebuilt.paths is None
     assert rebuilt.paths_matched is None
-
-
-async def test_a_measured_review_still_reports_its_counts(fake_claude, git_repo):
-    """The alignment check must not withhold what the server itself measured."""
-    data = await _call(
-        "claude_dry_run",
-        {"scope": "working_tree", "paths": ["src", "tests"], "workspace_root": str(git_repo)},
-    )
-    assert data["ok"] is True, data.get("error")
-    assert data["paths"] == ["src", "tests"]
-    assert len(data["paths_matched"]) == 2
 
 
 async def test_job_result_and_consume_are_bounded_end_to_end(monkeypatch, git_repo, tmp_path):

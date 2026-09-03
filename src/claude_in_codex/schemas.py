@@ -198,7 +198,13 @@ def bounded_selectors(
 
     The caps in config.py are enforced at the input edge, so on a LIVE call this
     withholds nothing: a value big enough to trip it here has already been refused
-    with invalid_paths/invalid_base/invalid_head. It exists because `meta` is built
+    with invalid_paths/invalid_base/invalid_head. That rests on
+    `_selector_bounds_error` running for every scope -- while the ref cap was
+    enforced only where refs are RESOLVED (scope=branch), an over-cap base on a
+    working_tree call reached a success envelope and was silently withheld here,
+    leaving `meta.base` absent exactly as though none had been sent.
+
+    It exists because `meta` is built
     from the raw arguments BEFORE that refusal -- the rejection envelope would
     otherwise carry the very echo the refusal exists to prevent -- and because
     jobs.py rebuilds `meta` from an on-disk record, which is ordinary local state
@@ -220,9 +226,11 @@ def bounded_selectors(
     though they had."""
     dropped: list[str] = []
     if not ref_within_bounds(base):
-        base, _ = None, dropped.append("base")
+        base = None
+        dropped.append("base")
     if not ref_within_bounds(head):
-        head, _ = None, dropped.append("head")
+        head = None
+        dropped.append("head")
     effective_head, diff_range = branch_range(scope, base, head)
     if dropped:
         # Either component withheld: the composition cannot be honest, and a

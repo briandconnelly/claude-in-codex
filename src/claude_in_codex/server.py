@@ -718,6 +718,33 @@ def _context_error_result(
     )
 
 
+def _selector_bounds_error(
+    paths: list[str] | None, base: str | None, head: str | None, meta: Meta
+) -> dict | None:
+    """Refuse an over-cap selector before anything else looks at it (#162).
+
+    Runs regardless of `scope`, which is the whole point. `_valid_ref` enforces the
+    ref cap only on the branch path -- it is reached from `_diff_args`, and only
+    scope=branch has refs to resolve -- so an over-cap `base` on a working_tree call
+    was ACCEPTED, and then withheld from a SUCCESS envelope by `bounded_selectors`,
+    leaving `meta.base` absent where a normal call shows the ref. That is the one
+    reading the withholding must never produce: absent means "none supplied".
+
+    The cap is a property of the argument, not of the scope the argument happens to
+    be used under, and the parameter descriptions publish it unconditionally. An
+    ignored `base` that breaks it is refused like any other.
+
+    Placed ahead of the per-tool checks so the error always names the field that
+    actually broke a cap; the checks are pure size arithmetic, so ordering them
+    first costs nothing."""
+    if not ref_within_bounds(base):
+        return _invalid_base_error(meta, base)
+    if not ref_within_bounds(head):
+        return _invalid_head_error(meta, head=head)
+    _, paths_err = _resolve_paths(paths, meta)
+    return paths_err
+
+
 def _resolve_paths(paths: list[str] | None, meta: Meta) -> tuple[list[str] | None, dict | None]:
     """The one place every tool turns caller `paths` into a validated filter.
 
@@ -1714,6 +1741,9 @@ async def claude_review_changes(
         effective_budget=r.budget,
         head=head,
     )
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -1924,6 +1954,9 @@ async def claude_adversarial_review(
         )
     # head only makes sense for an attached branch diff; reject it when scope is
     # omitted or is not branch (this also covers adversarial head-without-scope).
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -2437,6 +2470,9 @@ async def claude_review_changes_async(
         # Cheap early return, before any diff gathering — see _legacy_keyed_job
         # for why an unverifiable legacy marker is refused rather than replayed.
         return _result(_legacy_key_error(legacy_job, cwd, meta))
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -2837,6 +2873,9 @@ async def claude_adversarial_review_async(
         return _result(
             _invalid_paths_error(meta, "paths requires scope on claude_adversarial_review_async.")
         )
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -3136,6 +3175,9 @@ async def _dry_run_impl(
         workspace_source=ws_source,
         head=head,
     )
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(

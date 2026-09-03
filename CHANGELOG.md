@@ -16,7 +16,9 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   before this change, `paths=["a" * 10_000]` returned an 11 KB envelope and
   `base="-" + "b" * 10_000` a 21 KB one -- and this was never only a rejection
   path, because a *valid* 10,000-character path was echoed the same way on a
-  successful review, as were 5,000 path entries (a 44 KB envelope).
+  successful review, as were 5,000 short path entries (`p0`...`p4999`, a 44 KB
+  envelope; longer entries scaled past 64 KB). The largest response the caps now
+  admit is 34.6 KB, measured at 256 entries against the 32 KiB aggregate.
 
   The bound is applied to the INPUT rather than to the echo. `paths` entries are
   capped at 4096 bytes each, the list at 256 entries and 32,768 bytes in
@@ -39,6 +41,12 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   allows ~128 bytes per entry at the entry cap -- paths in this repository run to
   a median of 36 bytes and a maximum of 96 -- so a generated call naming every
   changed file passes and only a pathological one is refused.
+
+  The ref caps apply on every scope, including one that ignores the ref.
+  Enforcing them only where refs are RESOLVED (scope=branch) left an over-cap
+  `base` on a working_tree call accepted and then silently withheld from the
+  SUCCESS envelope, so `meta.base` read as though none had been sent -- the one
+  misreading this design exists to prevent.
 
   Two places rebuild `meta` from something other than a live, validated call.
   `claude_dry_run` builds its own result, and `claude_job_result` /

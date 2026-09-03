@@ -75,9 +75,12 @@ MAX_PATH_ENTRY_BYTES = 4096
 MAX_REF_BYTES = 4096
 
 # A list cap and a per-entry cap still permit a ~1 MiB echo together (256 x 4096), so
-# the aggregate is capped separately. 32 KiB is ~128 bytes per entry at the entry cap
-# -- well above real pathnames -- so a generated call naming every changed file passes
-# and only a pathological one is refused.
+# the aggregate is capped separately. 32 KiB is ~128 bytes per entry at the entry cap,
+# well above real pathnames (median 36 bytes in this repository), so a filter naming
+# every directory of a large tree passes and only a pathological one is refused. The
+# entry count is NOT sized for a filter derived from a changed-file list: the shipped
+# skill tells callers not to build one that way, and MAX_PATH_MATCH_PROBES already
+# stops measuring past 32 entries. 256 is headroom over hand-written filters.
 MAX_PATHS_ENTRIES = 256
 MAX_PATHS_TOTAL_BYTES = 32_768
 
