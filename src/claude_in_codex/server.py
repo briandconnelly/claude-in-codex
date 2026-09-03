@@ -73,24 +73,25 @@ from claude_in_codex.context import (
 from claude_in_codex.jobs import JobConfig
 from claude_in_codex.normalize import apply_cost_usage, build_prompt, normalize_envelope
 from claude_in_codex.schemas import (
+    ADVERSARIAL_JOB_START_SCHEMA,
+    ASYNC_START_MODELS,
     CAPABILITIES_SCHEMA,
+    CONSULT_JOB_START_SCHEMA,
     DEFAULT_NEXT_STEP,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
     FINGERPRINT_COVERS,
     JOB_LIST_SCHEMA,
-    JOB_START_SCHEMA,
-    JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
     MODEL_CATALOG_SCHEMA,
     OUTPUT_BOUNDS,
     RESULT_SCHEMA,
+    REVIEW_JOB_START_SCHEMA,
     STATUS_SCHEMA,
     TRUNCATION_MARKER,
     Access,
-    AsyncExistingJob,
     AsyncLifecycle,
-    AsyncNoChangesResult,
+    AsyncStartRoute,
     AsyncStartTool,
     CapabilitiesResult,
     Confidence,
@@ -105,7 +106,6 @@ from claude_in_codex.schemas import (
     ErrorInfo,
     ErrorResult,
     JobId,
-    JobStarted,
     Meta,
     RawDefaults,
     RawResponse,
@@ -942,7 +942,9 @@ def _async_empty_diff_result(
     base = _empty_diff_result(
         tool, meta, context_summary, paths, verdict=verdict, confidence=confidence, detail=detail
     )
-    return AsyncNoChangesResult.model_validate(
+    model = ASYNC_START_MODELS[tool][2]
+    assert model is not None, f"{tool} has no diff and cannot answer no_changes"
+    return model.model_validate(
         {**base, "tool": tool, "kind": kind, "outcome": "no_changes"}
     ).model_dump(mode="json", exclude_none=True)
 
@@ -2124,9 +2126,11 @@ async def _launch_job(
                     # the caller would otherwise have polled, and dropping its
                     # explicit nulls would change the replay payload's shape for
                     # reasons unrelated to the discriminator this adds.
-                    return AsyncExistingJob.model_validate(
-                        {**data, "tool": tool, "outcome": "existing_job"}
-                    ).model_dump(mode="json")
+                    return (
+                        ASYNC_START_MODELS[tool][1]
+                        .model_validate({**data, "tool": tool, "outcome": "existing_job"})
+                        .model_dump(mode="json")
+                    )
                 return _err(
                     "internal_error",
                     "idempotency_key replay points at a job that has no record.",
@@ -2204,16 +2208,18 @@ async def _launch_job(
             "Check the workspace/job-state directory permissions and retry.",
             meta,
         )
-    started = JobStarted(
-        tool=tool,
-        outcome="started",
-        job_id=job_id,
-        kind=cfg.kind,
-        started_at=started_at,
-        deadline_seconds=job_timeout,
-        poll_after_ms=jobs.poll_after_ms(),
-        ttl_seconds=jobs.ttl_seconds(),
-        meta=started_meta(dropped),
+    started = ASYNC_START_MODELS[tool][0].model_validate(
+        {
+            "tool": tool,
+            "outcome": "started",
+            "job_id": job_id,
+            "kind": cfg.kind,
+            "started_at": started_at,
+            "deadline_seconds": job_timeout,
+            "poll_after_ms": jobs.poll_after_ms(),
+            "ttl_seconds": jobs.ttl_seconds(),
+            "meta": started_meta(dropped),
+        }
     )
     return started.model_dump(mode="json", exclude_none=True)
 
@@ -2221,7 +2227,7 @@ async def _launch_job(
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Review changes with Claude (background)",
-    output_schema=JOB_STARTED_SCHEMA,
+    output_schema=REVIEW_JOB_START_SCHEMA,
 )
 async def claude_review_changes_async(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
@@ -2479,7 +2485,7 @@ async def claude_review_changes_async(
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Ask Claude (background)",
-    output_schema=JOB_START_SCHEMA,
+    output_schema=CONSULT_JOB_START_SCHEMA,
 )
 async def claude_consult_async(
     prompt: Annotated[str, Field(description="The question to ask Claude.")],
@@ -2614,7 +2620,7 @@ async def claude_consult_async(
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Adversarial review with Claude (background)",
-    output_schema=JOB_STARTED_SCHEMA,
+    output_schema=ADVERSARIAL_JOB_START_SCHEMA,
 )
 async def claude_adversarial_review_async(
     target: Annotated[str, Field(description="The plan/claim/decision to attack.")],
@@ -3694,30 +3700,59 @@ _DETAIL_MODES = DetailModes(
     ),
 )
 
+# Derived from the model map so a new starter cannot be advertised in one place
+# and forgotten in the other. A starter answers no_changes iff it has a diff to
+# find empty, which is exactly what a no_changes model in the map records.
+_ASYNC_START_TOOLS = list(ASYNC_START_MODELS)
+_DIFF_BEARING_START_TOOLS = [t for t, models in ASYNC_START_MODELS.items() if models[2]]
+
 _ASYNC_LIFECYCLE = AsyncLifecycle(
-    start_tools=[
-        "claude_review_changes_async",
-        "claude_consult_async",
-        "claude_adversarial_review_async",
-    ],
+    start_tools=_ASYNC_START_TOOLS,
     start_outcome_field="outcome",
     start_outcomes=["started", "existing_job", "no_changes"],
     start_outcome_routing=[
-        "outcome=started: a NEW paid job was launched. job_id is the handle; poll "
-        "claude_job_status, then fetch with claude_job_result.",
-        "outcome=existing_job: the idempotency_key already held a matching job, so "
-        "nothing new was launched and nothing new was spent. The payload is that "
-        "job's status and MAY ALREADY BE TERMINAL -- read `status` and "
-        "`result_available` before polling, or you will poll a finished job.",
-        "outcome=no_changes: the diff was empty, so no job was started and nothing "
-        "was spent. The payload IS the result (summary, verdict, confidence); "
-        "there is no job_id and nothing to poll. Reachable only from the "
-        "diff-bearing starters -- claude_consult_async has no diff to find empty "
-        "and never returns it.",
-        "tool names the *_async surface you invoked; kind names the underlying "
-        "tool whose envelope claude_job_result returns (and, on no_changes, the "
-        "job that was NOT started). Branch on outcome, never on which fields "
-        "happen to be present.",
+        AsyncStartRoute(
+            outcome="started",
+            tools=_ASYNC_START_TOOLS,
+            started_new_job=True,
+            carries_job_id=True,
+            carries_result=False,
+            may_be_terminal=False,
+            next_action="poll_status",
+            next_tool="claude_job_status",
+            note="A new paid job was launched; poll it, then fetch with claude_job_result.",
+        ),
+        AsyncStartRoute(
+            outcome="existing_job",
+            tools=_ASYNC_START_TOOLS,
+            started_new_job=False,
+            carries_job_id=True,
+            carries_result=False,
+            may_be_terminal=True,
+            next_action="poll_status",
+            next_tool="claude_job_status",
+            note=(
+                "The idempotency_key already held a matching job, so nothing new was "
+                "launched or spent. Read status and result_available first: a keyed "
+                "retry sent after the job finished replays a TERMINAL record, and "
+                "polling it is a wasted round trip."
+            ),
+        ),
+        AsyncStartRoute(
+            outcome="no_changes",
+            tools=_DIFF_BEARING_START_TOOLS,
+            started_new_job=False,
+            carries_job_id=False,
+            carries_result=True,
+            may_be_terminal=False,
+            next_action="read_payload",
+            next_tool=None,
+            note=(
+                "The diff was empty, so no job was started and nothing was spent. The "
+                "payload IS the result; there is nothing to poll. tool names the "
+                "*_async surface invoked and kind the job that was NOT started."
+            ),
+        ),
     ],
     status_tool="claude_job_status",
     result_tool="claude_job_result",

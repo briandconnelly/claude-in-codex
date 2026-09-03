@@ -36,14 +36,28 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   no-changes all-clear. `claude_job_status` still returns a bare `JobStatus`:
   `outcome` answers what a *launch* did, which is not a question a poll asks.
 
+  Each starter advertises its OWN identity: `tool` is a one-value const on that
+  tool's schema rather than a three-name enum shared by all three, so
+  `claude_consult_async` no longer tells a generated client that its `tool` might
+  be `"claude_review_changes_async"`. `kind` is pinned the same way on the
+  branches this server authors; on `existing_job` it stays a plain string,
+  because that branch is rendered from the stored job record and a partial record
+  legitimately yields `""` -- pinning it there would turn a degraded-but-
+  answerable replay into a validation error escaping the ok:false contract.
+
   The routing for all three values is published once in
   `claude_capabilities.async_lifecycle` (`start_outcome_field`,
   `start_outcomes`, `start_outcome_routing`) rather than repeated in each
-  starter's description -- including the trap that an `existing_job` replay may
-  already be terminal, so its `status` and `result_available` must be read before
-  polling. Fingerprint `claude-in-codex/0.1/schema-47`.
+  starter's description. It is structural, not prose: each route carries
+  `started_new_job`, `carries_job_id`, `carries_result`, `may_be_terminal`, and a
+  required `next_action`, so the trap that an `existing_job` replay may already be
+  terminal is a boolean rather than a sentence -- as `COMPATIBILITY.md` promises
+  for `async_lifecycle`. Fingerprint `claude-in-codex/0.1/schema-47`.
 
-  Design reviewed by Codex, which caught the defaulted-`Literal` bug above.
+  Design reviewed by Codex, which caught the defaulted-`Literal` bug above. The
+  per-starter identity and the structural routing were raised by Copilot in
+  review; specializing the schemas also gave back 469 discovery bytes, since a
+  const is smaller than the enum it replaced.
 
 - **The live tests can now fail on structured-output drift (#159).** The three
   live `claude_consult` roundtrips each asked Claude to affirm a stated

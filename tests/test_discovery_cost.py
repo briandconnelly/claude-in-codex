@@ -13,11 +13,13 @@ from jsonschema import validate
 from tests.support import Client
 
 from claude_in_codex.schemas import (
+    ADVERSARIAL_JOB_START_SCHEMA,
+    CONSULT_JOB_START_SCHEMA,
     DRY_RUN_SCHEMA,
     JOB_LIST_SCHEMA,
-    JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
     RESULT_SCHEMA,
+    REVIEW_JOB_START_SCHEMA,
     STATUS_SCHEMA,
 )
 from claude_in_codex.server import mcp
@@ -51,8 +53,8 @@ from claude_in_codex.server import mcp
 # It was held to +21% by two cuts made in the same change, not by accepting the
 # first measurement: the long idempotency_key prose moved into
 # claude_capabilities.async_lifecycle (published once, ~1KB across three
-# starters), and claude_consult_async advertises JOB_START_SCHEMA rather than
-# JOB_STARTED_SCHEMA because it has no diff to find empty and so can never
+# starters), and claude_consult_async advertises a two-branch start schema
+# rather than a three-branch one because it has no diff to find empty and so can never
 # answer with a SuccessResult (~3KB, and one fewer shape for the caller to
 # handle).
 #
@@ -119,9 +121,9 @@ from claude_in_codex.server import mcp
 # the smallest step that restores the ~2% this file asks for: 76,000 leaves
 # 1,899 bytes / 2.5%.
 #
-# Raised from 76_000 to 77_200 for the async-start `outcome` discriminator (#80):
-# measured 75,646, up 1,545 bytes / +2.1% from the 74,101 above, which left only
-# 0.5% headroom. The cost is three success branches that each now carry a
+# Raised from 76_000 to 76_800 for the async-start `outcome` discriminator (#80):
+# measured 75,177, up 1,076 bytes / +1.5% from the 74,101 above, which left only
+# 1.1% headroom. The cost is three success branches that each now carry a
 # required `outcome` const and a `tool` reference, on three starters -- and it is
 # the point of the change, not incidental to it: the alternative the issue
 # describes is a caller inferring which of three shapes it got from which fields
@@ -140,18 +142,25 @@ from claude_in_codex.server import mcp
 # costs about what the saved inlines return) and does not compile on Python 3.11,
 # which this package still supports.
 #
+# A third round came from PR review and gave back 469 more: specializing the start
+# envelopes per starter turned `tool` from a shared three-name enum into a
+# one-value const on each tool's own schema, which is both smaller AND stricter --
+# claude_consult_async's schema no longer says its `tool` might be
+# "claude_review_changes_async". Advertising AsyncStartRoute only through the
+# AsyncLifecycle substub kept the new structural routing off tools/list entirely.
+#
 # What remains is not slimmable here: the dominant repeated cost is still the Meta
 # stub, which #143 deliberately spelled out, and the per-branch cost being paid is
-# a required discriminator whose whole value is being required. 77,200 leaves
-# 1,554 bytes / 2.0%.
-WIRE_BUDGET_BYTES = 77_200
+# a required discriminator whose whole value is being required. 76,800 leaves
+# 1,623 bytes / 2.1%.
+WIRE_BUDGET_BYTES = 76_800
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and moves in step with WIRE_BUDGET_BYTES (ceil(77,200/4)).
-TOKEN_PROXY_BUDGET = 19_300  # see WIRE_BUDGET_BYTES note
+# against, and moves in step with WIRE_BUDGET_BYTES (ceil(76,800/4)).
+TOKEN_PROXY_BUDGET = 19_200  # see WIRE_BUDGET_BYTES note
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -179,7 +188,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (19,300 == 77,200/4) and the proxy is
+    The budgets are currently proportional (19,200 == 76,800/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""
@@ -215,7 +224,9 @@ def test_slim_keeps_ok_discriminator():
 
 _UNION_SCHEMAS = {
     "RESULT_SCHEMA": RESULT_SCHEMA,
-    "JOB_STARTED_SCHEMA": JOB_STARTED_SCHEMA,
+    "REVIEW_JOB_START_SCHEMA": REVIEW_JOB_START_SCHEMA,
+    "CONSULT_JOB_START_SCHEMA": CONSULT_JOB_START_SCHEMA,
+    "ADVERSARIAL_JOB_START_SCHEMA": ADVERSARIAL_JOB_START_SCHEMA,
     "JOB_STATUS_SCHEMA": JOB_STATUS_SCHEMA,
     "DRY_RUN_SCHEMA": DRY_RUN_SCHEMA,
     "JOB_LIST_SCHEMA": JOB_LIST_SCHEMA,

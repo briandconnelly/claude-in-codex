@@ -62,6 +62,12 @@ JobState = Literal["running", "done", "failed", "cancelled", "timeout"]
 # paid job; `existing_job` replayed the one an idempotency_key already holds;
 # `no_changes` found an empty diff and returned a free result without launching.
 AsyncStartOutcome = Literal["started", "existing_job", "no_changes"]
+# What a caller does next with a start envelope. A required literal rather than a
+# nullable `next_tool`, because the capabilities payload is dumped with
+# exclude_none: a null next_tool would vanish from the wire and leave "there is
+# nothing to poll" expressible only as an ABSENT field -- the field-presence
+# inference this whole contract exists to remove.
+AsyncStartNextAction = Literal["poll_status", "read_payload"]
 # The *_async starters, as a closed set. `tool` is typed against it rather than
 # left a bare str so the schema itself refuses the bug #80 reports: an envelope
 # that names the SYNC tool for a call the caller made against the _async one.
@@ -664,6 +670,36 @@ class ErrorCodeDoc(BaseModel):
     detail_fields: list[str] = Field(default_factory=list)
 
 
+class AsyncStartRoute(BaseModel):
+    """One branch of the *_async start contract, as fields rather than prose.
+
+    COMPATIBILITY.md guarantees async_lifecycle is drivable "without parsing
+    prose", so what an agent must DO per outcome is expressed structurally here;
+    `note` is a human gloss on the same facts, never the only place one lives."""
+
+    model_config = ConfigDict(extra="forbid")
+    outcome: AsyncStartOutcome
+    # The start_tools that can return this outcome. no_changes is absent from a
+    # starter with no diff to find empty.
+    tools: list[str]
+    # Whether THIS call started a new paid run (false for a replay and for an
+    # empty diff, neither of which spends).
+    started_new_job: bool
+    # Which fields the branch carries, so a caller knows what it may read.
+    carries_job_id: bool
+    carries_result: bool
+    # True when the payload may ALREADY be in a terminal state, so state_field and
+    # result_ready_field must be read before polling. This is the replay trap: a
+    # keyed retry sent after the job finished returns a done record.
+    may_be_terminal: bool
+    # What to do next. Always present.
+    next_action: AsyncStartNextAction
+    # The tool `next_action` names, when it names one. A convenience pointer, not
+    # the discriminator -- read next_action.
+    next_tool: str | None
+    note: str
+
+
 class AsyncLifecycle(BaseModel):
     """Structured description of the background-job lifecycle.
 
@@ -681,7 +717,7 @@ class AsyncLifecycle(BaseModel):
     # list cannot drift from the discriminator it documents. Costs nothing to
     # advertise: AsyncLifecycle is substubbed for discovery (_CAPABILITIES_SUBSTUBS).
     start_outcomes: list[AsyncStartOutcome]
-    start_outcome_routing: list[str]
+    start_outcome_routing: list[AsyncStartRoute]
     status_tool: str
     result_tool: str
     consume_tool: str
@@ -843,6 +879,93 @@ class AsyncNoChangesResult(SuccessResult):
     # The job kind that would have run had the diff been non-empty. Present so the
     # (tool, kind) pair means the same thing on all three branches of the union.
     kind: str
+
+
+# Per-starter narrowings of the three shared branches above. The bases carry the
+# SHAPE and are never advertised directly; these carry the IDENTITY, so each
+# tool's outputSchema pins its own surface as a const instead of accepting the
+# union of all three (a generic client reading claude_consult_async's schema was
+# told `tool` might be "claude_review_changes_async").
+#
+# `kind` is narrowed only where THIS server authors it -- the started and
+# no_changes branches, where it comes from the call site. On the existing_job
+# branch it is read back from an on-disk job record and can legitimately be "" if
+# that record is partial (jobs._status_dict defaults it), so pinning it to a
+# Literal there would turn a degraded-but-answerable replay into a pydantic
+# ValidationError that escapes the ok:false contract entirely. It stays `str`,
+# and `tool` -- which this server always authors -- carries the identity instead.
+class ReviewChangesJobStarted(JobStarted):
+    """A new claude_review_changes job."""
+
+    tool: Literal["claude_review_changes_async"]
+    kind: Literal["claude_review_changes"]
+
+
+class ReviewChangesExistingJob(AsyncExistingJob):
+    """A replayed claude_review_changes job."""
+
+    tool: Literal["claude_review_changes_async"]
+
+
+class ReviewChangesNoChanges(AsyncNoChangesResult):
+    """An empty diff answered by claude_review_changes_async without spending."""
+
+    tool: Literal["claude_review_changes_async"]
+    kind: Literal["claude_review_changes"]
+
+
+class ConsultJobStarted(JobStarted):
+    """A new claude_consult job."""
+
+    tool: Literal["claude_consult_async"]
+    kind: Literal["claude_consult"]
+
+
+class ConsultExistingJob(AsyncExistingJob):
+    """A replayed claude_consult job."""
+
+    tool: Literal["claude_consult_async"]
+
+
+class AdversarialJobStarted(JobStarted):
+    """A new claude_adversarial_review job."""
+
+    tool: Literal["claude_adversarial_review_async"]
+    kind: Literal["claude_adversarial_review"]
+
+
+class AdversarialExistingJob(AsyncExistingJob):
+    """A replayed claude_adversarial_review job."""
+
+    tool: Literal["claude_adversarial_review_async"]
+
+
+class AdversarialNoChanges(AsyncNoChangesResult):
+    """An empty diff answered by claude_adversarial_review_async without spending."""
+
+    tool: Literal["claude_adversarial_review_async"]
+    kind: Literal["claude_adversarial_review"]
+
+
+# The one place a starter's name maps to the models that render its two job-bearing
+# branches, so a new starter cannot advertise per-tool consts and then build the
+# wrong envelope. The no_changes model is None for a starter with no diff.
+ASYNC_START_MODELS: dict[
+    str,
+    tuple[type[JobStarted], type[AsyncExistingJob], type[AsyncNoChangesResult] | None],
+] = {
+    "claude_review_changes_async": (
+        ReviewChangesJobStarted,
+        ReviewChangesExistingJob,
+        ReviewChangesNoChanges,
+    ),
+    "claude_consult_async": (ConsultJobStarted, ConsultExistingJob, None),
+    "claude_adversarial_review_async": (
+        AdversarialJobStarted,
+        AdversarialExistingJob,
+        AdversarialNoChanges,
+    ),
+}
 
 
 class DryRunResult(BaseModel):
@@ -1108,6 +1231,10 @@ def _slim(schema: dict) -> dict:
     # would pay for the same contract twice.
     for name in ("ErrorDetails", "RepairAction"):
         defs.pop(name, None)
+    # AsyncStartRoute only ever appears inside AsyncLifecycle, which is substubbed
+    # below; leaving its full definition advertised pays for a block no client can
+    # reach from the stub.
+    defs.pop("AsyncStartRoute", None)
     if "Truncation" in defs:
         defs["Truncation"] = dict(_TRUNCATION_STUB)
         # TruncatedField only ever appears inside Truncation, which the stub above
@@ -1160,13 +1287,24 @@ CAPABILITIES_SCHEMA = _slim(CapabilitiesResult.model_json_schema())
 # `outcome` literal, so the caller branches on a VALUE rather than on which fields
 # are present (#80). Advertised by a starter that has no diff to find empty, so it
 # can never answer with a result — its reachable outcomes are started|existing_job.
-JOB_START_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStarted | AsyncExistingJob)))
+# One schema per starter: the branches differ only in which tool/kind consts they
+# pin, but that is exactly what makes `tool` usable for correlation.
+CONSULT_JOB_START_SCHEMA = _slim(
+    _object_union_schema(TypeAdapter(ConsultJobStarted | ConsultExistingJob))
+)
 # The same, plus the no_changes result an empty diff returns without starting a
 # job. Only the diff-bearing starters advertise it: carrying the result branch on a
 # starter that cannot produce one costs ~3KB of discovery and lies about the
 # shapes the caller must handle.
-JOB_STARTED_SCHEMA = _slim(
-    _object_union_schema(TypeAdapter(JobStarted | AsyncExistingJob | AsyncNoChangesResult))
+REVIEW_JOB_START_SCHEMA = _slim(
+    _object_union_schema(
+        TypeAdapter(ReviewChangesJobStarted | ReviewChangesExistingJob | ReviewChangesNoChanges)
+    )
+)
+ADVERSARIAL_JOB_START_SCHEMA = _slim(
+    _object_union_schema(
+        TypeAdapter(AdversarialJobStarted | AdversarialExistingJob | AdversarialNoChanges)
+    )
 )
 JOB_STATUS_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStatus)))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.

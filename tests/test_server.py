@@ -3935,6 +3935,120 @@ async def test_every_async_start_branch_requires_an_outcome(tool):
         assert "tool" in branch["required"]
 
 
+@pytest.mark.parametrize(
+    ("tool", "kind"),
+    [
+        ("claude_review_changes_async", "claude_review_changes"),
+        ("claude_consult_async", "claude_consult"),
+        ("claude_adversarial_review_async", "claude_adversarial_review"),
+    ],
+)
+async def test_each_starter_pins_its_own_tool_not_the_shared_enum(tool, kind):
+    """`tool` must be a per-starter const, not a three-name enum shared by all.
+
+    A shared enum let claude_consult_async advertise a successful payload whose
+    `tool` might be "claude_review_changes_async", so a generated client could not
+    use the field to identify the invoked surface -- which is the whole point of
+    adding it. Raised by Copilot on PR #161.
+
+    `kind` is pinned only on the branches this server authors. The existing_job
+    branch reads it back from an on-disk record, so it stays a plain string; the
+    test below covers why."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    branches = [
+        b for b in tools[tool].output_schema["anyOf"] if "outcome" in b.get("properties", {})
+    ]
+    assert branches
+    for branch in branches:
+        prop = branch["properties"]["tool"]
+        assert prop.get("const") == tool, (
+            f"{tool} advertises tool={prop} instead of a const naming itself"
+        )
+        outcome = branch["properties"]["outcome"]["const"]
+        if outcome == "existing_job":
+            # Deliberately unpinned -- see test_a_replay_survives_a_record_that_lost_its_kind.
+            assert "const" not in branch["properties"]["kind"]
+        else:
+            assert branch["properties"]["kind"].get("const") == kind
+
+
+async def test_a_replay_survives_a_record_that_lost_its_kind(monkeypatch, git_repo, tmp_path):
+    """Why `kind` is NOT pinned to a const on the existing_job branch.
+
+    That branch is rendered from the stored job record, and jobs._status_dict
+    defaults a missing `kind` to "". Pinning it to a Literal would turn a
+    degraded-but-answerable replay into a pydantic ValidationError raised out of
+    the launch -- escaping the ok:false envelope contract entirely, which is a
+    strictly worse failure than reporting an empty kind. `tool`, which this server
+    always authors itself, carries the identity instead and IS pinned."""
+    import json as _json
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ws = str(git_repo)
+    call = {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "K"}
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool("claude_review_changes_async", call))
+        job_dir = jobs_mod._job_dir(ws, started["job_id"])
+        record = _json.loads((job_dir / "meta.json").read_text())
+        del record["kind"]
+        (job_dir / "meta.json").write_text(_json.dumps(record))
+
+        replay = structured(
+            await client.call_tool("claude_review_changes_async", call, raise_on_error=False)
+        )
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": started["job_id"], "workspace_root": ws}
+        )
+
+    assert replay["ok"] is True, "a partial job record must not blow up the launch envelope"
+    assert replay["outcome"] == "existing_job"
+    assert replay["tool"] == "claude_review_changes_async"
+    assert replay["kind"] == ""
+
+
+async def test_start_outcome_routing_is_structural_not_prose():
+    """COMPATIBILITY.md guarantees async_lifecycle is drivable "without parsing
+    prose", so what to DO per outcome must be readable as fields.
+
+    Raised by Copilot on PR #161: the routing shipped as free-form strings, which
+    left the required terminal-status check for `existing_job` recoverable only by
+    reading English."""
+    lifecycle = _capabilities_payload()["async_lifecycle"]
+    routes = {r["outcome"]: r for r in lifecycle["start_outcome_routing"]}
+    assert set(routes) == set(lifecycle["start_outcomes"])
+
+    started, existing, none_ = routes["started"], routes["existing_job"], routes["no_changes"]
+
+    assert started["started_new_job"] is True
+    assert started["carries_job_id"] is True and started["carries_result"] is False
+    assert started["next_action"] == "poll_status"
+    assert started["next_tool"] == lifecycle["status_tool"]
+
+    # Neither of these spends, and both are reachable without a launch.
+    assert existing["started_new_job"] is False and none_["started_new_job"] is False
+
+    # The replay trap, as a boolean rather than a sentence.
+    assert existing["may_be_terminal"] is True
+    assert started["may_be_terminal"] is False
+
+    # no_changes IS the answer: nothing to poll, no handle.
+    assert none_["carries_result"] is True
+    assert none_["carries_job_id"] is False
+    # Always present, never inferred from an absent next_tool: the payload is
+    # dumped with exclude_none, so a null pointer would vanish from the wire.
+    assert none_["next_action"] == "read_payload"
+    assert "next_tool" not in none_
+
+    # Reachability is published per route, and matches the advertised schemas.
+    assert set(started["tools"]) == set(lifecycle["start_tools"])
+    assert set(none_["tools"]) == {
+        "claude_review_changes_async",
+        "claude_adversarial_review_async",
+    }
+
+
 async def test_advertised_outcomes_match_what_each_starter_can_produce():
     """no_changes is reachable only where there is a diff to find empty."""
     async with Client(mcp) as client:
