@@ -49,6 +49,13 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   nothing) with a `security_warnings` entry saying so, rather than failing
   retrieval of a result that was already paid for.
 
+  `meta.paths_matched` is bounded with the list it describes: a record naming one
+  path beside 50,000 counts was both a 150 KB envelope and a broken #149
+  alignment, so a count list that does not fit its path list -- wrong length, a
+  negative, or an implausible magnitude -- takes both fields with it. The live
+  path cannot produce one: the server measures either no counts or exactly one
+  per entry.
+
   The published limits are why this bumps the fingerprint: they appear in the
   `paths`, `base` and `head` parameter descriptions, which the contract digest
   covers.

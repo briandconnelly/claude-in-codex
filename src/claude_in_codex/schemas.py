@@ -19,6 +19,7 @@ from pydantic import (
 
 from claude_in_codex.config import (
     MAX_SYSTEM_PROMPT_APPEND_BYTES,
+    paths_matched_aligned,
     paths_within_bounds,
     ref_within_bounds,
 )
@@ -228,6 +229,14 @@ def bounded_selectors(
         # defaulted head must not stand in for a refused one.
         effective_head, diff_range = (None if "head" in dropped else effective_head), None
     if not paths_within_bounds(paths):
+        paths, paths_matched = None, None
+        dropped.append("paths")
+    elif not paths_matched_aligned(paths, paths_matched):
+        # Bounding `paths` alone leaves `paths_matched` free: a record naming one
+        # path beside 50,000 counts is both an unbounded echo and a broken #149
+        # alignment. Neither survives alone -- a count list that does not describe
+        # THIS path list describes nothing, and a path list whose counts were
+        # silently discarded would read as "not measured".
         paths, paths_matched = None, None
         dropped.append("paths")
     return BoundedSelectors(base, effective_head, diff_range, paths, paths_matched, tuple(dropped))

@@ -126,6 +126,10 @@ async def test_a_value_at_the_cap_is_still_accepted(fake_claude, git_repo):
         {"scope": "working_tree", "paths": [entry], "workspace_root": str(git_repo)},
     )
     assert data["ok"] is True, data.get("error")
+    # Not just accepted -- echoed back LITERALLY. An implementation that bounded the
+    # envelope by quietly withholding valid selectors would pass an ok-only
+    # assertion while turning a filtered review into one that reads as unfiltered.
+    assert data["meta"]["paths"] == [entry]
 
 
 async def test_a_successful_envelope_is_bounded_too(fake_claude, git_repo):
@@ -140,6 +144,8 @@ async def test_a_successful_envelope_is_bounded_too(fake_claude, git_repo):
     )
     assert data["ok"] is True, data.get("error")
     assert _size(data) < MAX_PATHS_TOTAL_BYTES + ENVELOPE_CEILING_BYTES
+    # Same point at the entry-count boundary: bounded AND unchanged.
+    assert data["meta"]["paths"] == [f"src/f{i}" for i in range(MAX_PATHS_ENTRIES)]
 
 
 async def test_paths_and_paths_matched_stay_index_aligned(fake_claude, git_repo):
@@ -269,3 +275,166 @@ async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(fake_clau
     assert data["ok"] is False
     assert data["error"]["code"] == "invalid_base"
     assert _size(data) < ENVELOPE_CEILING_BYTES
+
+
+def test_a_record_whose_paths_matched_does_not_fit_its_paths_drops_both(tmp_path):
+    """Bounding `paths` alone leaves `paths_matched` free.
+
+    A record naming one path beside 50,000 counts is two failures at once: an
+    envelope proportional to the record (measured at 150 KB before this check), and
+    a #149 alignment that cannot be true. The live path cannot produce it --
+    `_path_match_counts` returns either None or exactly one count per entry -- but
+    the record it is rebuilt from is editable local state."""
+    from claude_in_codex import jobs
+
+    record = {
+        "config": {
+            "config_mode": "inherit",
+            "access": "toolless",
+            "scope": "working_tree",
+            "timeout_seconds": 1800,
+            "workspace_source": "param",
+            "cwd": str(tmp_path),
+            "paths": ["src"],
+            "paths_matched": [7] * 50_000,
+        },
+        "context_summary": None,
+    }
+
+    rebuilt = jobs._build_meta(record)
+
+    assert rebuilt.paths is None
+    assert rebuilt.paths_matched is None
+    assert any("selector size caps" in w for w in rebuilt.security_warnings)
+    assert len(json.dumps(rebuilt.model_dump(mode="json", exclude_none=True))) < (
+        ENVELOPE_CEILING_BYTES
+    )
+
+
+@pytest.mark.parametrize(
+    ("paths", "paths_matched"),
+    [
+        (["src"], [1, 2]),  # more counts than paths
+        (["src", "tests"], [1]),  # fewer
+        (None, [3]),  # counts with no filter at all
+        (["src"], [-1]),  # not a file count
+        (["src"], [10**5000]),  # serializes unboundedly on its own
+    ],
+)
+def test_misaligned_or_implausible_counts_are_withheld(tmp_path, paths, paths_matched):
+    from claude_in_codex import jobs
+
+    rebuilt = jobs._build_meta(
+        {
+            "config": {
+                "config_mode": "inherit",
+                "access": "toolless",
+                "scope": "working_tree",
+                "timeout_seconds": 1800,
+                "workspace_source": "param",
+                "cwd": str(tmp_path),
+                "paths": paths,
+                "paths_matched": paths_matched,
+            },
+            "context_summary": None,
+        }
+    )
+
+    assert rebuilt.paths is None
+    assert rebuilt.paths_matched is None
+
+
+async def test_a_measured_review_still_reports_its_counts(fake_claude, git_repo):
+    """The alignment check must not withhold what the server itself measured."""
+    data = await _call(
+        "claude_dry_run",
+        {"scope": "working_tree", "paths": ["src", "tests"], "workspace_root": str(git_repo)},
+    )
+    assert data["ok"] is True, data.get("error")
+    assert data["paths"] == ["src", "tests"]
+    assert len(data["paths_matched"]) == 2
+
+
+async def test_job_result_and_consume_are_bounded_end_to_end(monkeypatch, git_repo, tmp_path):
+    """The retrieval TOOLS are bounded, not merely the helper they call.
+
+    `_build_meta` being correct proves nothing about the routes that reach it, so
+    this runs a real async job, plants over-cap selectors in its on-disk record --
+    which is exactly the shape a pre-cap release left behind -- and reads it back
+    through both public retrieval tools."""
+    import json as _json
+    import time as _time
+
+    import anyio
+
+    from claude_in_codex import claude as claude_mod
+    from claude_in_codex import jobs
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    envelope = _json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": _json.dumps(
+                {
+                    "summary": "s",
+                    "verdict": "concerns",
+                    "confidence": "high",
+                    "findings": [],
+                    "questions": [],
+                    "assumptions": [],
+                }
+            ),
+            "total_cost_usd": 0.02,
+            "usage": {"input_tokens": 5, "output_tokens": 1},
+        }
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
+    )
+
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_review_changes_async",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+            )
+        )
+        job_id = started["job_id"]
+        deadline = _time.time() + 10
+        while _time.time() < deadline:
+            st = structured(
+                await client.call_tool(
+                    "claude_job_status", {"job_id": job_id, "workspace_root": str(git_repo)}
+                )
+            )
+            if st["status"] != "running":
+                break
+            await anyio.sleep(0.05)
+        assert st["status"] == "done"
+
+        record_file = jobs._job_dir(str(git_repo), job_id) / "meta.json"
+        record = _json.loads(record_file.read_text())
+        record["extra"]["config"]["base"] = "b" * (MAX_REF_BYTES + 1)
+        record["extra"]["config"]["scope"] = "branch"
+        record["extra"]["config"]["paths"] = ["src/" + "a" * MAX_PATH_ENTRY_BYTES]
+        record["extra"]["config"]["paths_matched"] = [7] * 50_000
+        record_file.write_text(_json.dumps(record))
+
+        for tool in ("claude_job_result", "claude_job_consume_result"):
+            data = structured(
+                await client.call_tool(
+                    tool, {"job_id": job_id, "workspace_root": str(git_repo)}, raise_on_error=False
+                )
+            )
+            # Retrieval SUCCEEDS -- the result was paid for -- but bounded.
+            assert data["ok"] is True, data.get("error")
+            assert data["meta"].get("paths") is None
+            assert data["meta"].get("paths_matched") is None
+            assert data["meta"].get("base") is None
+            assert data["meta"].get("diff_range") is None
+            assert _size(data) < ENVELOPE_CEILING_BYTES
+            assert any("selector size caps" in w for w in data["meta"].get("security_warnings", []))

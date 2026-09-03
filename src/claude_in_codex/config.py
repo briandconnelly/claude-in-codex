@@ -81,6 +81,29 @@ MAX_REF_BYTES = 4096
 MAX_PATHS_ENTRIES = 256
 MAX_PATHS_TOTAL_BYTES = 32_768
 
+# Ceiling on one `meta.paths_matched` count. The live path measures these itself
+# (one `git diff --name-only` per entry), so this never binds a real call; it exists
+# because the job record those counts are rebuilt from is ordinary local state, and
+# a hand-written 10**5000 there would serialize into the envelope at full length.
+# No repository has 10**8 changed files.
+MAX_PATH_MATCH_COUNT = 100_000_000
+
+
+def paths_matched_aligned(paths: list[str] | None, paths_matched: list[int] | None) -> bool:
+    """True when `paths_matched` can honestly accompany `paths`.
+
+    Absent is always fine -- it is what the server itself reports when it did not
+    measure. Present means one plain, non-negative, plausibly-sized count per entry:
+    #149's contract is that the two are aligned index-for-index, and a list of a
+    different length is not a truncated version of that contract, it is a different
+    claim about which path matched what. `bool` is excluded because it is an `int`
+    subclass, and `True` as a file count is a tampered record, not a measurement."""
+    if paths_matched is None:
+        return True
+    if len(paths_matched) != len(paths or []):
+        return False
+    return all(type(count) is int and 0 <= count <= MAX_PATH_MATCH_COUNT for count in paths_matched)
+
 
 def _utf8_bytes(value: str) -> int:
     """UTF-8 length, counting a lone surrogate rather than raising.
