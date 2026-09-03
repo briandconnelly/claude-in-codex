@@ -630,7 +630,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-45"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-46"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1302,7 +1302,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-45"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-46"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -6026,12 +6026,89 @@ async def test_empty_diff_result_still_reports_paths_matched(fake_claude, git_re
     assert data["meta"]["paths_matched"] == [0, 0]
 
 
-async def test_dry_run_does_not_pay_for_path_match_probes(git_repo, monkeypatch):
-    """The free preview must not run measurements it has no field to report.
+# --- #155: the free preview reports the counts too ---
 
-    DryRunResult carries no paths_matched yet (#155), so probing here is work
-    that is measured and thrown away -- and it is per-entry git processes, on
-    the one tool whose whole purpose is to be the cheap look before spending."""
+
+async def test_dry_run_reports_which_filter_entries_matched(git_repo):
+    """The free preview must name the entry that selected nothing.
+
+    This is the whole point of #155: the dry run is where a caller can still act
+    on `paths=["app.py", "tets"]` for free, so a typo the PAID envelope reports
+    and the preview does not is the wrong way round."""
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_dry_run",
+                {
+                    "scope": "working_tree",
+                    "paths": ["app.py", "tets"],
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["paths"] == ["app.py", "tets"]
+    assert data["paths_matched"] == [1, 0]
+
+
+async def test_dry_run_paths_matched_is_absent_without_a_path_filter(git_repo):
+    """The control: an unfiltered preview reports no counts rather than zeros.
+
+    Absent, not null -- DryRunResult is dumped with exclude_none. Without this,
+    a `paths_matched` populated unconditionally would read as 'the filter
+    selected nothing' on every unfiltered preview. Note `paths` itself stays
+    present-and-empty here, unlike `meta.paths`, so the two do NOT travel
+    together on this result and the absence has to be asserted on its own."""
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_dry_run",
+                {"scope": "working_tree", "workspace_root": str(git_repo)},
+            )
+        )
+    assert data["ok"] is True
+    assert data["paths"] == []
+    assert "paths_matched" not in data
+
+
+async def test_dry_run_omits_paths_matched_when_the_probe_cap_is_exceeded(git_repo, monkeypatch):
+    """Over MAX_PATH_MATCH_PROBES the preview drops the counts, not the filter.
+
+    The cap bounds one git process per entry. An oversized list must lose the
+    reporting only -- silently reporting a partial or all-zero list would be
+    worse than reporting nothing, because a zero is what a caller acts on."""
+    import claude_in_codex.context as ctx_mod
+
+    monkeypatch.setattr(ctx_mod, "MAX_PATH_MATCH_PROBES", 1)
+
+    async with Client(mcp) as client:
+        data = structured(
+            await client.call_tool(
+                "claude_dry_run",
+                {
+                    "scope": "working_tree",
+                    "paths": ["nope", "also-nope"],
+                    "workspace_root": str(git_repo),
+                },
+            )
+        )
+    assert data["ok"] is True
+    assert data["paths"] == ["nope", "also-nope"]
+    assert "paths_matched" not in data
+    # The filter itself still applied -- only the reporting was skipped. The
+    # fixture has exactly one changed file, so 0 here can only come from the
+    # filter having been passed to git.
+    assert data["context_summary"]["files_changed"] == 0
+
+
+async def test_dry_run_probes_the_paths_it_reports(git_repo, monkeypatch):
+    """The counts must come from a real measurement on this call path.
+
+    The assertions above read a field off an envelope; this pins that the field
+    is produced by the per-entry git probe rather than by anything that could
+    coincidentally agree with it. It is also the live-instrument check for the
+    cap test above, whose expected result is an ABSENT field -- the same thing a
+    dry run that never probes at all would produce."""
     import claude_in_codex.context as ctx_mod
 
     probes = []
@@ -6055,32 +6132,8 @@ async def test_dry_run_does_not_pay_for_path_match_probes(git_repo, monkeypatch)
             )
         )
     assert data["ok"] is True
-    assert data["paths"] == ["app.py", "nope"]
-    assert probes == []
-
-
-async def test_review_still_pays_for_path_match_probes(fake_claude, git_repo, monkeypatch):
-    """The control: the spy must be able to observe a probe.
-
-    Without it, the assertion above would pass against a build where the probe
-    was removed entirely, or where the spy was never wired in."""
-    import claude_in_codex.context as ctx_mod
-
-    probes = []
-    real = ctx_mod._path_match_counts
-
-    def spy(cwd, opts):
-        probes.append(opts.paths)
-        return real(cwd, opts)
-
-    monkeypatch.setattr(ctx_mod, "_path_match_counts", spy)
-
-    async with Client(mcp) as client:
-        await client.call_tool(
-            "claude_review_changes",
-            {"scope": "working_tree", "paths": ["app.py"], "workspace_root": str(git_repo)},
-        )
-    assert probes == [["app.py"]]
+    assert probes == [["app.py", "nope"]]
+    assert data["paths_matched"] == [1, 0]
 
 
 # --- 0.9.0: the deprecated aliases are removed ---

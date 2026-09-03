@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-45"
+FINGERPRINT = "claude-in-codex/0.1/schema-46"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -319,13 +319,14 @@ class Meta(BaseModel):
     # shape, not the review's coverage. Read a zero as "look at this entry", not
     # as "this scope was skipped".
     #
-    # None has exactly three causes: there was no filter; the list exceeded
-    # MAX_PATH_MATCH_PROBES; or the envelope was rebuilt from a background-job
-    # record written before this field existed. The third is a real post-upgrade
-    # case -- records outlive a release by their TTL -- and it is NOT recomputed at
-    # fetch time on purpose: the counts describe the diff as gathered at launch,
-    # and the working tree may have moved since. A legacy record is recognizable
-    # by `paths` being present and non-empty while this is absent.
+    # None has exactly four causes: there was no filter; the list exceeded
+    # MAX_PATH_MATCH_PROBES; probing hit MAX_PATH_MATCH_SECONDS; or the envelope
+    # was rebuilt from a background-job record written before this field existed.
+    # That last one is a real post-upgrade case -- records outlive a release by
+    # their TTL -- and it is NOT recomputed at fetch time on purpose: the counts
+    # describe the diff as gathered at launch, and the working tree may have moved
+    # since. A legacy record is recognizable by `paths` being present and
+    # non-empty while this is absent.
     paths_matched: list[int] | None = None
     timeout_seconds: int
     elapsed_ms: int
@@ -792,6 +793,18 @@ class DryRunResult(BaseModel):
     head: str | None = None
     diff_range: str | None = None  # effective base...head for scope=branch
     paths: list[str] = Field(default_factory=list)
+    # Same contract as Meta.paths_matched -- read that field's comment for what a
+    # zero does and does not establish. Reported here because the dry run is the
+    # FREE preview: it is the one place a caller can catch `paths=["src", "tets"]`
+    # before spending, so the counts belong here at least as much as on the paid
+    # envelope that carries them (#155).
+    #
+    # Absent (never null: this result is dumped with exclude_none) when there was
+    # no filter, when the list exceeded MAX_PATH_MATCH_PROBES, or when probing hit
+    # MAX_PATH_MATCH_SECONDS. Unlike Meta there is no fourth cause: a dry run is
+    # always computed fresh, never rebuilt from a stored job record, so a caller
+    # need not tell a legacy envelope apart from a filter-less one here.
+    paths_matched: list[int] | None = None
     context_summary: ContextSummary
     diff_bytes: int  # full UTF-8 size of the redacted diff that would be sent
     max_diff_bytes: int  # the server's truncation threshold

@@ -7,6 +7,41 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **`claude_dry_run` reports `paths_matched` too (#155).** #154 added
+  `meta.paths_matched` -- one count of changed files per `paths` entry, aligned
+  index-for-index with the echoed filter -- to the four paid review tools. The
+  free preview gathered the same diff through the same `gather_context` call, so
+  it already had the counts available, but `DryRunResult` had no field to put
+  them in and the measurement was deliberately switched off. That left the paid
+  call reporting `paths=["src", "tets"]` and the free preview whose whole purpose
+  is to catch that before spending saying nothing, which is the wrong way round.
+
+  `DryRunResult` gains `paths_matched` and the dry run now measures. The counts
+  read exactly as they do on `meta` -- a zero means that entry selected no
+  CHANGED files and nothing more, entries may overlap, and the list describes the
+  filter's shape rather than the review's coverage. The field is absent (never
+  null: the result is dumped with `exclude_none`) when there was no filter, when
+  the list exceeded `MAX_PATH_MATCH_PROBES`, or when probing hit
+  `MAX_PATH_MATCH_SECONDS`. There is no legacy-record case here as there is on
+  `meta`: a dry run is always computed fresh.
+
+  The measurement costs one `git diff --name-only` per entry, bounded by
+  `MAX_PATH_MATCH_PROBES`. The previous comment argued that paying for it on the
+  cheap-look tool was the wrong trade; that reasoning held only while the result
+  was discarded. Reported, it is the cheapest place in the system to buy the
+  signal, because acting on it here is what avoids the paid call.
+
+  Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-46` and re-pins the contract
+  digest. Discovery cost measured 73,515 bytes against the 75,000 ceiling
+  (+200 for the new property), so the ceiling is unchanged.
+
+  Also corrects a related comment error found while writing this: `Meta`'s own
+  `paths_matched` comment enumerated "exactly three causes" for `None` and
+  omitted the `MAX_PATH_MATCH_SECONDS` deadline that `_path_match_counts` has
+  always had. The shipped skill already documented four. The comment now says
+  four, and the new `DryRunResult` comment says three for the same reason (no
+  legacy-record case). No behavior change.
+
 - **Closed the fingerprint gate's blind spot for `Meta` fields (#143).**
   `AGENTS.md` requires a `FINGERPRINT` bump for agent-visible schema changes and
   `tests/test_fingerprint.py` is the instrument that enforces it, but `meta` is

@@ -2967,18 +2967,16 @@ async def _dry_run_impl(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            # measure_paths=False: DryRunResult has no field to report per-entry
-            # match counts in yet (#155), and probing costs one git process per
-            # entry. Paying for a measurement that is then discarded is the wrong
-            # trade on the one tool whose whole purpose is to be the cheap look
-            # before spending.
+            # measure_paths defaults to True and stays on here (#155): the counts
+            # cost one git process per entry, bounded by MAX_PATH_MATCH_PROBES,
+            # and this is the one tool where a caller can still act on them for
+            # free. Reported below as paths_matched.
             lambda: gather_context(
                 cwd,
                 scope=scope,
                 base=base,
                 paths=effective_paths,
                 head=head,
-                measure_paths=False,
             )
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
@@ -2995,6 +2993,7 @@ async def _dry_run_impl(
         head=effective_head,
         diff_range=diff_range,
         paths=effective_paths or [],
+        paths_matched=ctx_data.path_match_counts,
         context_summary=ctx_data.summary,
         diff_bytes=ctx_data.diff_bytes,
         max_diff_bytes=MAX_DIFF_BYTES,

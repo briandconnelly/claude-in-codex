@@ -99,6 +99,11 @@ from claude_in_codex.server import mcp
 # what closes the blind spot -- the compressions were the reason the enumeration
 # could only ever be prose. Bought with the alias removal's reclaim in the same
 # release: net across both, this ceiling is 8,000 bytes BELOW where it stood.
+#
+# NOT raised for DryRunResult.paths_matched (#155): measured 73,515 (+200 bytes
+# / +0.27%), which fits. Recorded because it spends most of what was left --
+# 1,485 bytes / 2.0% headroom remains, right at the ~2% this file asks for, so
+# the next surface addition should slim rather than assume room.
 WIRE_BUDGET_BYTES = 75_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
