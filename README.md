@@ -80,10 +80,10 @@ available:
 | `claude_review_changes_async` | Start a background diff review | paid |
 | `claude_adversarial_review` | Pressure-test a plan, claim, or change | paid |
 | `claude_adversarial_review_async` | Start a background adversarial review | paid |
-| `claude_consult` | Ask for a free-form second opinion (`claude_ask` is a deprecated alias) | paid |
+| `claude_consult` | Ask for a free-form second opinion | paid |
 | `claude_consult_async` | Start a background second opinion | paid |
 | `claude_status` | Check readiness and defaults | free |
-| `claude_dry_run` | Preview diff/context before a review (`claude_review_dry_run` is a deprecated alias) | free |
+| `claude_dry_run` | Preview diff/context before a review | free |
 
 Diff review scopes are `working_tree`, `staged`, and `branch`.
 
@@ -113,8 +113,7 @@ spend and returns the result itself, with no `job_id` to poll — so branch on `
 than assuming one.
 
 Each of the three paid operations — `claude_consult`, `claude_review_changes`, and
-`claude_adversarial_review` — has an `_async` form. The deprecated aliases do not: use
-`claude_consult_async` rather than looking for a `claude_ask_async`.
+`claude_adversarial_review` — has an `_async` form. No paid tool is blocking-only.
 
 Prefer the `_async` form whenever the run may outlive the call: a blocking call that is
 cancelled or loses its connection loses the work it already paid for, while a job keeps

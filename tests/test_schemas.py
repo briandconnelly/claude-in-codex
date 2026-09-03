@@ -83,7 +83,7 @@ def test_success_result_has_next_steps():
     from claude_in_codex.schemas import Meta, SuccessResult
 
     r = SuccessResult(
-        tool="claude_ask",
+        tool="claude_consult",
         summary="s",
         verdict="pass",
         confidence="high",
@@ -96,7 +96,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "claude-in-codex/0.1/schema-43"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-44"
 
 
 def test_meta_carries_head_and_diff_range():
@@ -125,7 +125,7 @@ def test_success_result_dump_omits_none():
         fingerprint=FINGERPRINT,
     )
     res = SuccessResult(
-        tool="claude_ask",
+        tool="claude_consult",
         summary="s",
         verdict="pass",
         confidence="high",

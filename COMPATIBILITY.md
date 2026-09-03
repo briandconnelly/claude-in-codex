@@ -130,8 +130,8 @@ Two reasons, in order of weight:
 
 The compatibility strategy is therefore: **each canonical paid operation —
 `claude_consult`, `claude_review_changes`, `claude_adversarial_review` — has both
-a blocking form and a `claude_*_async` form**. The deprecated `claude_ask` alias
-has no async form of its own; callers use `claude_consult_async`. The async
+a blocking form and a `claude_*_async` form**, with no exceptions since the
+deprecated `claude_ask` alias (which had none) was removed in 0.9.0. The async
 lifecycle is published structurally
 in `claude_capabilities.async_lifecycle` so an agent can drive it without
 parsing prose. Nothing here forecloses native tasks later; adding them would be

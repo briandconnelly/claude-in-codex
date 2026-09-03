@@ -7,6 +7,55 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **Removed the deprecated `claude_ask` and `claude_review_dry_run` aliases.**
+  They were introduced in 0.8.0 when the canonical verbs became `claude_consult`
+  and `claude_dry_run`, documented in nine places as "removal planned for 0.9.0",
+  and this is 0.9.0. A deprecation window that never closes is not a window.
+  Callers on the old names now get a hard tool-not-found error rather than a
+  silent redirect: pre-1.0, minor versions may change the agent-visible MCP
+  surface, and the aliases were advertised as deprecated for a full release.
+  Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-44`.
+
+  Two things the removal left stale were caught in review rather than by a test,
+  which is worth recording: the shipped skill still told agents "the deprecated
+  aliases have none" of the async forms, and a capabilities test still carried an
+  alias->primary map that, after the rename, mapped `claude_consult` to itself.
+  Both are now gone. The `_TOOL_KINDS` comment was also rewritten twice -- the
+  first attempt claimed `"review" in tool` would misclassify `claude_dry_run`,
+  which is simply false (`"review"` is not a substring of it). The real
+  counterexample was always `claude_review_dry_run` itself: the word in its name,
+  a free preview in its behavior. The comment now says that, and the test gained
+  the assertion that actually fails under a substring implementation -- without
+  it, every case in that test passed under exactly the shortcut it forbids.
+
+  The removal simplifies more than the tool list. `_dry_run_impl` no longer takes
+  a `tool_name` argument -- it existed only so two registered names could echo
+  themselves -- and `DryRunResult.tool` narrows from a two-value `Literal` to
+  one. `CAPABILITY_SUMMARY` drops its carve-out: "Paid tools have claude_*_async
+  forms (deprecated aliases do not)" becomes the unconditional "Every blocking
+  paid operation has a claude_*_async form", because the alias was the one
+  exception. "Blocking paid operation" rather than "paid tool": `paid_tools`
+  lists the three `_async` starters as well, and they are not nested further --
+  there is no `claude_consult_async_async`, and first-read prose implying one
+  points agents at names that do not exist. The test
+  that pinned that exception now asserts the stronger property -- that no paid
+  tool ships blocking-only -- which is a better guard than the one it replaces,
+  since a blocking-only paid tool loses work it already paid for on a dropped
+  connection.
+
+- Lowered the `tools/list` discovery budget from 83,000 to 74,000 bytes.
+  Measured 72,419 after the alias removal, down 10,509 bytes / -12.7% from
+  82,928. The reclaim beat the ~9KB the earlier notes projected, because an alias
+  costs more than a second copy of its schemas: it also carries its deprecation
+  prose and its own `claude_capabilities` tool_detail entry. Deliberately NOT
+  reverted to the 69,000 those notes name -- that figure was the pre-alias
+  baseline of an older surface, and the surface has legitimately grown since
+  (`system_prompt_append` +1,491, `meta.paths_matched` +228, among others), so
+  reverting to it literally would fail against a payload that is correctly
+  larger. The new ceiling is set from the measurement with the ~2% headroom this
+  file's own policy asks for. A ceiling is a ratchet against unnoticed growth,
+  not a memory of a past size.
+
 - A path-filter entry that matches nothing is no longer invisible. `paths=["src",
   "tets"]` reviewed `src` and said nothing about the typo: `meta.paths` echoes the
   list the caller sent, so it agrees with them, and since #147 Claude no longer

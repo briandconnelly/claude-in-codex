@@ -253,9 +253,15 @@ class ClaudeBackend:
 BACKEND = ClaudeBackend()
 
 
-# Explicit, not substring matching: `"review" in tool` split claude_dry_run from
-# its own deprecated alias claude_review_dry_run. request.kind is inert today,
-# but an alias must never disagree with its canonical name.
+# An explicit allowlist, not substring matching. `"review" in tool` would in fact
+# classify every tool correctly TODAY -- which is what makes it tempting, and why
+# the reason for refusing it has to be stated properly rather than by a made-up
+# example. The deprecated claude_review_dry_run was the real counterexample: it
+# carried "review" in its name while being a free preview, not a review of
+# gathered changes. That name is gone as of 0.9.0; the hazard is not, because any
+# future name pairing the word with a non-review operation misclassifies the same
+# way. request.kind is inert today, so getting this wrong costs nothing yet --
+# deferred, not absent.
 _TOOL_KINDS = {
     "claude_review_changes": "review_changes",
     "claude_review_changes_async": "review_changes",

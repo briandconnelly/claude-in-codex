@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-43"
+FINGERPRINT = "claude-in-codex/0.1/schema-44"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -775,9 +775,9 @@ class DryRunResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
-    # Echoes the name the caller invoked. Both names are registered until the
-    # deprecated alias goes away in 0.9.0. Make this "claude_dry_run" only then.
-    tool: Literal["claude_dry_run", "claude_review_dry_run"] = "claude_dry_run"
+    # The deprecated claude_review_dry_run alias was removed in 0.9.0, so there is
+    # one registered name and this echoes it.
+    tool: Literal["claude_dry_run"] = "claude_dry_run"
     cwd: str
     workspace_source: str | None = None
     workspace_warning: str | None = None

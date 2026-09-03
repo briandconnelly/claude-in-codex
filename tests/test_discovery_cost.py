@@ -36,8 +36,9 @@ from claude_in_codex.server import mcp
 # Truncation/DetailModes/OutputBounds in the advertised schemas, the same
 # treatment Meta and ErrorInfo get above — spelling the caps out inline in all
 # four paid tools measured ~2x this.
-# Temporarily raised for the claude_ask/claude_review_dry_run deprecation window:
-# each alias re-advertises its primary's full schemas (~9KB total).
+# (That window is closed: the claude_ask/claude_review_dry_run aliases, each of
+# which re-advertised its primary's full schemas, were removed in 0.9.0 — see the
+# LOWERED entry at the bottom.)
 #
 # Raised from 66_000 for the recoverable paid calls of #93: +13,718 bytes / +21%
 # over the 65,400 measured just before it. That buys claude_consult_async and
@@ -53,7 +54,7 @@ from claude_in_codex.server import mcp
 # starters), and claude_consult_async advertises JOB_START_SCHEMA rather than
 # JOB_STARTED_SCHEMA because it has no diff to find empty and so can never
 # answer with a SuccessResult (~3KB, and one fewer shape for the caller to
-# handle). Revert to 69_000 when the aliases are removed in 0.9.0.
+# handle).
 #
 # Raised from 80_700 for the system_prompt_append parameter: measured 82,191
 # on top of the #93 surface (+1,491 bytes / +1.8%), which the 700-byte headroom
@@ -75,14 +76,28 @@ from claude_in_codex.server import mcp
 # moved by the smallest amount that restores headroom. The reclaim is already
 # scheduled and much larger: removing the claude_ask and claude_review_dry_run
 # aliases in 0.9.0 frees ~9KB, per the deprecation-window note above.
-WIRE_BUDGET_BYTES = 83_000
+#
+# LOWERED from 83_000 to 74_000 on removing those two aliases in 0.9.0: measured
+# 72,419, down 10,509 bytes / -12.7% from the 82,928 above. The reclaim beat the
+# ~9KB the earlier notes projected, because an alias costs more than its own
+# schemas -- it also carries its deprecation prose and its own capabilities
+# tool_detail entry.
+#
+# NOT reverted to the 69_000 those notes name. That figure was the pre-alias
+# baseline of an older surface, and the surface has grown since on its own merits
+# (system_prompt_append +1,491, meta.paths_matched +228, among others); reverting
+# to it literally would fail against a payload that is legitimately larger. This
+# is set from the measurement with the ~2% headroom this file's own policy asks
+# for -- 74_000 leaves 1,581 bytes / 2.2% -- rather than from a stale number.
+# A ceiling is a ratchet against unnoticed growth, not a memory of a past size.
+WIRE_BUDGET_BYTES = 74_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and is raised in step with WIRE_BUDGET_BYTES (ceil(83,000/4)).
-TOKEN_PROXY_BUDGET = 20_750  # see WIRE_BUDGET_BYTES note; revert with it in 0.9.0
+# against, and moves in step with WIRE_BUDGET_BYTES (ceil(74,000/4)).
+TOKEN_PROXY_BUDGET = 18_500  # see WIRE_BUDGET_BYTES note
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -110,7 +125,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (20,750 == 83,000/4) and the proxy is
+    The budgets are currently proportional (18,500 == 74,000/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""
@@ -224,10 +239,10 @@ async def test_invalid_arguments_envelope_validates_against_the_advertised_schem
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
         result = await client.call_tool(
-            "claude_ask", {"prompt": "x", "detail": "verbose"}, raise_on_error=False
+            "claude_consult", {"prompt": "x", "detail": "verbose"}, raise_on_error=False
         )
     assert result.structured_content["error"]["code"] == "invalid_arguments"
-    validate(result.structured_content, tools["claude_ask"].output_schema)
+    validate(result.structured_content, tools["claude_consult"].output_schema)
 
 
 async def test_capabilities_publishes_the_full_error_catalog():

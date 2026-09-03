@@ -202,10 +202,22 @@ def test_list_models_is_the_advisory_catalog():
     assert len(models) == len(cli_contract.KNOWN_MODELS)
 
 
-def test_alias_and_canonical_names_agree_on_kind():
-    assert kind_for_tool("claude_dry_run") == kind_for_tool("claude_review_dry_run")
-    assert kind_for_tool("claude_consult") == kind_for_tool("claude_ask")
+def test_kind_is_an_allowlist_not_a_name_substring_test():
+    """A `"review" in tool` shortcut must not be able to creep back in.
+
+    The registered names below all classify correctly under that shortcut, so on
+    their own they are false assurance -- they would pass against exactly the
+    implementation this test exists to forbid. The counterexample is what makes
+    it an instrument: a name that carries "review" while naming something that is
+    not a review of gathered changes. claude_review_dry_run was precisely that
+    shape (a free preview) until it was removed in 0.9.0; it is used here as an
+    unregistered name, since kind_for_tool is a total function over strings and
+    its default is the thing being asserted."""
     assert kind_for_tool("claude_review_changes") == "review_changes"
+    assert kind_for_tool("claude_adversarial_review") == "review_changes"
+    assert kind_for_tool("claude_dry_run") == "consult"
+    # The one assertion a substring implementation fails.
+    assert kind_for_tool("claude_review_dry_run") == "consult"
 
 
 @pytest.mark.parametrize("bad_usage", [[1, 2], "usage", 7, True])
