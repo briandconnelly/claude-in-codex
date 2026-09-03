@@ -216,3 +216,56 @@ def test_a_job_record_within_the_caps_is_rebuilt_untouched(tmp_path):
     assert rebuilt.paths == ["src", "tests"]
     assert rebuilt.paths_matched == [3, 1]
     assert rebuilt.security_warnings == []
+
+
+# Every tool that takes caller selectors, with the arguments each additionally
+# requires (the adversarial pair reviews a claim, so `paths`/`base` only attach a
+# diff to it). Schemas are extra="forbid", so these cannot simply be passed to all.
+_SELECTOR_TOOLS = {
+    "claude_review_changes": {},
+    "claude_adversarial_review": {"target": "ship it"},
+    "claude_review_changes_async": {},
+    "claude_adversarial_review_async": {"target": "ship it"},
+    "claude_dry_run": {},
+}
+
+
+@pytest.mark.parametrize("tool", _SELECTOR_TOOLS)
+async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_selector(
+    fake_claude, git_repo, tool
+):
+    """The invariant the withholding rests on.
+
+    `bounded_selectors` withholds an over-cap value, and a withheld `paths` is
+    indistinguishable in shape from "the caller passed no filter". That is only safe
+    while an over-cap value can never reach a SUCCESS envelope -- on a rejection the
+    error names the field, so nothing is ambiguous. Asserted per tool rather than
+    argued from the one code path, because each tool orders its own validation."""
+    data = await _call(
+        tool,
+        {
+            "scope": "working_tree",
+            "paths": ["src/" + "a" * MAX_PATH_ENTRY_BYTES],
+            "workspace_root": str(git_repo),
+            **_SELECTOR_TOOLS[tool],
+        },
+    )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_paths"
+    assert _size(data) < ENVELOPE_CEILING_BYTES
+
+
+@pytest.mark.parametrize("tool", _SELECTOR_TOOLS)
+async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(fake_claude, git_repo, tool):
+    data = await _call(
+        tool,
+        {
+            "scope": "branch",
+            "base": "b" * (MAX_REF_BYTES + 1),
+            "workspace_root": str(git_repo),
+            **_SELECTOR_TOOLS[tool],
+        },
+    )
+    assert data["ok"] is False
+    assert data["error"]["code"] == "invalid_base"
+    assert _size(data) < ENVELOPE_CEILING_BYTES
