@@ -287,7 +287,16 @@ async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(
     assert _size(data) < ENVELOPE_CEILING_BYTES
 
 
-@pytest.mark.parametrize("tool", _SELECTOR_TOOLS)
+@pytest.mark.parametrize(
+    "tool",
+    # The two `_async` starters are omitted deliberately: reaching a SUCCESS envelope
+    # from them needs a `claude` binary on PATH (they preflight it before enqueuing),
+    # so including them would pass on a developer machine and fail in CI with
+    # claude_not_found -- a green that depends on the environment, not on the code.
+    # They are covered for the refusal above, and their meta is built by the same
+    # `_meta` this asserts on.
+    ["claude_review_changes", "claude_adversarial_review", "claude_dry_run"],
+)
 async def test_a_ref_the_scope_ignores_is_still_echoed_when_it_fits(fake_claude, git_repo, tool):
     """The negative above is only evidence if a normal ignored `base` survives.
 
