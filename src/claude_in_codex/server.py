@@ -546,7 +546,13 @@ class ValidationEnvelopeMiddleware(Middleware):
 mcp.add_middleware(ValidationEnvelopeMiddleware())
 
 
-def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
+def _invalid_paths_error(meta: Meta, message: str | None = None, entry: str | None = None) -> dict:
+    """`entry` is the ONE rejected path, which `details.field` cannot name.
+
+    `field` is "paths" -- the list -- so without this the offending entry exists
+    only in the message prose, which is precisely what the typed detail block
+    exists to spare a caller from parsing. None for a rejection that is not about
+    a specific entry."""
     return _err(
         "invalid_paths",
         message or "Invalid paths filter.",
@@ -554,6 +560,7 @@ def _invalid_paths_error(meta: Meta, message: str | None = None) -> dict:
         "omit paths or pass [] for an unfiltered diff.",
         meta,
         offending="paths",
+        details=ErrorDetails(value=_render_value(entry)),
     )
 
 
@@ -596,16 +603,18 @@ def _invalid_base_error(meta: Meta, base: str | None) -> dict:
         _INVALID_BASE_REPAIR,
         meta,
         offending="base",
+        details=ErrorDetails(value=_render_value(base)),
     )
 
 
-def _invalid_head_error(meta: Meta, message: str | None = None) -> dict:
+def _invalid_head_error(meta: Meta, message: str | None = None, head: str | None = None) -> dict:
     return _err(
         "invalid_head",
         message or "Invalid head ref.",
         _INVALID_HEAD_REPAIR,
         meta,
         offending="head",
+        details=ErrorDetails(value=_render_value(head)),
     )
 
 
@@ -635,7 +644,7 @@ def _context_error_result(
     if isinstance(exc, InvalidBaseError):
         return _invalid_base_error(meta, base)
     if isinstance(exc, InvalidHeadError):
-        return _invalid_head_error(meta, f"Invalid head ref {bounded_repr(head or '')}.")
+        return _invalid_head_error(meta, f"Invalid head ref {bounded_repr(head or '')}.", head=head)
     if isinstance(exc, InvalidScopeError):
         return _invalid_scope_error(meta, scope, scope_optional=scope_optional)
     if isinstance(exc, NotAGitRepoError):
@@ -664,7 +673,7 @@ def _resolve_paths(paths: list[str] | None, meta: Meta) -> tuple[list[str] | Non
     try:
         return normalize_paths(paths), None
     except InvalidPathsError as exc:
-        return None, _invalid_paths_error(meta, str(exc))
+        return None, _invalid_paths_error(meta, str(exc), entry=exc.entry)
 
 
 def _workspace_error(
@@ -728,6 +737,7 @@ def _workspace_error(
         repair,
         meta,
         offending="workspace_root",
+        details=ErrorDetails(value=_render_value(workspace_root)),
     )
 
 
@@ -3550,24 +3560,24 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
         False,
         ["field", "allowed_values"],
     ),
-    ("invalid_base", "base is not a locally resolvable git ref.", False, ["field"]),
+    ("invalid_base", "base is not a locally resolvable git ref.", False, ["field", "value"]),
     (
         "invalid_head",
         "head is not locally resolvable, or was passed without scope=branch.",
         False,
-        ["field"],
+        ["field", "value"],
     ),
     (
         "invalid_paths",
         "paths is not a list of plain repo-relative paths.",
         False,
-        ["field"],
+        ["field", "value"],
     ),
     (
         "invalid_workspace_root",
         "The resolved workspace is not an existing absolute directory.",
         False,
-        ["field"],
+        ["field", "value"],
     ),
     (
         "workspace_outside_roots",

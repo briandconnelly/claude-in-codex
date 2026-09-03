@@ -96,7 +96,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "claude-in-codex/0.1/schema-47"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-48"
 
 
 def test_meta_carries_head_and_diff_range():
@@ -265,3 +265,48 @@ def test_meta_carries_system_prompt_append_fingerprint():
     )
     assert meta.system_prompt_append is not None
     assert meta.system_prompt_append.bytes == 7
+
+
+def test_bounded_repr_never_renders_more_than_the_cap():
+    """repr() must not be applied to the whole value, only to a capped head.
+
+    Rendering the whole value -- even just to ask whether it fits -- makes the
+    server's own allocation proportional to caller input, which is the
+    amplification #150 exists to stop; it would only move it from the wire to
+    the heap. A str subclass records the lengths repr() is asked for; slicing a
+    str subclass returns a plain str, so a capped head never reports here.
+    """
+    seen: list[int] = []
+
+    class _Counting(str):
+        def __repr__(self) -> str:
+            seen.append(len(self))
+            return str.__repr__(self)
+
+    schemas.bounded_repr(_Counting("\x1b" * 500_000))
+    assert [n for n in seen if n > schemas.DETAIL_VALUE_MAX_CHARS] == []
+
+
+def test_bounded_repr_marks_a_short_value_whose_repr_overflows():
+    """The truncation marker cannot be decided by rendered length alone.
+
+    A value SHORTER than the cap can still render past it once escapes expand,
+    and that case must truncate and mark even though the head covered the whole
+    value -- so the "did the head cover everything" test is necessary but not
+    sufficient on its own.
+    """
+    value = "\x1b" * (schemas.DETAIL_VALUE_MAX_CHARS - 10)
+    assert len(value) < schemas.DETAIL_VALUE_MAX_CHARS
+    assert len(repr(value)) > schemas.DETAIL_VALUE_MAX_CHARS
+
+    out = schemas.bounded_repr(value)
+    assert out.endswith("…")
+    assert len(out) <= schemas.DETAIL_VALUE_MAX_CHARS + 1
+
+
+def test_bounded_repr_leaves_a_fitting_value_unmarked():
+    """The complement: a value that fits renders exactly, with no marker."""
+    assert schemas.bounded_repr("src/app.py") == "'src/app.py'"
+    assert schemas.bounded_repr("") == "''"
+    exact = "a" * (schemas.DETAIL_VALUE_MAX_CHARS - 2)
+    assert schemas.bounded_repr(exact) == repr(exact)

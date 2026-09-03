@@ -7,6 +7,42 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **The rejected value is now carried in `details.value`, not only in prose
+  (#150 follow-up).** Fingerprint `claude-in-codex/0.1/schema-48`.
+
+  #150 bounded the caller input echoed into `error.message`, but left the value
+  reachable only by reading that prose. For `invalid_paths` that is a real gap:
+  `details.field` is `"paths"` -- it names the *list*, so the one entry that was
+  actually rejected appeared nowhere a caller could read structurally, which is
+  exactly what `ErrorDetails` exists to spare them ("recovery never requires
+  parsing `message`"). `invalid_base`, `invalid_head`, and
+  `invalid_workspace_root` had the same shape. All four now populate
+  `details.value` with the bounded value, and their `_ERROR_CATALOG` entries
+  advertise `value` alongside `field`.
+
+  The value stays in `message` as well. The house convention is already both --
+  `job_not_found`, `unsupported_config_mode`, `api_key_missing` and
+  `workspace_outside_roots` all name the value in prose *and* carry it in
+  `details` -- and dropping it would reduce a log line to `Invalid base ref.`
+  `ErrorDetails` promises `message` need not be *parsed*; it never promised
+  `message` is value-free.
+
+  `InvalidPathsError` now carries the offending `entry` as an attribute.
+  `server.py` previously recovered it only via `str(exc)`, so populating
+  `details.value` from the message would have meant parsing the prose in the very
+  change meant to make that unnecessary -- and would have broken silently the
+  first time a message was reworded.
+
+  Also: `bounded_repr` no longer calls `repr()` on the whole value before
+  truncating it. Rendering an oversized input just to ask whether it fits made
+  the server's own allocation proportional to caller input -- the same
+  amplification #150 closed, moved from the wire to the heap. It now renders only
+  a capped head, and decides the truncation marker from whether that head covers
+  the whole value. Both conditions are needed: a value shorter than the cap can
+  still render past it once escapes expand, and that case must truncate and mark.
+  Output is byte-identical to the previous implementation (verified by
+  differential fuzz over 30,000 cases).
+
 - **Error messages no longer echo caller input unbounded (#150).**
   `normalize_paths` built its rejection messages with an uncapped `repr()` of the
   offending entry. `ErrorDetails.value` caps echoed caller text at 200

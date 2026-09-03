@@ -46,11 +46,22 @@ def bounded_repr(value: str) -> str:
 
     So: shrink the raw head until its repr fits, then mark it. The marker sits
     outside the quotes, so the quoted part is exactly the repr of the head that
-    survived and never a truncated escape."""
-    rendered = repr(value)
-    if len(rendered) <= DETAIL_VALUE_MAX_CHARS:
-        return rendered
+    survived and never a truncated escape.
+
+    repr() is never applied to more than the cap's worth of code points. Rendering
+    the whole value first -- even just to ask whether it fits -- would allocate
+    several times an oversized input to return ~200 characters, which is the same
+    "server work proportional to caller input" this function exists to stop; it
+    only moved the amplification from the wire to the heap.
+
+    The marker is therefore decided from whether the head covers the WHOLE value,
+    not from the rendered length alone. Both conditions are load-bearing: a value
+    shorter than the cap can still render past it once escapes expand, and that
+    case must truncate and mark even though the head covered everything."""
     head = value[:DETAIL_VALUE_MAX_CHARS]
+    rendered = repr(head)
+    if len(value) <= DETAIL_VALUE_MAX_CHARS and len(rendered) <= DETAIL_VALUE_MAX_CHARS:
+        return rendered
     # Each step drops one code point, so this terminates at "''" in the worst
     # case; the loop only ever runs over a string already cut to the cap.
     while head and len(repr(head)) > DETAIL_VALUE_MAX_CHARS:
@@ -61,7 +72,7 @@ def bounded_repr(value: str) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-47"
+FINGERPRINT = "claude-in-codex/0.1/schema-48"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
