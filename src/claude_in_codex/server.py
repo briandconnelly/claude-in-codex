@@ -33,6 +33,7 @@ from claude_in_codex.config import (
     ENV_PLACEHOLDER_REPAIR,
     MAX_BUDGET_USD,
     MAX_FOCUS_BYTES,
+    MAX_REF_BYTES,
     MAX_SYSTEM_PROMPT_APPEND_BYTES,
     MAX_TIMEOUT_SECONDS,
     MIN_BUDGET_USD,
@@ -50,7 +51,9 @@ from claude_in_codex.config import (
     is_env_placeholder,
     max_input_bytes,
     normalize_system_prompt_append,
+    paths_bound_violation,
     placeholder_env_vars,
+    ref_within_bounds,
     safe_available,
     sanitize_effort,
     supported_majors,
@@ -119,7 +122,7 @@ from claude_in_codex.schemas import (
     ToolCapability,
     Verdict,
     bounded_repr,
-    branch_range,
+    bounded_selectors,
     workspace_warning_for,
 )
 
@@ -150,7 +153,8 @@ CAPABILITY_SUMMARY = (
 _HEAD_FIELD_DESC = (
     "Head ref for scope=branch; reviews base...head instead of base...HEAD. Only "
     "valid for scope=branch; defaults to HEAD. Must be a local-resolvable git ref "
-    "or commit — the server does not fetch refs, call GitHub, or accept PR URLs."
+    "or commit — the server does not fetch refs, call GitHub, or accept PR URLs. "
+    "Max 4096 bytes."
 )
 
 PRACTICAL_MIN_BUDGET_HINT = (
@@ -323,17 +327,23 @@ def _meta(
 ) -> Meta:
     # head is keyword-only so the many positional _meta(...) call sites that pass
     # base positionally stay untouched; only branch-scope call sites set it.
-    effective_head, diff_range = branch_range(scope, base, head)
+    #
+    # Every selector passes bounded_selectors first. `meta` is built from the raw
+    # arguments at the top of each tool, BEFORE the validators that refuse an
+    # oversized one, so this is the choke point that keeps the rejection envelope
+    # itself from carrying the unbounded echo it is rejecting (#162). On any
+    # envelope where it withholds a value, that value has already lost the call.
+    sel = bounded_selectors(scope, base, head, paths, paths_matched)
     return Meta(
         cwd=cwd,
         config_mode=cast("ConfigMode", config_mode),
         access=cast("Access", access),
         scope=scope,
-        base=base,
-        head=effective_head,
-        diff_range=diff_range,
-        paths=paths,
-        paths_matched=paths_matched,
+        base=sel.base,
+        head=sel.head,
+        diff_range=sel.diff_range,
+        paths=sel.paths,
+        paths_matched=sel.paths_matched,
         timeout_seconds=timeout,
         elapsed_ms=elapsed,
         command_exit_code=exit_code,
@@ -546,7 +556,12 @@ class ValidationEnvelopeMiddleware(Middleware):
 mcp.add_middleware(ValidationEnvelopeMiddleware())
 
 
-def _invalid_paths_error(meta: Meta, message: str | None = None, entry: str | None = None) -> dict:
+def _invalid_paths_error(
+    meta: Meta,
+    message: str | None = None,
+    entry: str | None = None,
+    details: ErrorDetails | None = None,
+) -> dict:
     """`entry` is the ONE rejected path, which `details.field` cannot name.
 
     `field` is "paths" -- the list -- so without this the offending entry exists
@@ -560,8 +575,18 @@ def _invalid_paths_error(meta: Meta, message: str | None = None, entry: str | No
         "omit paths or pass [] for an unfiltered diff.",
         meta,
         offending="paths",
-        details=ErrorDetails(value=_render_value(entry)),
+        details=details or ErrorDetails(value=_render_value(entry)),
     )
+
+
+# Cap-specific prose, so the retry a caller makes is informed by WHICH ceiling they
+# hit -- splitting one absurd entry, sending fewer entries, and sending shorter ones
+# are three different repairs.
+_PATHS_CAP_MESSAGES = {
+    "too_many_entries": "paths has {actual} entries; the cap is {limit}.",
+    "entry_too_large": "a paths entry is {actual} bytes; the per-entry cap is {limit}.",
+    "paths_total_too_large": "paths is {actual} bytes in total; the cap is {limit}.",
+}
 
 
 def _job_not_found_error(job_id: str, meta: Meta) -> dict:
@@ -594,27 +619,51 @@ _INVALID_BASE_REPAIR = (
 )
 
 
+def _ref_too_large_details(ref: str | None) -> ErrorDetails | None:
+    """Typed detail for a ref refused on SIZE, or None when size was not the reason.
+
+    `_valid_ref` folds the size cap in with the syntax rules, so both arrive as the
+    same exception; without this the caller could not tell "malformed" from "too
+    long" except by counting bytes themselves (#162)."""
+    if ref is None or ref_within_bounds(ref):
+        return None
+    return ErrorDetails(
+        value=_render_value(ref),
+        reason="ref_too_large",
+        limit_bytes=MAX_REF_BYTES,
+        actual_bytes=len(ref.encode("utf-8", "replace")),
+    )
+
+
 def _invalid_base_error(meta: Meta, base: str | None) -> dict:
     # bounded_repr, not a bare interpolation: `base` is caller text, and an error
     # message must not be an unbounded function of caller input (#150).
+    oversize = _ref_too_large_details(base)
     return _err(
         "invalid_base",
-        f"Invalid base ref {bounded_repr(base or '')}.",
+        f"base is {oversize.actual_bytes} bytes; the cap is {MAX_REF_BYTES}."
+        if oversize
+        else f"Invalid base ref {bounded_repr(base or '')}.",
         _INVALID_BASE_REPAIR,
         meta,
         offending="base",
-        details=ErrorDetails(value=_render_value(base)),
+        details=oversize or ErrorDetails(value=_render_value(base)),
     )
 
 
 def _invalid_head_error(meta: Meta, message: str | None = None, head: str | None = None) -> dict:
+    # An oversized head overrides the caller's own message: whatever the call site
+    # thought was wrong, the reportable fact is the cap it broke (#162).
+    oversize = _ref_too_large_details(head)
     return _err(
         "invalid_head",
-        message or "Invalid head ref.",
+        f"head is {oversize.actual_bytes} bytes; the cap is {MAX_REF_BYTES}."
+        if oversize
+        else (message or "Invalid head ref."),
         _INVALID_HEAD_REPAIR,
         meta,
         offending="head",
-        details=ErrorDetails(value=_render_value(head)),
+        details=oversize or ErrorDetails(value=_render_value(head)),
     )
 
 
@@ -669,7 +718,63 @@ def _context_error_result(
     )
 
 
+def _selector_bounds_error(
+    paths: list[str] | None, base: str | None, head: str | None, meta: Meta
+) -> dict | None:
+    """Refuse an over-cap selector before anything else looks at it (#162).
+
+    Runs regardless of `scope`, which is the whole point. `_valid_ref` enforces the
+    ref cap only on the branch path -- it is reached from `_diff_args`, and only
+    scope=branch has refs to resolve -- so an over-cap `base` on a working_tree call
+    was ACCEPTED, and then withheld from a SUCCESS envelope by `bounded_selectors`,
+    leaving `meta.base` absent where a normal call shows the ref. That is the one
+    reading the withholding must never produce: absent means "none supplied".
+
+    The cap is a property of the argument, not of the scope the argument happens to
+    be used under, and the parameter descriptions publish it unconditionally. An
+    ignored `base` that breaks it is refused like any other.
+
+    Placed ahead of the per-tool checks so the error always names the field that
+    actually broke a cap; the checks are pure size arithmetic, so ordering them
+    first costs nothing."""
+    if not ref_within_bounds(base):
+        return _invalid_base_error(meta, base)
+    if not ref_within_bounds(head):
+        return _invalid_head_error(meta, head=head)
+    _, paths_err = _resolve_paths(paths, meta)
+    return paths_err
+
+
 def _resolve_paths(paths: list[str] | None, meta: Meta) -> tuple[list[str] | None, dict | None]:
+    """The one place every tool turns caller `paths` into a validated filter.
+
+    The size caps are reported here rather than through the generic branch below so
+    the caller gets the NUMBERS typed (#162): which cap, what it is, and what they
+    sent. `normalize_paths` enforces the same caps for direct callers, but its
+    message is prose, and a cap an agent has to parse out of prose to retry against
+    is a cap it will guess at."""
+    violation = paths_bound_violation(paths)
+    if violation is not None:
+        # The byte-valued and count-valued pairs are populated separately rather
+        # than by unpacking one dict: reporting 300 entries in `actual_bytes` would
+        # be a number an agent could act on and be wrong about.
+        sized = violation.bytes_valued
+        return None, _invalid_paths_error(
+            meta,
+            _PATHS_CAP_MESSAGES[violation.reason].format(
+                actual=violation.actual, limit=violation.limit
+            ),
+            entry=violation.entry,
+            details=ErrorDetails(
+                field="paths",
+                value=_render_value(violation.entry),
+                reason=violation.reason,
+                limit_bytes=violation.limit if sized else None,
+                actual_bytes=violation.actual if sized else None,
+                limit=None if sized else violation.limit,
+                actual=None if sized else violation.actual,
+            ),
+        )
     try:
         return normalize_paths(paths), None
     except InvalidPathsError as exc:
@@ -1542,7 +1647,7 @@ async def claude_consult(
 )
 async def claude_review_changes(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    base: Annotated[str, Field(description="Base ref for scope=branch. Max 4096 bytes.")] = "main",
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     focus: Annotated[str | None, Field(description="e.g. 'security', 'tests'.")] = None,
     paths: Annotated[
@@ -1551,7 +1656,8 @@ async def claude_review_changes(
             description=(
                 "Optional plain repo-relative paths to filter the server-provided diff. "
                 "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
-                "glob recursively. []/omitted means unfiltered."
+                "glob recursively. []/omitted means unfiltered. Max "
+                "256 entries, 4096 bytes per entry, 32768 bytes total."
             )
         ),
     ] = None,
@@ -1635,6 +1741,9 @@ async def claude_review_changes(
         effective_budget=r.budget,
         head=head,
     )
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -1747,7 +1856,9 @@ async def claude_adversarial_review(
     scope: Annotated[
         Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
     ] = None,
-    base: Annotated[str, Field(description="Base ref for branch diff when scope=branch.")] = "main",
+    base: Annotated[
+        str, Field(description="Base ref for branch diff when scope=branch. Max 4096 bytes.")
+    ] = "main",
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
@@ -1755,7 +1866,8 @@ async def claude_adversarial_review(
             description=(
                 "Optional plain repo-relative paths for the attached server-provided diff. "
                 "Requires scope; no exclude/pathspec magic; shell-style wildcards "
-                "(*, ?, []) still glob recursively. []/omitted means unfiltered."
+                "(*, ?, []) still glob recursively. []/omitted means unfiltered. Max "
+                "256 entries, 4096 bytes per entry, 32768 bytes total."
             )
         ),
     ] = None,
@@ -1842,6 +1954,9 @@ async def claude_adversarial_review(
         )
     # head only makes sense for an attached branch diff; reject it when scope is
     # omitted or is not branch (this also covers adversarial head-without-scope).
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -2256,7 +2371,7 @@ async def _launch_job(
 )
 async def claude_review_changes_async(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    base: Annotated[str, Field(description="Base ref for scope=branch. Max 4096 bytes.")] = "main",
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     focus: Annotated[str | None, Field(description="e.g. 'security', 'tests'.")] = None,
     paths: Annotated[
@@ -2265,7 +2380,8 @@ async def claude_review_changes_async(
             description=(
                 "Optional plain repo-relative paths to filter the server-provided diff. "
                 "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
-                "glob recursively. []/omitted means unfiltered."
+                "glob recursively. []/omitted means unfiltered. Max "
+                "256 entries, 4096 bytes per entry, 32768 bytes total."
             )
         ),
     ] = None,
@@ -2354,6 +2470,9 @@ async def claude_review_changes_async(
         # Cheap early return, before any diff gathering — see _legacy_keyed_job
         # for why an unverifiable legacy marker is refused rather than replayed.
         return _result(_legacy_key_error(legacy_job, cwd, meta))
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -2655,7 +2774,9 @@ async def claude_adversarial_review_async(
     scope: Annotated[
         Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
     ] = None,
-    base: Annotated[str, Field(description="Base ref for branch diff when scope=branch.")] = "main",
+    base: Annotated[
+        str, Field(description="Base ref for branch diff when scope=branch. Max 4096 bytes.")
+    ] = "main",
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
@@ -2663,7 +2784,8 @@ async def claude_adversarial_review_async(
             description=(
                 "Optional plain repo-relative paths for the attached server-provided diff. "
                 "Requires scope; no exclude/pathspec magic; shell-style wildcards "
-                "(*, ?, []) still glob recursively. []/omitted means unfiltered."
+                "(*, ?, []) still glob recursively. []/omitted means unfiltered. Max "
+                "256 entries, 4096 bytes per entry, 32768 bytes total."
             )
         ),
     ] = None,
@@ -2751,6 +2873,9 @@ async def claude_adversarial_review_async(
         return _result(
             _invalid_paths_error(meta, "paths requires scope on claude_adversarial_review_async.")
         )
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -3050,6 +3175,9 @@ async def _dry_run_impl(
         workspace_source=ws_source,
         head=head,
     )
+    bounds_err = _selector_bounds_error(paths, base, head, meta)
+    if bounds_err:
+        return _result(bounds_err)
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
@@ -3076,18 +3204,20 @@ async def _dry_run_impl(
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
         return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
     fs = preflight.flag_support()
-    effective_head, diff_range = branch_range(scope, base, head)
+    # Same bound as Meta's: DryRunResult echoes the selectors too, and a free tool
+    # is exactly where an unbounded echo is cheapest to provoke (#162).
+    sel = bounded_selectors(scope, base, head, effective_paths, ctx_data.path_match_counts)
     result = DryRunResult(
         tool="claude_dry_run",
         cwd=cwd,
         workspace_source=ws_source,
         workspace_warning=workspace_warning_for(ws_source, cwd),
         scope=scope,
-        base=base,
-        head=effective_head,
-        diff_range=diff_range,
-        paths=effective_paths or [],
-        paths_matched=ctx_data.path_match_counts,
+        base=sel.base,
+        head=sel.head,
+        diff_range=sel.diff_range,
+        paths=sel.paths or [],
+        paths_matched=sel.paths_matched,
         context_summary=ctx_data.summary,
         diff_bytes=ctx_data.diff_bytes,
         max_diff_bytes=MAX_DIFF_BYTES,
@@ -3110,7 +3240,7 @@ async def _dry_run_impl(
 )
 async def claude_dry_run(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch.")] = "main",
+    base: Annotated[str, Field(description="Base ref for scope=branch. Max 4096 bytes.")] = "main",
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
@@ -3118,7 +3248,8 @@ async def claude_dry_run(
             description=(
                 "Optional plain repo-relative paths to filter the previewed diff. "
                 "No exclude/pathspec magic; shell-style wildcards (*, ?, []) still "
-                "glob recursively. []/omitted means unfiltered."
+                "glob recursively. []/omitted means unfiltered. Max "
+                "256 entries, 4096 bytes per entry, 32768 bytes total."
             )
         ),
     ] = None,
@@ -3569,18 +3700,24 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
         False,
         ["field", "allowed_values"],
     ),
-    ("invalid_base", "base is not a locally resolvable git ref.", False, ["field", "value"]),
+    (
+        "invalid_base",
+        "base is not a locally resolvable git ref, or is over the size cap.",
+        False,
+        ["field", "value", "reason", "limit_bytes", "actual_bytes"],
+    ),
     (
         "invalid_head",
-        "head is not locally resolvable, or was passed without scope=branch.",
+        "head is not locally resolvable, was passed without scope=branch, or is over the size cap.",
         False,
-        ["field", "value"],
+        ["field", "value", "reason", "limit_bytes", "actual_bytes"],
     ),
     (
         "invalid_paths",
-        "paths is not a list of plain repo-relative paths.",
+        "paths is not a list of plain repo-relative paths, or is over a size cap "
+        "(entry count, per-entry bytes, or total bytes).",
         False,
-        ["field", "value"],
+        ["field", "value", "reason", "limit_bytes", "actual_bytes", "limit", "actual"],
     ),
     (
         "invalid_workspace_root",

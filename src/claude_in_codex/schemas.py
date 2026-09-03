@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, NamedTuple, cast
 from uuid import uuid4
 
 from pydantic import (
@@ -17,7 +17,12 @@ from pydantic import (
     model_validator,
 )
 
-from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
+from claude_in_codex.config import (
+    MAX_SYSTEM_PROMPT_APPEND_BYTES,
+    paths_matched_aligned,
+    paths_within_bounds,
+    ref_within_bounds,
+)
 
 # Ceiling on any caller-supplied value this server echoes back to the caller --
 # `ErrorDetails.value` and every error `message` that names the offending input.
@@ -72,7 +77,7 @@ def bounded_repr(value: str) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-48"
+FINGERPRINT = "claude-in-codex/0.1/schema-49"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -166,6 +171,83 @@ def branch_range(
     # behind a silent HEAD default.
     effective_head = "HEAD" if head is None else head
     return effective_head, f"{base}...{effective_head}"
+
+
+class BoundedSelectors(NamedTuple):
+    """The selector fields of a result's `meta`, each bounded by the input caps.
+
+    `dropped` names the fields withheld, so a caller is never left to infer the
+    difference between "not supplied" and "withheld"."""
+
+    base: str | None
+    head: str | None
+    diff_range: str | None
+    paths: list[str] | None
+    paths_matched: list[int] | None
+    dropped: tuple[str, ...]
+
+
+def bounded_selectors(
+    scope: str | None,
+    base: str | None,
+    head: str | None,
+    paths: list[str] | None,
+    paths_matched: list[int] | None = None,
+) -> BoundedSelectors:
+    """`meta`'s selector echo, with anything past the input caps withheld (#162).
+
+    The caps in config.py are enforced at the input edge, so on a LIVE call this
+    withholds nothing: a value big enough to trip it here has already been refused
+    with invalid_paths/invalid_base/invalid_head. That rests on
+    `_selector_bounds_error` running for every scope -- while the ref cap was
+    enforced only where refs are RESOLVED (scope=branch), an over-cap base on a
+    working_tree call reached a success envelope and was silently withheld here,
+    leaving `meta.base` absent exactly as though none had been sent.
+
+    It exists because `meta` is built
+    from the raw arguments BEFORE that refusal -- the rejection envelope would
+    otherwise carry the very echo the refusal exists to prevent -- and because
+    jobs.py rebuilds `meta` from an on-disk record, which is ordinary local state
+    that a pre-cap version wrote, or that anyone can edit.
+
+    Two rules keep a withheld value from misleading a reader:
+
+    * `paths` and `paths_matched` are dropped TOGETHER. #149's contract is that the
+      two are aligned index-for-index; a surviving count list beside a withheld path
+      list would invite a caller to align it against something that is not there.
+    * `diff_range` is suppressed whenever either of its components is withheld. It
+      is COMPOSED as `base...head`, so bounding the parts without bounding the
+      composition would leave the amplification exactly where it was, and a range
+      built from a withheld half would name a comparison nobody requested.
+
+    A withheld head is never replaced by branch_range's `HEAD` default: that default
+    reports what the server WILL diff when the caller named no head, and reusing it
+    for a refused head would report a comparison the caller did not ask for as
+    though they had."""
+    dropped: list[str] = []
+    if not ref_within_bounds(base):
+        base = None
+        dropped.append("base")
+    if not ref_within_bounds(head):
+        head = None
+        dropped.append("head")
+    effective_head, diff_range = branch_range(scope, base, head)
+    if dropped:
+        # Either component withheld: the composition cannot be honest, and a
+        # defaulted head must not stand in for a refused one.
+        effective_head, diff_range = (None if "head" in dropped else effective_head), None
+    if not paths_within_bounds(paths):
+        paths, paths_matched = None, None
+        dropped.append("paths")
+    elif not paths_matched_aligned(paths, paths_matched):
+        # Bounding `paths` alone leaves `paths_matched` free: a record naming one
+        # path beside 50,000 counts is both an unbounded echo and a broken #149
+        # alignment. Neither survives alone -- a count list that does not describe
+        # THIS path list describes nothing, and a path list whose counts were
+        # silently discarded would read as "not measured".
+        paths, paths_matched = None, None
+        dropped.append("paths")
+    return BoundedSelectors(base, effective_head, diff_range, paths, paths_matched, tuple(dropped))
 
 
 ErrorCode = Literal[
@@ -494,8 +576,16 @@ class ErrorDetails(BaseModel):
     # Valid choices for `field` when it is a closed enum.
     allowed_values: list[str] | None = None
     # context_too_large, user-supplied text path: the cap and what was supplied.
+    # Also the two byte-valued selector caps (#162): a `paths` entry over
+    # MAX_PATH_ENTRY_BYTES, or the list over MAX_PATHS_TOTAL_BYTES in aggregate.
     limit_bytes: int | None = None
     actual_bytes: int | None = None
+    # The same pair for a COUNT-valued cap -- currently only `paths` exceeding
+    # MAX_PATHS_ENTRIES. Separate names rather than reusing the pair above, which
+    # says "bytes": reporting 300 entries as 300 bytes would be a number an agent
+    # could act on and be wrong about.
+    limit: int | None = None
+    actual: int | None = None
     # context_too_large, gathered-diff path: the cap and the redacted diff's size.
     max_diff_bytes: int | None = None
     diff_bytes: int | None = None

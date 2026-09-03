@@ -7,6 +7,67 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **The response is now bounded by the server, not by caller input (#162).**
+  Fingerprint `claude-in-codex/0.1/schema-49`.
+
+  #150 bounded every error `message` that echoes caller input, but the *response*
+  stayed an unbounded function of the *request*: `meta` echoed `paths`, `base` and
+  `head` verbatim and composed `diff_range` as `base...head` from them. Measured
+  before this change, `paths=["a" * 10_000]` returned an 11 KB envelope and
+  `base="-" + "b" * 10_000` a 21 KB one -- and this was never only a rejection
+  path, because a *valid* 10,000-character path was echoed the same way on a
+  successful review, as were 5,000 short path entries (`p0`...`p4999`, a 44 KB
+  envelope; longer entries scaled past 64 KB). The largest response the caps now
+  admit is 34.6 KB, measured at 256 entries against the 32 KiB aggregate.
+
+  The bound is applied to the INPUT rather than to the echo. `paths` entries are
+  capped at 4096 bytes each, the list at 256 entries and 32,768 bytes in
+  aggregate, and `base`/`head` at 4096 bytes each; over-cap values are refused
+  with the existing `invalid_paths` / `invalid_base` / `invalid_head` codes, which
+  now carry the numbers typed (`limit_bytes`/`actual_bytes`, or `limit`/`actual`
+  for the entry count) rather than only in prose. No new error codes.
+
+  Bounding the input is what keeps #149's contract intact: `meta.paths` remains
+  *literally* what the caller sent, so the index-for-index alignment with
+  `meta.paths_matched` cannot be read against a truncated entry. Capping the echo
+  instead would have made a marked entry stand where a real path is promised.
+  `diff_range` is composed, so bounding `base` and `head` without it would have
+  left the amplification in place; it is suppressed whenever either component is
+  withheld.
+
+  The caps are service policy, not a claim about git: git's index format supports
+  pathnames past its 12-bit length field and `git-check-ref-format` documents no
+  general ref-name maximum. 4096 bytes is the common `PATH_MAX`, and the aggregate
+  allows ~128 bytes per entry at the entry cap -- paths in this repository run to
+  a median of 36 bytes and a maximum of 96 -- so a generated call naming every
+  changed file passes and only a pathological one is refused.
+
+  The ref caps apply on every scope, including one that ignores the ref.
+  Enforcing them only where refs are RESOLVED (scope=branch) left an over-cap
+  `base` on a working_tree call accepted and then silently withheld from the
+  SUCCESS envelope, so `meta.base` read as though none had been sent -- the one
+  misreading this design exists to prevent.
+
+  Two places rebuild `meta` from something other than a live, validated call.
+  `claude_dry_run` builds its own result, and `claude_job_result` /
+  `claude_job_consume_result` rebuild it from an on-disk record -- ordinary local
+  state, which a pre-cap release may have written or anyone may have edited. Both
+  pass through the same bound. A record over the caps has its selectors *withheld*
+  (`paths` and `paths_matched` together, so no count is left aligned against
+  nothing) with a `security_warnings` entry saying so, rather than failing
+  retrieval of a result that was already paid for.
+
+  `meta.paths_matched` is bounded with the list it describes: a record naming one
+  path beside 50,000 counts was both a 150 KB envelope and a broken #149
+  alignment, so a count list that does not fit its path list -- wrong length, a
+  negative, or an implausible magnitude -- takes both fields with it. The live
+  path cannot produce one: the server measures either no counts or exactly one
+  per entry.
+
+  The published limits are why this bumps the fingerprint: they appear in the
+  `paths`, `base` and `head` parameter descriptions, which the contract digest
+  covers.
+
 - **The rejected value is now carried in `details.value`, not only in prose
   (#150 follow-up).** Fingerprint `claude-in-codex/0.1/schema-48`.
 

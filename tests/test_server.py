@@ -630,7 +630,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-48"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-49"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -930,7 +930,7 @@ async def test_invalid_paths_message_is_bounded_end_to_end(fake_claude, git_repo
     came back verbatim. A 10x longer entry must now produce the same message.
     """
     messages = []
-    for length in (1_000, 10_000):
+    for length in (500, 4_000):
         async with Client(mcp) as client:
             result = await client.call_tool(
                 "claude_review_changes",
@@ -951,7 +951,7 @@ async def test_invalid_paths_message_is_bounded_end_to_end(fake_claude, git_repo
 async def test_invalid_base_message_is_bounded_end_to_end(fake_claude, git_repo):
     """Same bound on the ref echo: base is caller text on the same error path."""
     messages = []
-    for length in (1_000, 10_000):
+    for length in (500, 4_000):
         async with Client(mcp) as client:
             result = await client.call_tool(
                 "claude_review_changes",
@@ -1525,7 +1525,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-48"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-49"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",

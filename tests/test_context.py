@@ -177,8 +177,12 @@ def test_invalid_paths_messages_do_not_grow_with_the_entry(prefix, suffix, rule)
     that a 10x longer entry produces the IDENTICAL message pins the bound
     without hard-coding what it happens to be.
     """
-    short = prefix + "a" * 1_000 + suffix
-    long = prefix + "a" * 10_000 + suffix
+    # Both sizes sit above DETAIL_VALUE_MAX_CHARS -- so both messages are actually
+    # bounded, which is what makes their equality meaningful -- and under
+    # MAX_PATH_ENTRY_BYTES, past which the entry is refused on size before any rule
+    # here applies (#162), making this a test of the cap rather than of the message.
+    short = prefix + "a" * 500 + suffix
+    long = prefix + "a" * 4_000 + suffix
 
     messages = []
     for path in (short, long):
