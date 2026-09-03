@@ -7,6 +7,30 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **The live tests can now fail on structured-output drift (#159).** The three
+  live `claude_consult` roundtrips each asked Claude to affirm a stated
+  conclusion ("reply that 2+2 equals 4 and give verdict pass"), then accepted
+  `verdict in (pass, concerns, fail, unknown)`.
+  Both halves were wrong together. The prompt is verdict-setting, which the
+  independent-critic guardrails correctly refuse; the refusal comes back as
+  unstructured prose, and `normalize.py` turns unstructured prose into
+  `verdict="unknown"` with empty findings, questions and next steps. `"unknown"`
+  was in the accepted set, so the assertion held whether the structured-output
+  path had worked or had never been entered -- and a real regression in JSON
+  parsing would have looked identical to a green run.
+
+  Each consult now sends real material to review (a short function with a genuine
+  defect) instead of a verdict to affirm, and a shared `_assert_structured` helper
+  excludes `"unknown"`, requires a valid confidence, and requires a non-empty
+  summary. Verified against Claude Code 2.1.259: all four live tests pass with
+  parsed structured replies, and the helper was probed against a synthetic
+  `unknown` envelope and an empty-summary envelope to confirm it fails on both.
+
+  This is the only no-fixture check of the envelope's *semantic* half --
+  `COMPATIBILITY.md` defers `ENVELOPE_KEYS` / `SUCCESS_SUBTYPES` semantics to it
+  and to manual review -- so it now names the live tests alongside the golden
+  fixture.
+
 - **`claude_dry_run` reports `paths_matched` too (#155).** #154 added
   `meta.paths_matched` -- one count of changed files per `paths` entry, aligned
   index-for-index with the echoed filter -- to the four paid review tools. The

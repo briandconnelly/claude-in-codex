@@ -86,9 +86,10 @@ not probe (`claude` missing / timed out / help unparseable — nothing verified)
 **What it deliberately does NOT check:** the JSON envelope keys, success subtypes,
 and usage keys (`ENVELOPE_KEYS` / `SUCCESS_SUBTYPES` / `USAGE_KEYS`) cannot be
 observed without a paid `claude -p --output-format json` run, so they are left to
-the no-spend golden-envelope fixture test (`tests/test_golden_envelope.py`) and the
-manual semantic review. Like the run-time detection, this catches *rejection*, not a
-silently no-op'd flag.
+the no-spend golden-envelope fixture test (`tests/test_golden_envelope.py`), the
+opt-in live tests (`tests/test_integration.py`, which assert a real reply parses into
+a non-`unknown` verdict with a populated summary), and the manual semantic review.
+Like the run-time detection, this catches *rejection*, not a silently no-op'd flag.
 
 CI runs the script as the `Claude CLI contract drift` job in
 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml): it installs the latest
