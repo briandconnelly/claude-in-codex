@@ -27,7 +27,12 @@ MAX_PATH_MATCH_PROBES = 32
 # probes run, not how long they take: each is its own git process under
 # git_timeout_seconds (60s by default), so a count cap alone permits 32x that in
 # the worst case -- a real amplification of the single gather the caller asked
-# for. This is what actually bounds it. Over budget the counts are reported absent
+# for. This is what actually bounds it, and it is enforced by handing each probe
+# the REMAINING budget as its own process timeout. Checking the deadline only
+# between probes would not: one slow git could then run a full
+# git_timeout_seconds past the budget and still return counts, which is the
+# difference between bounding when probes start and bounding what the pass
+# costs. Over budget the counts are reported absent
 # rather than partially, because a partial list would still be positionally
 # aligned with `paths` and a caller reading a zero could not tell "selected
 # nothing" from "never measured". Generous next to a measured ~5ms per probe on an
@@ -60,6 +65,15 @@ class GitUnavailableError(RuntimeError):
 
 class NotAGitRepoError(RuntimeError):
     """Raised when the selected workspace is not a git working tree."""
+
+
+class GitTimeoutError(RuntimeError):
+    """Raised when a git subprocess exceeded its timeout.
+
+    A RuntimeError subclass so every existing `except RuntimeError` around a
+    gather keeps behaving exactly as before. It exists so ONE caller can tell a
+    timeout apart from a git failure: the path-match probes, which degrade to
+    "counts absent" on a timeout instead of failing the whole review (#155)."""
 
 
 def _valid_ref(ref: str) -> bool:
@@ -108,8 +122,9 @@ class ContextResult:
     redacted_paths: list[str] = field(default_factory=list)
     diff_bytes: int = 0  # full (pre-truncation) UTF-8 byte size of the redacted diff
     # Per-entry file counts for the caller's path filter, positionally aligned
-    # with the `paths` argument. None when there was no filter, or when the list
-    # exceeded MAX_PATH_MATCH_PROBES. A zero marks an entry that selected nothing
+    # with the `paths` argument. None when there was no filter, when the list
+    # exceeded MAX_PATH_MATCH_PROBES, or when the pass ran out of
+    # MAX_PATH_MATCH_SECONDS. A zero marks an entry that selected nothing
     # -- a typo the caller cannot otherwise see, since `meta.paths` echoes their
     # list back and so agrees with it (#149).
     path_match_counts: list[int] | None = None
@@ -184,8 +199,16 @@ def normalize_paths(paths: list[str] | None) -> list[str] | None:
     return normalized
 
 
-def _git(cwd: str, *args: str) -> str:
-    timeout = git_timeout_seconds()
+def _git(cwd: str, *args: str, timeout: float | None = None) -> str:
+    """Run git, capturing stdout.
+
+    `timeout` overrides the configured per-process budget DOWNWARD for callers
+    that own a tighter deadline than a single process (the path-match probes).
+    It is never raised above `git_timeout_seconds()`, so an override can only
+    make a call give up sooner.
+    """
+    configured = git_timeout_seconds()
+    timeout = configured if timeout is None else min(configured, timeout)
     try:
         proc = subprocess.run(
             ["git", *args],
@@ -199,7 +222,7 @@ def _git(cwd: str, *args: str) -> str:
     except FileNotFoundError as exc:
         raise GitUnavailableError("git executable not found") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"git {' '.join(args)} timed out after {timeout}s") from exc
+        raise GitTimeoutError(f"git {' '.join(args)} timed out after {timeout}s") from exc
     if proc.returncode != 0:
         _classify_git_failure(proc.stderr)
     return proc.stdout
@@ -358,11 +381,23 @@ def _path_match_counts(cwd: str, opts: DiffOptions) -> list[int] | None:
     deadline = time.monotonic() + MAX_PATH_MATCH_SECONDS
     counts: list[int] = []
     for path in opts.paths:
-        if time.monotonic() > deadline:
+        # The remaining budget becomes the probe's own process timeout. Checking
+        # the deadline only BETWEEN probes would let a single slow git run to
+        # git_timeout_seconds (60s by default) past a 5s budget and still return
+        # counts -- the budget would bound how many probes start, not how long
+        # the pass takes, which is not what it claims to do.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return None
         args = _diff_args(DiffOptions(scope=opts.scope, base=opts.base, head=opts.head))
         args.insert(1, "--name-only")
-        out = _git(cwd, *args, "--", path)
+        try:
+            out = _git(cwd, *args, "--", path, timeout=remaining)
+        except GitTimeoutError:
+            # Absent counts, not a failed gather. The probes are an extra the
+            # caller did not ask for; the diff they DID ask for is gathered
+            # below and must not be lost to a measurement running long.
+            return None
         counts.append(sum(1 for line in out.splitlines() if line.strip()))
     return counts
 

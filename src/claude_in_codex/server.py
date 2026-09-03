@@ -2967,18 +2967,16 @@ async def _dry_run_impl(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            # measure_paths=False: DryRunResult has no field to report per-entry
-            # match counts in yet (#155), and probing costs one git process per
-            # entry. Paying for a measurement that is then discarded is the wrong
-            # trade on the one tool whose whole purpose is to be the cheap look
-            # before spending.
+            # measure_paths defaults to True and stays on here (#155): the counts
+            # cost one git process per entry, bounded by MAX_PATH_MATCH_PROBES,
+            # and this is the one tool where a caller can still act on them for
+            # free. Reported below as paths_matched.
             lambda: gather_context(
                 cwd,
                 scope=scope,
                 base=base,
                 paths=effective_paths,
                 head=head,
-                measure_paths=False,
             )
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
@@ -2995,6 +2993,7 @@ async def _dry_run_impl(
         head=effective_head,
         diff_range=diff_range,
         paths=effective_paths or [],
+        paths_matched=ctx_data.path_match_counts,
         context_summary=ctx_data.summary,
         diff_bytes=ctx_data.diff_bytes,
         max_diff_bytes=MAX_DIFF_BYTES,
@@ -3043,7 +3042,9 @@ async def claude_dry_run(
 
     Use before a paid claude_review_changes to confirm the resolved workspace,
     diff byte size, whether it would be truncated, and how many secret-looking
-    files would be redacted. Read-only; makes no paid call.
+    files would be redacted. With `paths`, also returns paths_matched: one count
+    of changed files per entry, so a filter that selects nothing is visible here
+    rather than after paying. Read-only; makes no paid call.
     """
     return await _dry_run_impl(
         scope=scope,
@@ -3769,7 +3770,8 @@ def _capabilities_payload() -> dict:
                 "free",
                 "Preview diff workspace, size, truncation, redaction, and optional paths "
                 "filter before paying.",
-                "diff byte count, context summary, truncation state, and redacted paths",
+                "diff byte count, context summary, truncation state, redacted paths, and "
+                "paths_matched (per-entry counts for the paths filter)",
                 required=["scope"],
                 optional=["base", "head", "paths", "config_mode", "workspace_root"],
             ),

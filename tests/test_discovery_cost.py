@@ -99,14 +99,33 @@ from claude_in_codex.server import mcp
 # what closes the blind spot -- the compressions were the reason the enumeration
 # could only ever be prose. Bought with the alias removal's reclaim in the same
 # release: net across both, this ceiling is 8,000 bytes BELOW where it stood.
-WIRE_BUDGET_BYTES = 75_000
+#
+# Raised from 75_000 to 76_000 for DryRunResult.paths_matched (#155): measured
+# 74,101, up 786 bytes / +1.1% from the 73,315 above. The field itself was cheap
+# (+200); the cost is the `description` on it plus a sentence in the
+# claude_dry_run tool description. Both were added because the advertised
+# outputSchema is ALL a generic MCP client gets, and this is the one field on
+# that result whose name does not say what it means -- a bare integer list whose
+# zeros a caller can misread as "this scope was skipped" and act on. An
+# undescribed safety-relevant field is not a saving.
+#
+# The previous note (added in this same change, before the description existed)
+# asked the next addition to slim instead. Slimming was looked for and is not
+# available: the dominant repeated cost in tools/list is the Meta field
+# enumeration at 485 bytes x 14 records, and the only compression available
+# there is abbreviating the field names -- which is exactly what #143 removed on
+# purpose to make the sentence checkable against Meta.model_fields. Undoing that
+# to buy 900 bytes would trade a structural guarantee for a comment. Raised by
+# the smallest step that restores the ~2% this file asks for: 76,000 leaves
+# 1,899 bytes / 2.5%.
+WIRE_BUDGET_BYTES = 76_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and moves in step with WIRE_BUDGET_BYTES (ceil(75,000/4)).
-TOKEN_PROXY_BUDGET = 18_750  # see WIRE_BUDGET_BYTES note
+# against, and moves in step with WIRE_BUDGET_BYTES (ceil(76,000/4)).
+TOKEN_PROXY_BUDGET = 19_000  # see WIRE_BUDGET_BYTES note
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -134,7 +153,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (18,750 == 75,000/4) and the proxy is
+    The budgets are currently proportional (19,000 == 76,000/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""

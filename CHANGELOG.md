@@ -7,6 +7,78 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **`claude_dry_run` reports `paths_matched` too (#155).** #154 added
+  `meta.paths_matched` -- one count of changed files per `paths` entry, aligned
+  index-for-index with the echoed filter -- to the four paid review tools. The
+  free preview gathered the same diff through the same `gather_context` call, so
+  it already had the counts available, but `DryRunResult` had no field to put
+  them in and the measurement was deliberately switched off. That left the paid
+  call reporting `paths=["src", "tets"]` and the free preview whose whole purpose
+  is to catch that before spending saying nothing, which is the wrong way round.
+
+  `DryRunResult` gains `paths_matched` and the dry run now measures. The counts
+  read exactly as they do on `meta` -- a zero means that entry selected no
+  CHANGED files and nothing more, entries may overlap, and the list describes the
+  filter's shape rather than the review's coverage. The field is absent (never
+  null: the result is dumped with `exclude_none`) when there was no filter, when
+  the list exceeded `MAX_PATH_MATCH_PROBES`, or when probing hit
+  `MAX_PATH_MATCH_SECONDS`. There is no legacy-record case here as there is on
+  `meta`: a dry run is always computed fresh.
+
+  The measurement costs one `git diff --name-only` per entry, bounded by
+  `MAX_PATH_MATCH_PROBES`. The previous comment argued that paying for it on the
+  cheap-look tool was the wrong trade; that reasoning held only while the result
+  was discarded. Reported, it is the cheapest place in the system to buy the
+  signal, because acting on it here is what avoids the paid call.
+
+  `claude_capabilities` advertises it too: the dry-run `returns` text listed only
+  diff size, truncation and redaction, so an agent reading the machine-readable
+  inventory rather than the shipped skill would not have learned the signal
+  exists -- which defeats the point of putting it on the free tool. A test pins
+  that wording. It is deliberately NOT added to `CAPABILITY_SUMMARY`: that text
+  is the first-read instructions under a 1,200-character ceiling, naming the
+  field there measured 1,214, and the remaining budget is better spent on
+  security disclosures than on a field the inventory documents one hop away.
+
+  The advertised `outputSchema` describes the field, and the `claude_dry_run`
+  tool description names it. Raised by an external review: Python comments and
+  the shipped skill are not part of `tools/list`, so a generic MCP client was
+  handed a bare integer list whose zeros it could misread as "this scope was
+  skipped" -- the exact reading the contract spends a paragraph forbidding. It
+  is the only described field on that result; the others (`diff_bytes`,
+  `truncated`) say what they are by name.
+
+  **Fixes a real gap in the probe deadline while it was at it.**
+  `MAX_PATH_MATCH_SECONDS` (5s) claimed to bound the whole probe pass, but
+  `_path_match_counts` checked it only BETWEEN probes while each `git` ran under
+  the 60s per-process timeout. One slow probe could therefore overrun the budget
+  and still return counts. Reproduced before fixing: three 4s probes against a
+  5s budget ran 8.0s wall clock, each handed the full 60s. Each probe now
+  receives the REMAINING budget as its own process timeout (an override that can
+  only lower `git_timeout_seconds`, never raise it), and a probe that times out
+  drops the counts instead of failing the gather -- the probes are an extra, and
+  losing the diff the caller actually asked for to a slow measurement would be
+  strictly worse than the absent counts the contract already documents. The same
+  pass now measures 5.0s. This affects the four paid review tools too, which have
+  carried the gap since #149; it surfaced here because #155 puts the probes on
+  the free preview, where an overrun is least affordable.
+
+  Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-46` and re-pins the contract
+  digest. Discovery cost measured 74,101 bytes and the ceiling moves 75,000 ->
+  76,000, the smallest step that restores the ~2% headroom that file asks for.
+  The field itself was cheap (+200 bytes); the cost is its description. Slimming
+  was looked for first and is not available: the dominant repeated cost is the
+  `Meta` field enumeration (485 bytes x 14 records), and the only compression
+  there is abbreviating the names -- exactly what #143 removed on purpose to
+  make the sentence checkable against `Meta.model_fields`.
+
+  Also corrects a related comment error found while writing this: `Meta`'s own
+  `paths_matched` comment enumerated "exactly three causes" for `None` and
+  omitted the `MAX_PATH_MATCH_SECONDS` deadline that `_path_match_counts` has
+  always had. The shipped skill already documented four. The comment now says
+  four, and the new `DryRunResult` comment says three for the same reason (no
+  legacy-record case). No behavior change.
+
 - **Closed the fingerprint gate's blind spot for `Meta` fields (#143).**
   `AGENTS.md` requires a `FINGERPRINT` bump for agent-visible schema changes and
   `tests/test_fingerprint.py` is the instrument that enforces it, but `meta` is
