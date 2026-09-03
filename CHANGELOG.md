@@ -22,9 +22,13 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   Each consult now sends real material to review (a short function with a genuine
   defect) instead of a verdict to affirm, and a shared `_assert_structured` helper
   excludes `"unknown"`, requires a valid confidence, and requires a non-empty
-  summary. Verified against Claude Code 2.1.259: all four live tests pass with
-  parsed structured replies, and the helper was probed against a synthetic
-  `unknown` envelope and an empty-summary envelope to confirm it fails on both.
+  summary, and requires at least one populated structured collection -- that last
+  check fires on the same regression without depending on the verdict at all,
+  since `"unknown"` is also a legal verdict for a genuinely uncertain reviewer.
+  Verified against Claude Code 2.1.259: all four live tests pass, and all three
+  consult roundtrips returned parsed structured replies. The helper was probed
+  against a synthetic `unknown` envelope, an empty-summary envelope, and an
+  all-collections-empty envelope to confirm it fails on each.
 
   This is the only no-fixture check of the envelope's *semantic* half --
   `COMPATIBILITY.md` defers `ENVELOPE_KEYS` / `SUCCESS_SUBTYPES` semantics to it
