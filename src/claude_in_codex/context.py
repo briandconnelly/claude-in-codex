@@ -56,7 +56,18 @@ class InvalidHeadError(ValueError):
 
 
 class InvalidPathsError(ValueError):
-    """Raised when one or more git pathspec filters are malformed/unsafe."""
+    """Raised when one or more git pathspec filters are malformed/unsafe.
+
+    Carries the offending `entry` alongside the message so the error builder can
+    populate `ErrorDetails.value` from the value itself. Recovering it by parsing
+    the prose would be exactly the thing the typed detail block exists to avoid,
+    and would silently break the first time a message is reworded. `entry` is
+    None for a rejection that is not about one specific entry (a caller passing
+    `paths` where the tool requires `scope` alongside it)."""
+
+    def __init__(self, message: str, entry: str | None = None) -> None:
+        super().__init__(message)
+        self.entry = entry
 
 
 class GitUnavailableError(RuntimeError):
@@ -176,26 +187,34 @@ def normalize_paths(paths: list[str] | None) -> list[str] | None:
     normalized: list[str] = []
     for path in paths:
         if path == "":
-            raise InvalidPathsError("paths entries must not be empty")
+            raise InvalidPathsError("paths entries must not be empty", entry=path)
         if path.startswith("-"):
-            raise InvalidPathsError(f"path must not start with '-': {bounded_repr(path)}")
+            raise InvalidPathsError(
+                f"path must not start with '-': {bounded_repr(path)}", entry=path
+            )
         if path.startswith(":"):
-            raise InvalidPathsError(f"git pathspec magic is not supported: {bounded_repr(path)}")
+            raise InvalidPathsError(
+                f"git pathspec magic is not supported: {bounded_repr(path)}", entry=path
+            )
         if "\\" in path:
-            raise InvalidPathsError(f"path must use '/' separators: {bounded_repr(path)}")
+            raise InvalidPathsError(
+                f"path must use '/' separators: {bounded_repr(path)}", entry=path
+            )
         if path.startswith("/"):
-            raise InvalidPathsError(f"path must be repo-relative: {bounded_repr(path)}")
+            raise InvalidPathsError(f"path must be repo-relative: {bounded_repr(path)}", entry=path)
         if _WINDOWS_DRIVE_RE.match(path):
-            raise InvalidPathsError(f"path must be repo-relative: {bounded_repr(path)}")
+            raise InvalidPathsError(f"path must be repo-relative: {bounded_repr(path)}", entry=path)
         if any(segment == ".." for segment in path.split("/")):
-            raise InvalidPathsError(f"path must not contain '..' segments: {bounded_repr(path)}")
+            raise InvalidPathsError(
+                f"path must not contain '..' segments: {bounded_repr(path)}", entry=path
+            )
         # Not a policy rule like the ones above: git argv is encoded strictly, so a
         # path with no UTF-8 encoding raises UnicodeEncodeError inside subprocess,
         # outside this module's error taxonomy. Refuse it here, where the caller
         # still gets invalid_paths (#140).
         if unencodable_reason(path) is not None:
             raise InvalidPathsError(
-                f"path is not valid UTF-8 (lone surrogate): {bounded_repr(path)}"
+                f"path is not valid UTF-8 (lone surrogate): {bounded_repr(path)}", entry=path
             )
         normalized.append(path)
     return normalized

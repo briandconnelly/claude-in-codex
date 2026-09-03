@@ -630,7 +630,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-47"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-48"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -967,6 +967,141 @@ async def test_invalid_base_message_is_bounded_end_to_end(fake_claude, git_repo)
         messages.append(data["error"]["message"])
     assert messages[0] == messages[1]
     assert len(messages[0]) < 1_000
+
+
+async def test_invalid_paths_carries_the_offending_entry_in_details(fake_claude, git_repo):
+    """details.field names the LIST; only details.value can name the entry.
+
+    A caller with a 30-entry filter learns which one was rejected without
+    parsing prose -- the property `ErrorDetails` exists for (schema-48).
+    """
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {
+                "scope": "working_tree",
+                "paths": ["src", "../secret", "tests"],
+                "workspace_root": str(git_repo),
+            },
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["error"]["code"] == "invalid_paths"
+    assert data["error"]["details"]["field"] == "paths"
+    assert data["error"]["details"]["value"] == "../secret"
+
+
+async def test_invalid_paths_details_value_is_bounded(fake_claude, git_repo):
+    """The typed field obeys the same cap as the message it replaces."""
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {
+                "scope": "working_tree",
+                "paths": ["../" + "a" * 10_000],
+                "workspace_root": str(git_repo),
+            },
+            raise_on_error=False,
+        )
+    data = structured(result)
+    value = data["error"]["details"]["value"]
+    assert len(value) <= 201
+    assert value.startswith("../aaa")
+
+
+@pytest.mark.parametrize(
+    ("args", "code", "field", "expected"),
+    [
+        ({"scope": "branch", "base": "-badref"}, "invalid_base", "base", "-badref"),
+        (
+            {"scope": "branch", "base": "main", "head": "-badhead"},
+            "invalid_head",
+            "head",
+            "-badhead",
+        ),
+    ],
+)
+async def test_invalid_ref_carries_the_ref_in_details(
+    args, code, field, expected, fake_claude, git_repo
+):
+    """base/head reach details.value too, not just the message (schema-48)."""
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {**args, "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["error"]["code"] == code
+    assert data["error"]["details"]["field"] == field
+    assert data["error"]["details"]["value"] == expected
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_review_changes", {}),
+        ("claude_review_changes_async", {}),
+        ("claude_adversarial_review", {"target": "review plan"}),
+        ("claude_adversarial_review_async", {"target": "review plan"}),
+        ("claude_dry_run", {}),
+    ],
+)
+async def test_head_rejected_for_scope_still_names_the_head(
+    tool, args, fake_claude, monkeypatch, git_repo, tmp_path
+):
+    """A head rejected for its SCOPE must still say which head (#165 review).
+
+    These messages name the scope, not the head -- "head is only valid for
+    scope=branch, not 'working_tree'" -- and `meta.head` is None here, because
+    `branch_range` leaves it unset for every non-branch scope. So without
+    details.value the rejected ref appears NOWHERE in the response, on the one
+    code whose catalog entry now advertises `value`.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            tool,
+            {
+                **args,
+                "scope": "working_tree",
+                "head": "feature-xyz",
+                "workspace_root": str(git_repo),
+            },
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["details"]["field"] == "head"
+    assert data["error"]["details"]["value"] == "feature-xyz"
+    # The premise the fix does NOT rest on: meta.head is unset for non-branch
+    # scope, so a fallback through it would have populated nothing.
+    assert data["meta"].get("head") is None
+
+
+async def test_invalid_workspace_root_carries_the_path_in_details(fake_claude):
+    """The fourth code in the schema-48 set."""
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_job_list", {"workspace_root": "/nope/missing"}, raise_on_error=False
+        )
+    data = structured(result)
+    assert data["error"]["code"] == "invalid_workspace_root"
+    assert data["error"]["details"]["value"] == "/nope/missing"
+
+
+async def test_error_catalog_advertises_value_for_the_echoing_codes(fake_claude):
+    """The published catalog must agree with what the builders actually populate.
+
+    A caller reads detail_fields to know whether branching on `value` is
+    supported; an entry that omits it while the builder sets it is a contract
+    that under-promises, and the reverse over-promises.
+    """
+    async with Client(mcp) as client:
+        data = structured(await client.call_tool("claude_capabilities", {}))
+    catalog = {e["code"]: e.get("detail_fields", []) for e in data["error_catalog"]}
+    for code in ("invalid_paths", "invalid_base", "invalid_head", "invalid_workspace_root"):
+        assert "value" in catalog[code], code
 
 
 async def test_invalid_workspace_root_message_is_bounded(fake_claude):
@@ -1390,7 +1525,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-47"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-48"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
