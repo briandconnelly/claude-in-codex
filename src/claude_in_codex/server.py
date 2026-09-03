@@ -73,22 +73,26 @@ from claude_in_codex.context import (
 from claude_in_codex.jobs import JobConfig
 from claude_in_codex.normalize import apply_cost_usage, build_prompt, normalize_envelope
 from claude_in_codex.schemas import (
+    ADVERSARIAL_JOB_START_SCHEMA,
+    ASYNC_START_MODELS,
     CAPABILITIES_SCHEMA,
+    CONSULT_JOB_START_SCHEMA,
     DEFAULT_NEXT_STEP,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
     FINGERPRINT_COVERS,
     JOB_LIST_SCHEMA,
-    JOB_START_SCHEMA,
-    JOB_STARTED_SCHEMA,
     JOB_STATUS_SCHEMA,
     MODEL_CATALOG_SCHEMA,
     OUTPUT_BOUNDS,
     RESULT_SCHEMA,
+    REVIEW_JOB_START_SCHEMA,
     STATUS_SCHEMA,
     TRUNCATION_MARKER,
     Access,
     AsyncLifecycle,
+    AsyncStartRoute,
+    AsyncStartTool,
     CapabilitiesResult,
     Confidence,
     ConfigMode,
@@ -102,7 +106,6 @@ from claude_in_codex.schemas import (
     ErrorInfo,
     ErrorResult,
     JobId,
-    JobStarted,
     Meta,
     RawDefaults,
     RawResponse,
@@ -128,8 +131,8 @@ CAPABILITY_SUMMARY = (
     "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
     "config_mode=bare disable hooks. Paid tools send context to Anthropic; check "
     "claude_status first. claude_models lists model slugs. "
-    "Every blocking paid operation has a claude_*_async form: a job_id to "
-    "poll/result/cancel, absent on an empty diff. "
+    "Every blocking paid operation has a claude_*_async form: poll/result/cancel a "
+    "job_id, and branch the reply on `outcome`. "
     "claude_dry_run previews diff-size/redaction. "
     "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
     "workspace_root: first MCP root else cwd, required when sessionless (2026-07-28); "
@@ -915,6 +918,35 @@ def _empty_diff_result(
         meta=meta,
     )
     return result.model_dump(mode="json", exclude_none=True)
+
+
+def _async_empty_diff_result(
+    tool: Literal["claude_review_changes_async", "claude_adversarial_review_async"],
+    kind: str,
+    meta: Meta,
+    context_summary,
+    paths: list[str] | None = None,
+    verdict: Verdict = "pass",
+    confidence: Confidence = "high",
+    detail: str = "full",
+) -> dict:
+    """The same unspent result, rendered as an *_async START envelope (#80).
+
+    A diff-bearing starter with an empty diff has nothing to launch, so it answers
+    with a result rather than a handle. That is the third success shape issue #80
+    is about: it is kept — paying for an empty diff would be worse — but it now
+    carries `outcome: "no_changes"` so the caller reads the branch off a value,
+    and it names the *_async surface in `tool` with the job it did not start in
+    `kind`. It previously reported the SYNC tool name in `tool`, which made the
+    envelope disagree with the call that produced it."""
+    base = _empty_diff_result(
+        tool, meta, context_summary, paths, verdict=verdict, confidence=confidence, detail=detail
+    )
+    model = ASYNC_START_MODELS[tool][2]
+    assert model is not None, f"{tool} has no diff and cannot answer no_changes"
+    return model.model_validate(
+        {**base, "tool": tool, "kind": kind, "outcome": "no_changes"}
+    ).model_dump(mode="json", exclude_none=True)
 
 
 @dataclass
@@ -2028,6 +2060,7 @@ def _legacy_key_error(job_id: str, cwd: str, meta: Meta) -> dict:
 
 async def _launch_job(
     *,
+    tool: AsyncStartTool,
     prompt: str,
     cwd: str,
     r: Resolved,
@@ -2037,10 +2070,15 @@ async def _launch_job(
     idempotency_key: str | None,
     job_timeout: int,
 ) -> dict:
-    """Start one detached paid job and render its JobStarted (or ok:false) envelope.
+    """Start one detached paid job and render its ok:true start envelope, or ok:false.
 
     Shared by every ``*_async`` starter, so the three tools cannot drift apart on
     idempotency outcomes, launch-failure mapping, or the handle they hand back.
+
+    `tool` is the ``*_async`` surface the caller invoked, and is echoed on both
+    ok:true branches beside the ``outcome`` discriminator (#80). It is NOT
+    ``cfg.kind``: that names the underlying tool whose envelope
+    claude_job_result will return, and the two differ by the ``_async`` suffix.
     Everything tool-specific — argument validation, diff gathering, the prompt,
     and the JobConfig — is the caller's; this owns only the launch.
 
@@ -2080,7 +2118,19 @@ async def _launch_job(
             elif outcome_kind == "replay":
                 data = await run_sync(lambda: jobs.status(cwd, outcome["job_id"]))
                 if data is not None:
-                    return data
+                    # Re-rendered through the async-start model rather than
+                    # returned raw: a launch must answer with an `outcome` and
+                    # the invoked `tool`, which a bare claude_job_status payload
+                    # has no business carrying (#80).
+                    # Dumped WITHOUT exclude_none: this branch is the JobStatus
+                    # the caller would otherwise have polled, and dropping its
+                    # explicit nulls would change the replay payload's shape for
+                    # reasons unrelated to the discriminator this adds.
+                    return (
+                        ASYNC_START_MODELS[tool][1]
+                        .model_validate({**data, "tool": tool, "outcome": "existing_job"})
+                        .model_dump(mode="json")
+                    )
                 return _err(
                     "internal_error",
                     "idempotency_key replay points at a job that has no record.",
@@ -2158,14 +2208,18 @@ async def _launch_job(
             "Check the workspace/job-state directory permissions and retry.",
             meta,
         )
-    started = JobStarted(
-        job_id=job_id,
-        kind=cfg.kind,
-        started_at=started_at,
-        deadline_seconds=job_timeout,
-        poll_after_ms=jobs.poll_after_ms(),
-        ttl_seconds=jobs.ttl_seconds(),
-        meta=started_meta(dropped),
+    started = ASYNC_START_MODELS[tool][0].model_validate(
+        {
+            "tool": tool,
+            "outcome": "started",
+            "job_id": job_id,
+            "kind": cfg.kind,
+            "started_at": started_at,
+            "deadline_seconds": job_timeout,
+            "poll_after_ms": jobs.poll_after_ms(),
+            "ttl_seconds": jobs.ttl_seconds(),
+            "meta": started_meta(dropped),
+        }
     )
     return started.model_dump(mode="json", exclude_none=True)
 
@@ -2173,7 +2227,7 @@ async def _launch_job(
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Review changes with Claude (background)",
-    output_schema=JOB_STARTED_SCHEMA,
+    output_schema=REVIEW_JOB_START_SCHEMA,
 )
 async def claude_review_changes_async(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
@@ -2219,7 +2273,7 @@ async def claude_review_changes_async(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Launch a git diff review in the background and return a job_id.
+    """Launch a git diff review in the background; branch on `outcome`.
 
     Paid; sends context to Anthropic; empty diffs skip spend; idempotency_key
     avoids duplicate-launch spend. The server grants
@@ -2353,8 +2407,13 @@ async def claude_review_changes_async(
         if held is not None:
             return _result(_key_holds_job_error(held, cwd, meta))
         return _result(
-            _empty_diff_result(
-                "claude_review_changes", meta, ctx_data.summary, effective_paths, detail=r.detail
+            _async_empty_diff_result(
+                "claude_review_changes_async",
+                "claude_review_changes",
+                meta,
+                ctx_data.summary,
+                effective_paths,
+                detail=r.detail,
             )
         )
     prompt = build_prompt(
@@ -2389,6 +2448,7 @@ async def claude_review_changes_async(
     )
     return _result(
         await _launch_job(
+            tool="claude_review_changes_async",
             prompt=prompt,
             cwd=cwd,
             r=r,
@@ -2425,7 +2485,7 @@ async def claude_review_changes_async(
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Ask Claude (background)",
-    output_schema=JOB_START_SCHEMA,
+    output_schema=CONSULT_JOB_START_SCHEMA,
 )
 async def claude_consult_async(
     prompt: Annotated[str, Field(description="The question to ask Claude.")],
@@ -2456,7 +2516,7 @@ async def claude_consult_async(
     ] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Ask claude_consult's question in the background and return a job_id.
+    """Ask claude_consult's question in the background; branch on `outcome`.
 
     Paid; sends context to Anthropic; outlives a dropped connection;
     idempotency_key avoids duplicate-launch spend. The server grants no
@@ -2530,6 +2590,7 @@ async def claude_consult_async(
     )
     return _result(
         await _launch_job(
+            tool="claude_consult_async",
             prompt=build_prompt("claude_consult", payload, ""),
             cwd=cwd,
             r=r,
@@ -2559,7 +2620,7 @@ async def claude_consult_async(
 @mcp.tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Adversarial review with Claude (background)",
-    output_schema=JOB_STARTED_SCHEMA,
+    output_schema=ADVERSARIAL_JOB_START_SCHEMA,
 )
 async def claude_adversarial_review_async(
     target: Annotated[str, Field(description="The plan/claim/decision to attack.")],
@@ -2602,10 +2663,10 @@ async def claude_adversarial_review_async(
     idempotency_key: Annotated[str | None, Field(description=_IDEMPOTENCY_KEY_DESCRIPTION)] = None,
     ctx: Context | None = None,
 ) -> ToolResult:
-    """Attack a plan or decision in the background and return a job_id.
+    """Attack a plan or decision in the background; branch on `outcome`.
 
-    Paid; sends context to Anthropic; outlives a dropped connection; empty diffs
-    skip spend; idempotency_key avoids duplicate spend. Grants no Bash/write
+    Paid; sends context to Anthropic; outlives a dropped connection; empty diffs skip
+    spend; idempotency_key avoids duplicate spend. Grants no Bash/write
     tools; workspace hooks may run shell in config_mode=inherit or
     config_mode=scoped. config_mode=safe and config_mode=bare disable hooks.
 
@@ -2724,9 +2785,10 @@ async def claude_adversarial_review_async(
                 return _result(_key_holds_job_error(held, cwd, meta))
             # No diff to attack: return the same free result the synchronous tool
             # returns rather than paying for a job. The launch envelope is a
-            # SuccessResult here, not a job handle — see #80.
+            # no_changes result here, not a job handle — see #80.
             return _result(
-                _empty_diff_result(
+                _async_empty_diff_result(
+                    "claude_adversarial_review_async",
                     "claude_adversarial_review",
                     meta,
                     ctx_data.summary,
@@ -2764,6 +2826,7 @@ async def claude_adversarial_review_async(
     )
     return _result(
         await _launch_job(
+            tool="claude_adversarial_review_async",
             prompt=build_prompt("claude_adversarial_review", payload, context_text, diff_context),
             cwd=cwd,
             r=r,
@@ -3637,11 +3700,59 @@ _DETAIL_MODES = DetailModes(
     ),
 )
 
+# Derived from the model map so a new starter cannot be advertised in one place
+# and forgotten in the other. A starter answers no_changes iff it has a diff to
+# find empty, which is exactly what a no_changes model in the map records.
+_ASYNC_START_TOOLS = list(ASYNC_START_MODELS)
+_DIFF_BEARING_START_TOOLS = [t for t, models in ASYNC_START_MODELS.items() if models[2]]
+
 _ASYNC_LIFECYCLE = AsyncLifecycle(
-    start_tools=[
-        "claude_review_changes_async",
-        "claude_consult_async",
-        "claude_adversarial_review_async",
+    start_tools=_ASYNC_START_TOOLS,
+    start_outcome_field="outcome",
+    start_outcomes=["started", "existing_job", "no_changes"],
+    start_outcome_routing=[
+        AsyncStartRoute(
+            outcome="started",
+            tools=_ASYNC_START_TOOLS,
+            started_new_job=True,
+            carries_job_id=True,
+            carries_result=False,
+            may_be_terminal=False,
+            next_action="poll_status",
+            next_tool="claude_job_status",
+            note="A new paid job was launched; poll it, then fetch with claude_job_result.",
+        ),
+        AsyncStartRoute(
+            outcome="existing_job",
+            tools=_ASYNC_START_TOOLS,
+            started_new_job=False,
+            carries_job_id=True,
+            carries_result=False,
+            may_be_terminal=True,
+            next_action="poll_status",
+            next_tool="claude_job_status",
+            note=(
+                "The idempotency_key already held a matching job, so nothing new was "
+                "launched or spent. Read status and result_available first: a keyed "
+                "retry sent after the job finished replays a TERMINAL record, and "
+                "polling it is a wasted round trip."
+            ),
+        ),
+        AsyncStartRoute(
+            outcome="no_changes",
+            tools=_DIFF_BEARING_START_TOOLS,
+            started_new_job=False,
+            carries_job_id=False,
+            carries_result=True,
+            may_be_terminal=False,
+            next_action="read_payload",
+            next_tool=None,
+            note=(
+                "The diff was empty, so no job was started and nothing was spent. The "
+                "payload IS the result; there is nothing to poll. tool names the "
+                "*_async surface invoked and kind the job that was NOT started."
+            ),
+        ),
     ],
     status_tool="claude_job_status",
     result_tool="claude_job_result",
@@ -3829,7 +3940,11 @@ def _capabilities_payload() -> dict:
                 "Start a background diff review for long-running reviews; scope=branch "
                 "reviews base...head (head defaults to HEAD); paths scopes the "
                 "server-provided diff.",
-                "job_id, status, polling hint, deadline, TTL, and resolved meta",
+                "an outcome-discriminated start envelope: started (job_id + polling "
+                "hint, deadline, TTL, resolved meta), existing_job (an "
+                "idempotency_key replay, possibly already terminal), or "
+                "no_changes (an empty diff -- a free result, no job, nothing "
+                "to poll)",
                 required=["scope"],
                 optional=[
                     "base",
@@ -3847,7 +3962,10 @@ def _capabilities_payload() -> dict:
                 "paid",
                 "Ask for a second opinion in the background when the answer may "
                 "outlive the caller's patience or the connection.",
-                "job_id, status, polling hint, deadline, TTL, and resolved meta",
+                "an outcome-discriminated start envelope: started (job_id + polling "
+                "hint, deadline, TTL, resolved meta) or existing_job (an "
+                "idempotency_key replay, possibly already terminal); "
+                "no_changes is unreachable here",
                 required=["prompt"],
                 optional=[
                     "context",
@@ -3862,8 +3980,11 @@ def _capabilities_payload() -> dict:
                 "paid",
                 "Pressure-test a plan in the background; optionally attach a diff "
                 "(scope=branch attaches base...head, head defaults to HEAD).",
-                "job_id, status, polling hint, deadline, TTL, and resolved meta; an "
-                "empty attached diff returns a result without spending instead",
+                "an outcome-discriminated start envelope: started (job_id + polling "
+                "hint, deadline, TTL, resolved meta), existing_job (an "
+                "idempotency_key replay, possibly already terminal), or "
+                "no_changes (an empty diff -- a free result, no job, nothing "
+                "to poll)",
                 required=["target"],
                 optional=[
                     "evidence",

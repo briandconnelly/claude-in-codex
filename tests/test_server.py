@@ -630,7 +630,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-46"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-47"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1302,7 +1302,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-46"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-47"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -1632,7 +1632,11 @@ async def test_async_empty_diff_skips_job_start(monkeypatch, git_repo, tmp_path)
             )
         )
     assert data["ok"] is True
-    assert data["tool"] == "claude_review_changes"
+    # The invoked surface, not the tool the job would have run (#80).
+    assert data["outcome"] == "no_changes"
+    assert data["tool"] == "claude_review_changes_async"
+    assert data["kind"] == "claude_review_changes"
+    assert "job_id" not in data
     assert data["verdict"] == "pass"
 
 
@@ -3864,10 +3868,10 @@ async def test_adversarial_async_attaches_the_diff(monkeypatch, git_repo, tmp_pa
 async def test_adversarial_async_empty_diff_skips_job_start(monkeypatch, git_repo, tmp_path):
     """An empty attached diff costs nothing and starts no job.
 
-    Like claude_review_changes_async, the launch answers with a SuccessResult
-    rather than a job handle here. That third success shape is the known wart
-    issue #80 tracks; this pins the no-spend behavior so a fix there cannot
-    quietly start charging for empty diffs.
+    Like claude_review_changes_async, the launch answers with a result rather
+    than a job handle here. #80 made that third success shape self-describing
+    (outcome=no_changes) instead of removing it; this pins the no-spend behavior
+    so a later change cannot quietly start charging for empty diffs.
     """
     import subprocess as _sp
 
@@ -3890,9 +3894,318 @@ async def test_adversarial_async_empty_diff_skips_job_start(monkeypatch, git_rep
             )
         )
     assert data["ok"] is True
-    assert data["tool"] == "claude_adversarial_review"
+    assert data["outcome"] == "no_changes"
+    assert data["tool"] == "claude_adversarial_review_async"
+    assert data["kind"] == "claude_adversarial_review"
+    # An absent diff does not establish that the target passes review.
     assert data["verdict"] == "unknown"
+    assert data["confidence"] == "low"
     assert "job_id" not in data
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["claude_review_changes_async", "claude_consult_async", "claude_adversarial_review_async"],
+)
+async def test_every_async_start_branch_requires_an_outcome(tool):
+    """The discriminator has to be REQUIRED in the advertised schema, not merely
+    present at runtime (#80).
+
+    A pydantic Literal with a default is omitted from the JSON Schema `required`
+    array, so `outcome: Literal["started"] = "started"` would advertise an
+    optional field — leaving a generic client to fall back on the field-presence
+    inference the issue exists to remove. That mistake is invisible at runtime
+    (the server still sets it), so only the schema can catch it."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    branches = tools[tool].output_schema["anyOf"]
+    ok_branches = [b for b in branches if "outcome" in b.get("properties", {})]
+    # One per reachable outcome; the remaining branch is the ok:false envelope.
+    assert len(ok_branches) == len(branches) - 1
+    assert ok_branches, "no success branch advertises an outcome"
+    for branch in ok_branches:
+        enum = branch["properties"]["outcome"].get("const") or branch["properties"]["outcome"].get(
+            "enum"
+        )
+        assert enum, f"outcome is not a literal on a branch of {tool}"
+        assert "outcome" in branch["required"], (
+            f"{tool} advertises `outcome` as OPTIONAL; a defaulted Literal is not a "
+            "discriminator a client can rely on"
+        )
+        assert "tool" in branch["required"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "kind"),
+    [
+        ("claude_review_changes_async", "claude_review_changes"),
+        ("claude_consult_async", "claude_consult"),
+        ("claude_adversarial_review_async", "claude_adversarial_review"),
+    ],
+)
+async def test_each_starter_pins_its_own_tool_not_the_shared_enum(tool, kind):
+    """`tool` must be a per-starter const, not a three-name enum shared by all.
+
+    A shared enum let claude_consult_async advertise a successful payload whose
+    `tool` might be "claude_review_changes_async", so a generated client could not
+    use the field to identify the invoked surface -- which is the whole point of
+    adding it. Raised by Copilot on PR #161.
+
+    `kind` is pinned only on the branches this server authors. The existing_job
+    branch reads it back from an on-disk record, so it stays a plain string; the
+    test below covers why."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    branches = [
+        b for b in tools[tool].output_schema["anyOf"] if "outcome" in b.get("properties", {})
+    ]
+    assert branches
+    for branch in branches:
+        prop = branch["properties"]["tool"]
+        assert prop.get("const") == tool, (
+            f"{tool} advertises tool={prop} instead of a const naming itself"
+        )
+        outcome = branch["properties"]["outcome"]["const"]
+        if outcome == "existing_job":
+            # Deliberately unpinned -- see test_a_replay_survives_a_record_that_lost_its_kind.
+            assert "const" not in branch["properties"]["kind"]
+        else:
+            assert branch["properties"]["kind"].get("const") == kind
+
+
+async def test_a_replay_survives_a_record_that_lost_its_kind(monkeypatch, git_repo, tmp_path):
+    """Why `kind` is NOT pinned to a const on the existing_job branch.
+
+    That branch is rendered from the stored job record, and jobs._status_dict
+    defaults a missing `kind` to "". Pinning it to a Literal would turn a
+    degraded-but-answerable replay into a pydantic ValidationError raised out of
+    the launch -- escaping the ok:false envelope contract entirely, which is a
+    strictly worse failure than reporting an empty kind. `tool`, which this server
+    always authors itself, carries the identity instead and IS pinned."""
+    import json as _json
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ws = str(git_repo)
+    call = {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "K"}
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool("claude_review_changes_async", call))
+        job_dir = jobs_mod._job_dir(ws, started["job_id"])
+        record = _json.loads((job_dir / "meta.json").read_text())
+        del record["kind"]
+        (job_dir / "meta.json").write_text(_json.dumps(record))
+
+        replay = structured(
+            await client.call_tool("claude_review_changes_async", call, raise_on_error=False)
+        )
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": started["job_id"], "workspace_root": ws}
+        )
+
+    assert replay["ok"] is True, "a partial job record must not blow up the launch envelope"
+    assert replay["outcome"] == "existing_job"
+    assert replay["tool"] == "claude_review_changes_async"
+    assert replay["kind"] == ""
+
+
+async def test_start_outcome_routing_is_structural_not_prose():
+    """COMPATIBILITY.md guarantees async_lifecycle is drivable "without parsing
+    prose", so what to DO per outcome must be readable as fields.
+
+    Raised by Copilot on PR #161: the routing shipped as free-form strings, which
+    left the required terminal-status check for `existing_job` recoverable only by
+    reading English."""
+    lifecycle = _capabilities_payload()["async_lifecycle"]
+    routes = {r["outcome"]: r for r in lifecycle["start_outcome_routing"]}
+    assert set(routes) == set(lifecycle["start_outcomes"])
+
+    started, existing, none_ = routes["started"], routes["existing_job"], routes["no_changes"]
+
+    assert started["started_new_job"] is True
+    assert started["carries_job_id"] is True and started["carries_result"] is False
+    assert started["next_action"] == "poll_status"
+    assert started["next_tool"] == lifecycle["status_tool"]
+
+    # Neither of these spends, and both are reachable without a launch.
+    assert existing["started_new_job"] is False and none_["started_new_job"] is False
+
+    # The replay trap, as a boolean rather than a sentence.
+    assert existing["may_be_terminal"] is True
+    assert started["may_be_terminal"] is False
+
+    # no_changes IS the answer: nothing to poll, no handle.
+    assert none_["carries_result"] is True
+    assert none_["carries_job_id"] is False
+    # Always present, never inferred from an absent next_tool: the payload is
+    # dumped with exclude_none, so a null pointer would vanish from the wire.
+    assert none_["next_action"] == "read_payload"
+    assert "next_tool" not in none_
+
+    # Reachability is published per route, and matches the advertised schemas.
+    assert set(started["tools"]) == set(lifecycle["start_tools"])
+    assert set(none_["tools"]) == {
+        "claude_review_changes_async",
+        "claude_adversarial_review_async",
+    }
+
+
+async def test_advertised_outcomes_match_what_each_starter_can_produce():
+    """no_changes is reachable only where there is a diff to find empty."""
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+
+    def outcomes(name):
+        found = set()
+        for b in tools[name].output_schema["anyOf"]:
+            prop = b.get("properties", {}).get("outcome")
+            if prop:
+                found.update([prop["const"]] if "const" in prop else prop.get("enum", []))
+        return found
+
+    assert outcomes("claude_consult_async") == {"started", "existing_job"}
+    for name in ("claude_review_changes_async", "claude_adversarial_review_async"):
+        assert outcomes(name) == {"started", "existing_job", "no_changes"}
+    # And the capability payload publishes the same set, so an agent that reads
+    # the contract instead of the schema is told the same thing.
+    lifecycle = _capabilities_payload()["async_lifecycle"]
+    assert lifecycle["start_outcome_field"] == "outcome"
+    assert set(lifecycle["start_outcomes"]) == {"started", "existing_job", "no_changes"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_review_changes_async", {"scope": "working_tree"}),
+        ("claude_consult_async", {"prompt": "sound?"}),
+        ("claude_adversarial_review_async", {"target": "ship it"}),
+    ],
+)
+async def test_started_and_existing_job_both_carry_the_invoked_tool(
+    monkeypatch, git_repo, tmp_path, tool, args
+):
+    """A new launch and an idempotency replay must be distinguishable by VALUE,
+    and both must name the _async surface the caller invoked (#80).
+
+    Before this, the replay came straight back from claude_job_status with no
+    `outcome` and no `tool` at all, so the two were told apart only by whether
+    `elapsed_ms` happened to be present."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    call = {**args, "workspace_root": str(git_repo), "idempotency_key": "K"}
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool(tool, call))
+        replay = structured(await client.call_tool(tool, call))
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": started["job_id"], "workspace_root": str(git_repo)}
+        )
+
+    assert started["outcome"] == "started"
+    assert replay["outcome"] == "existing_job"
+    # Same job, reached twice — the replay really is the launch's job.
+    assert replay["job_id"] == started["job_id"]
+    for payload in (started, replay):
+        assert payload["ok"] is True
+        assert payload["tool"] == tool
+        # kind stays the UNDERLYING tool: it is what claude_job_result returns.
+        assert payload["kind"] == tool.removesuffix("_async")
+
+
+async def test_an_existing_job_replay_can_already_be_terminal(monkeypatch, git_repo, tmp_path):
+    """claude_capabilities warns that an existing_job replay MAY ALREADY BE
+    TERMINAL, so a caller must read `status`/`result_available` before polling.
+
+    That warning is only worth publishing if it is true, and it is: a keyed retry
+    sent after the job finished replays a `done` record with the result already
+    available. A caller that saw `outcome=existing_job` and went straight to
+    claude_job_status would be polling a job that is not running."""
+    import json as _json
+    import time as _time
+
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    inner = {
+        "summary": "s",
+        "verdict": "pass",
+        "confidence": "high",
+        "findings": [],
+        "questions": [],
+        "assumptions": [],
+    }
+    envelope = _json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": _json.dumps(inner),
+        }
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "build_command",
+        lambda *a, **k: (["sh", "-c", "printf '%s' \"$0\"", envelope], []),
+    )
+    ws = str(git_repo)
+    call = {"scope": "working_tree", "workspace_root": ws, "idempotency_key": "K"}
+    async with Client(mcp) as client:
+        started = structured(await client.call_tool("claude_review_changes_async", call))
+        assert started["outcome"] == "started"
+        deadline = _time.monotonic() + 5
+        st = {"status": "running"}
+        while _time.monotonic() < deadline:
+            st = structured(
+                await client.call_tool(
+                    "claude_job_status", {"job_id": started["job_id"], "workspace_root": ws}
+                )
+            )
+            if st["status"] != "running":
+                break
+            await anyio.sleep(0.05)
+        # Assert the FIXTURE finished before asserting anything about the replay.
+        # Folding the two together is what makes a slow runner or a broken canned
+        # envelope report itself as an API-contract regression: the job simply
+        # never left `running`, which says nothing about what a replay returns.
+        assert st["status"] == "done", (
+            f"fixture job did not complete (status={st['status']}); this is a test-setup "
+            "failure, not a statement about the replay contract"
+        )
+        replay = structured(await client.call_tool("claude_review_changes_async", call))
+
+    assert replay["outcome"] == "existing_job"
+    # The terminal record must be the keyed job itself, not some other one.
+    assert replay["job_id"] == started["job_id"]
+    assert replay["status"] == "done", (
+        "a keyed retry after completion no longer replays a terminal record, so "
+        "claude_capabilities.async_lifecycle's 'MAY ALREADY BE TERMINAL' warning "
+        "needs revisiting"
+    )
+    assert replay["result_available"] is True
+
+
+async def test_job_status_does_not_carry_the_async_start_discriminator(
+    monkeypatch, git_repo, tmp_path
+):
+    """`outcome` answers "what did this LAUNCH do", which is not a question a poll
+    asks — so claude_job_status keeps returning a bare JobStatus (#80)."""
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(claude_mod, "build_command", lambda *a, **k: (["sh", "-c", "sleep 30"], []))
+    ws = str(git_repo)
+    async with Client(mcp) as client:
+        started = structured(
+            await client.call_tool(
+                "claude_review_changes_async", {"scope": "working_tree", "workspace_root": ws}
+            )
+        )
+        status = structured(
+            await client.call_tool(
+                "claude_job_status", {"job_id": started["job_id"], "workspace_root": ws}
+            )
+        )
+        await client.call_tool(
+            "claude_job_cancel", {"job_id": started["job_id"], "workspace_root": ws}
+        )
+    assert status["ok"] is True
+    assert "outcome" not in status
+    assert "tool" not in status
+    assert status["kind"] == "claude_review_changes"
 
 
 async def test_consult_async_cannot_answer_with_a_result():
@@ -4270,8 +4583,12 @@ async def test_no_paid_tool_ships_blocking_only():
     summary = CAPABILITY_SUMMARY.lower()
     assert "every blocking paid operation has a claude_*_async form" in summary
     assert "deprecated" not in summary
-    # And it must not tell a caller to assume the handle it may not get.
-    assert "absent on an empty diff" in summary
+    # And it must not tell a caller to assume the handle it may not get. The
+    # summary used to say the job_id was "absent on an empty diff", which named
+    # the one shape by what it LACKED; since #80 every start reply carries an
+    # explicit `outcome`, so the summary points at that instead.
+    assert "branch the reply on `outcome`" in summary
+    assert "absent on an empty diff" not in summary
 
 
 async def test_one_key_cannot_replay_across_two_starters(monkeypatch, git_repo):
