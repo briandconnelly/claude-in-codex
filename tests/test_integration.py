@@ -29,6 +29,67 @@ def _claude_help_advertises(flag: str) -> bool:
     return flag in f"{proc.stdout}\n{proc.stderr}"
 
 
+# `claude_consult` prompts below hand Claude real material to review rather than a
+# verdict to affirm. A prompt like "reply that 2+2 equals 4 and give verdict pass"
+# is verdict-setting, which the independent-critic guardrails correctly refuse; the
+# refusal arrives as unstructured prose, and unstructured prose normalizes to
+# verdict="unknown" with an empty everything-else. The old assertions accepted that,
+# so they held whether the structured-output path worked or was never entered (#159).
+_STRUCTURED_VERDICTS = ("pass", "concerns", "fail")
+
+# One snippet per live consult, each with a real defect to find, so the answer has
+# somewhere to put a verdict, a finding, and a recommendation. Each states the
+# behavior the caller requires, which is what makes the defect a defect: without a
+# contract to violate, "it depends what you want on empty input" is a legitimate
+# answer, and legitimate uncertainty is exactly the response `_assert_structured`
+# cannot tell apart from a parsing failure. Stating the requirement is not
+# verdict-setting -- it says what the code must do, not what the reviewer must say.
+_REVIEW_MATERIAL = (
+    "Review this Python function for correctness and edge cases. Callers require it "
+    "to return 0.0 for an empty list.\n\n"
+    "def average(values):\n"
+    "    return sum(values) / len(values)\n"
+)
+_SAFE_MODE_MATERIAL = (
+    "Review this Python function for correctness and edge cases. Callers require it "
+    "to return None for an empty file and to leave no file handle open.\n\n"
+    "def last_line(path):\n"
+    "    return open(path).readlines()[-1]\n"
+)
+
+
+def _assert_structured(data: dict) -> None:
+    """Pin the SEMANTIC half of the envelope, which fixtures cannot cover.
+
+    Two independent checks, because neither alone is sufficient:
+
+    * The verdict is not `"unknown"`. That is what `normalize.py` emits when claude
+      returned no structured JSON at all, so a parsing regression, a model that
+      stopped emitting JSON, and a refused prompt all land there. It is a lossy
+      signal in one direction only: a VALID structured reply may also carry
+      `"unknown"` when the reviewer is genuinely uncertain. The prompts above give
+      it firm ground so that stays rare, and the assertion message names both
+      readings rather than asserting a parse failure it cannot prove.
+    * At least one structured collection is populated. The unstructured path leaves
+      findings, questions, assumptions and next_steps all empty and puts the whole
+      reply in `summary`, so this fires on the same regression WITHOUT depending on
+      the verdict value -- and it is the only check here that catches a
+      parsed-but-empty envelope.
+    """
+    assert data["ok"] is True
+    assert data["verdict"] in _STRUCTURED_VERDICTS, (
+        f"verdict={data['verdict']!r}: either no structured JSON was parsed from "
+        "claude's reply (a contract regression, or a refused prompt) or the reviewer "
+        "was genuinely uncertain about material chosen to leave no room for it"
+    )
+    assert data["confidence"] in ("low", "medium", "high")
+    assert data["summary"].strip(), "structured envelope carried an empty summary"
+    assert any(data[key] for key in ("findings", "questions", "assumptions", "next_steps")), (
+        "every structured collection was empty, which is what an unstructured reply "
+        "normalizes to -- no structured JSON reached the envelope"
+    )
+
+
 async def test_status_live():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_status", {})
@@ -40,7 +101,7 @@ async def test_ask_live_roundtrip():
         result = await client.call_tool(
             "claude_consult",
             {
-                "prompt": "Reply that 2+2 equals 4 and give verdict pass.",
+                "prompt": _REVIEW_MATERIAL,
                 "model": "haiku",
                 "max_budget_usd": 0.20,
                 "timeout_seconds": 120,
@@ -51,8 +112,7 @@ async def test_ask_live_roundtrip():
     import json
 
     print(json.dumps(data, indent=2))
-    assert data["ok"] is True
-    assert data["verdict"] in ("pass", "concerns", "fail", "unknown")
+    _assert_structured(data)
 
 
 @pytest.mark.skipif(
@@ -64,7 +124,7 @@ async def test_ask_live_safe_mode_roundtrip():
         result = await client.call_tool(
             "claude_consult",
             {
-                "prompt": "Reply that safe mode works and give verdict pass.",
+                "prompt": _SAFE_MODE_MATERIAL,
                 "config_mode": "safe",
                 "model": "haiku",
                 "max_budget_usd": 0.20,
@@ -76,9 +136,8 @@ async def test_ask_live_safe_mode_roundtrip():
     import json
 
     print(json.dumps(data, indent=2))
-    assert data["ok"] is True
+    _assert_structured(data)
     assert data["meta"]["config_mode"] == "safe"
-    assert data["verdict"] in ("pass", "concerns", "fail", "unknown")
 
 
 async def test_consult_async_live_roundtrip(tmp_path, monkeypatch):
@@ -101,7 +160,7 @@ async def test_consult_async_live_roundtrip(tmp_path, monkeypatch):
             await client.call_tool(
                 "claude_consult_async",
                 {
-                    "prompt": "Reply that 2+2 equals 4 and give verdict pass.",
+                    "prompt": _REVIEW_MATERIAL,
                     "model": "haiku",
                     "max_budget_usd": 0.20,
                     "workspace_root": str(tmp_path),
@@ -134,9 +193,8 @@ async def test_consult_async_live_roundtrip(tmp_path, monkeypatch):
         )
     print("\n--- live claude_consult_async result ---")
     print(json.dumps(data, indent=2))
-    assert data["ok"] is True
+    _assert_structured(data)
     assert data["tool"] == "claude_consult"
-    assert data["verdict"] in ("pass", "concerns", "fail", "unknown")
     assert data["meta"]["job_id"] == job_id
     # A real detached run really did spend, which is what proves the child ran.
     assert data["meta"]["cost_usd"] > 0
