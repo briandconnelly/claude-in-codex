@@ -6051,6 +6051,27 @@ async def test_dry_run_reports_which_filter_entries_matched(git_repo):
     assert data["paths_matched"] == [1, 0]
 
 
+async def test_capabilities_advertise_the_dry_run_paths_matched_output():
+    """An agent that reads claude_capabilities must learn the field exists.
+
+    The whole value of #155 is that a caller checks the filter BEFORE paying, so
+    a signal only the shipped skill mentions is a signal half the callers never
+    look for -- `claude_capabilities` is the machine-readable inventory, and its
+    dry-run `returns` text listed only diff size, truncation and redaction. Found
+    by an external review of this change, which is why it is pinned here rather
+    than left to the next author to remember."""
+    payload = _capabilities_payload()
+    detail = {d["name"]: d for d in payload["tool_details"]}["claude_dry_run"]
+
+    assert "paths_matched" in detail["returns"]
+    # Deliberately NOT also in CAPABILITY_SUMMARY. That text is the first-read
+    # instructions and carries a 1200-character ceiling for compactness; naming
+    # the field there measured 1,214, and the summary's remaining budget is
+    # better spent on security disclosures than on a field the inventory
+    # already documents one hop away.
+    assert len(CAPABILITY_SUMMARY) < 1200
+
+
 async def test_dry_run_paths_matched_is_absent_without_a_path_filter(git_repo):
     """The control: an unfiltered preview reports no counts rather than zeros.
 

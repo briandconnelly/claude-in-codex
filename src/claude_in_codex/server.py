@@ -3768,7 +3768,8 @@ def _capabilities_payload() -> dict:
                 "free",
                 "Preview diff workspace, size, truncation, redaction, and optional paths "
                 "filter before paying.",
-                "diff byte count, context summary, truncation state, and redacted paths",
+                "diff byte count, context summary, truncation state, redacted paths, and "
+                "paths_matched (per-entry counts for the paths filter)",
                 required=["scope"],
                 optional=["base", "head", "paths", "config_mode", "workspace_root"],
             ),

@@ -31,6 +31,15 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   was discarded. Reported, it is the cheapest place in the system to buy the
   signal, because acting on it here is what avoids the paid call.
 
+  `claude_capabilities` advertises it too: the dry-run `returns` text listed only
+  diff size, truncation and redaction, so an agent reading the machine-readable
+  inventory rather than the shipped skill would not have learned the signal
+  exists -- which defeats the point of putting it on the free tool. A test pins
+  that wording. It is deliberately NOT added to `CAPABILITY_SUMMARY`: that text
+  is the first-read instructions under a 1,200-character ceiling, naming the
+  field there measured 1,214, and the remaining budget is better spent on
+  security disclosures than on a field the inventory documents one hop away.
+
   Bumps `FINGERPRINT` to `claude-in-codex/0.1/schema-46` and re-pins the contract
   digest. Discovery cost measured 73,515 bytes against the 75,000 ceiling
   (+200 for the new property), so the ceiling is unchanged.
