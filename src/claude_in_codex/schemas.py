@@ -19,6 +19,45 @@ from pydantic import (
 
 from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 
+# Ceiling on any caller-supplied value this server echoes back to the caller --
+# `ErrorDetails.value` and every error `message` that names the offending input.
+# It lives here, next to the error contract, rather than in server.py because
+# context.py raises the errors whose messages carry those echoes and cannot
+# import server.py. One constant, so no echo site can drift into being an
+# unbounded function of caller input (#150).
+DETAIL_VALUE_MAX_CHARS = 200
+
+
+def bounded_repr(value: str) -> str:
+    """A `repr()` of `value` whose RENDERED length obeys DETAIL_VALUE_MAX_CHARS.
+
+    repr() rather than the raw string: this echo lands in an agent-visible error
+    message, and repr() renders control characters and terminal escapes inert
+    instead of letting them recolor, reposition, or erase the agent's view of the
+    error. It also flattens a lone surrogate to an ASCII `\\udddd`, so the
+    envelope's later `backslashreplace` pass has nothing left to expand -- a cap
+    applied before that pass would otherwise not be a cap on what ships.
+
+    Two ways to bound it are wrong. Slicing the finished repr can sever an escape
+    sequence mid-token and drop the closing quote, emitting a faithful rendering
+    of nothing. Slicing the raw value first is faithful but bounds the INPUT, not
+    the output: 200 code points of `\\xNN` escapes render an order of magnitude
+    longer than the cap the rest of the error contract keeps.
+
+    So: shrink the raw head until its repr fits, then mark it. The marker sits
+    outside the quotes, so the quoted part is exactly the repr of the head that
+    survived and never a truncated escape."""
+    rendered = repr(value)
+    if len(rendered) <= DETAIL_VALUE_MAX_CHARS:
+        return rendered
+    head = value[:DETAIL_VALUE_MAX_CHARS]
+    # Each step drops one code point, so this terminates at "''" in the worst
+    # case; the loop only ever runs over a string already cut to the cap.
+    while head and len(repr(head)) > DETAIL_VALUE_MAX_CHARS:
+        head = head[:-1]
+    return repr(head) + "…"
+
+
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.

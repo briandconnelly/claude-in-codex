@@ -15,6 +15,7 @@ from claude_in_codex.context import (
     NotAGitRepoError,
     _diff_args,
     gather_context,
+    normalize_paths,
     redact_text,
 )
 
@@ -153,6 +154,72 @@ def test_invalid_paths_are_rejected_before_git(monkeypatch, git_repo, path):
     monkeypatch.setattr(ctx, "_git", fail_git)
     with pytest.raises(InvalidPathsError):
         gather_context(str(git_repo), scope="working_tree", base="main", paths=[path])
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix", "rule"),
+    [
+        ("-", "", "must not start with '-'"),
+        (":", "", "pathspec magic"),
+        ("", "\\x", "'/' separators"),
+        ("/", "", "repo-relative"),
+        ("C:/", "", "repo-relative"),
+        ("../", "", "'..' segments"),
+        ("", "\ud800", "lone surrogate"),
+    ],
+)
+def test_invalid_paths_messages_do_not_grow_with_the_entry(prefix, suffix, rule):
+    """The rejection message is a function of the RULE, not of the entry's size.
+
+    It reaches the caller as the `invalid_paths` error's `message`, a field the
+    rest of the error contract caps at DETAIL_VALUE_MAX_CHARS; an unbounded
+    repr() there made error size a function of caller input (#150). Asserting
+    that a 10x longer entry produces the IDENTICAL message pins the bound
+    without hard-coding what it happens to be.
+    """
+    short = prefix + "a" * 1_000 + suffix
+    long = prefix + "a" * 10_000 + suffix
+
+    messages = []
+    for path in (short, long):
+        with pytest.raises(InvalidPathsError) as excinfo:
+            normalize_paths([path])
+        messages.append(str(excinfo.value))
+
+    assert rule in messages[0]
+    assert messages[0] == messages[1]
+    assert len(messages[0]) < 1_000
+    # Bounded, but still an echo: enough of the entry survives to identify it.
+    assert (prefix + "a" * 20) in messages[0]
+
+
+def test_bounded_echo_still_escapes_control_characters():
+    """The bound must not cost the escaping repr() was already doing.
+
+    A raw terminal escape in an agent-visible message can recolor, reposition, or
+    erase the agent's view of the error. repr() renders it inert -- which is why
+    the ENTRY is truncated and then repr()-ed, rather than repr()-ed and then
+    sliced, since slicing a repr can sever an escape sequence mid-token.
+    """
+    message = ""
+    with pytest.raises(InvalidPathsError) as excinfo:
+        normalize_paths(["-bad\x1b[31mred"])
+    message = str(excinfo.value)
+    assert "\x1b" not in message
+    assert "\\x1b" in message
+
+
+def test_invalid_ref_messages_do_not_grow_with_the_ref(git_repo):
+    """Same bound for base/head: refs are caller text on the same error path."""
+    short = "-" + "b" * 1_000
+    long = "-" + "b" * 10_000
+    seen = []
+    for ref in (short, long):
+        with pytest.raises(InvalidBaseError) as excinfo:
+            gather_context(str(git_repo), scope="branch", base=ref)
+        seen.append(str(excinfo.value))
+    assert seen[0] == seen[1]
+    assert len(seen[0]) < 1_000
 
 
 def test_dotdot_substrings_are_valid_path_names(git_repo):

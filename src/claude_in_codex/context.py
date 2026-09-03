@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pontonier.core import redaction as _redaction
 
 from claude_in_codex.config import git_timeout_seconds, unencodable_reason
-from claude_in_codex.schemas import ContextSummary
+from claude_in_codex.schemas import ContextSummary, bounded_repr
 
 MAX_DIFF_BYTES = 200_000
 
@@ -178,23 +178,25 @@ def normalize_paths(paths: list[str] | None) -> list[str] | None:
         if path == "":
             raise InvalidPathsError("paths entries must not be empty")
         if path.startswith("-"):
-            raise InvalidPathsError(f"path must not start with '-': {path!r}")
+            raise InvalidPathsError(f"path must not start with '-': {bounded_repr(path)}")
         if path.startswith(":"):
-            raise InvalidPathsError(f"git pathspec magic is not supported: {path!r}")
+            raise InvalidPathsError(f"git pathspec magic is not supported: {bounded_repr(path)}")
         if "\\" in path:
-            raise InvalidPathsError(f"path must use '/' separators: {path!r}")
+            raise InvalidPathsError(f"path must use '/' separators: {bounded_repr(path)}")
         if path.startswith("/"):
-            raise InvalidPathsError(f"path must be repo-relative: {path!r}")
+            raise InvalidPathsError(f"path must be repo-relative: {bounded_repr(path)}")
         if _WINDOWS_DRIVE_RE.match(path):
-            raise InvalidPathsError(f"path must be repo-relative: {path!r}")
+            raise InvalidPathsError(f"path must be repo-relative: {bounded_repr(path)}")
         if any(segment == ".." for segment in path.split("/")):
-            raise InvalidPathsError(f"path must not contain '..' segments: {path!r}")
+            raise InvalidPathsError(f"path must not contain '..' segments: {bounded_repr(path)}")
         # Not a policy rule like the ones above: git argv is encoded strictly, so a
         # path with no UTF-8 encoding raises UnicodeEncodeError inside subprocess,
         # outside this module's error taxonomy. Refuse it here, where the caller
         # still gets invalid_paths (#140).
         if unencodable_reason(path) is not None:
-            raise InvalidPathsError(f"path is not valid UTF-8 (lone surrogate): {path!r}")
+            raise InvalidPathsError(
+                f"path is not valid UTF-8 (lone surrogate): {bounded_repr(path)}"
+            )
         normalized.append(path)
     return normalized
 
@@ -266,10 +268,10 @@ def _diff_args(opts: DiffOptions) -> list[str]:
     elif opts.scope == "branch":
         base = opts.base
         if not _valid_ref(base):
-            raise InvalidBaseError(f"invalid base ref: {base!r}")
+            raise InvalidBaseError(f"invalid base ref: {bounded_repr(base)}")
         head = opts.head
         if not _valid_ref(head):
-            raise InvalidHeadError(f"invalid head ref: {head!r}")
+            raise InvalidHeadError(f"invalid head ref: {bounded_repr(head)}")
         # --end-of-options ensures the refs can never be parsed as git options.
         args = [*common, "--end-of-options", f"{base}...{head}"]
     else:
@@ -421,9 +423,11 @@ def gather_context(
     diff_args = _diff_args(opts)  # raises InvalidScopeError/InvalidBaseError/InvalidHeadError
     if scope == "branch":
         if not _ref_exists(cwd, base):
-            raise InvalidBaseError(f"base ref does not resolve to a commit: {base!r}")
+            raise InvalidBaseError(f"base ref does not resolve to a commit: {bounded_repr(base)}")
         if not _ref_exists(cwd, effective_head):
-            raise InvalidHeadError(f"head ref does not resolve to a commit: {effective_head!r}")
+            raise InvalidHeadError(
+                f"head ref does not resolve to a commit: {bounded_repr(effective_head)}"
+            )
     summary = _summary(cwd, diff_args)
     path_match_counts = _path_match_counts(cwd, opts) if measure_paths else None
     raw = _git(cwd, *diff_args)
