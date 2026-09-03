@@ -16,7 +16,11 @@ from claude_in_codex.config import (
     ref_within_bounds,
     unencodable_reason,
 )
-from claude_in_codex.schemas import ContextSummary, bounded_repr
+from claude_in_codex.schemas import (
+    DETAIL_VALUE_MAX_CHARS,
+    ContextSummary,
+    bounded_repr,
+)
 
 MAX_DIFF_BYTES = 200_000
 
@@ -389,6 +393,29 @@ def sanitize_echo_prose(text: str) -> str:
     if not text:
         return text
     return _redaction.sanitize_echo_prose(text) or ""
+
+
+def bounded_echo_prose(text: str, limit: int = DETAIL_VALUE_MAX_CHARS) -> str:
+    """Sanitize foreign text AND bound it, for an agent-visible error message (#163).
+
+    `sanitize_echo_prose` deliberately does not truncate -- callers own their own
+    bound -- which left the two sites that interpolate a subprocess failure into
+    `error.message` doing neither. Measured before this existed, a verbose git
+    failure produced a 12,688-byte message carrying a raw ANSI escape and a secret
+    that appeared in git's stderr.
+
+    The TAIL is kept, not the head: a failing command's last lines are the ones that
+    say what went wrong, while the head is usually the invocation the caller can
+    already see. `jobs._stderr_tail` applies the same policy to job diagnostics; it
+    predates this helper and keeps its own copy because it reads from disk and has a
+    legacy-record branch to answer for first.
+
+    The marker is a leading ellipsis, so a reader can tell a bounded tail from a
+    complete short message rather than inferring it from length."""
+    sanitized = sanitize_echo_prose(text).strip()
+    if len(sanitized) <= limit:
+        return sanitized
+    return "\u2026" + sanitized[-limit:]
 
 
 def redact_tree(value: object) -> object:

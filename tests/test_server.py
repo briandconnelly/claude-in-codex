@@ -6755,3 +6755,106 @@ async def test_calling_a_removed_alias_fails(git_repo):
     async with Client(mcp) as client:
         with pytest.raises(ToolError):
             await client.call_tool("claude_ask", {"prompt": "hi", "workspace_root": str(git_repo)})
+
+
+async def test_git_failure_prose_is_sanitized_and_bounded(fake_claude, git_repo, monkeypatch):
+    """git's stderr is FOREIGN text, and the internal_error fallback echoed it raw.
+
+    Distinct from #150, which bounded echoes of the CALLER's own arguments. This is
+    subprocess output, so it needs the treatment every other foreign echo in this
+    server gets: control characters stripped (a terminal escape in an error message
+    can recolor, reposition or erase the agent's view of it), secrets redacted, and
+    a bound. Measured before the fix, this exact call produced a 12,688-byte message
+    carrying a live ANSI escape and an AWS key verbatim (#163).
+    """
+    import subprocess as _sp
+
+    from claude_in_codex import context as _ctx
+
+    nasty = (
+        "\x1b[31mfatal: \x1b[0m"
+        + "verbose git noise " * 700
+        + "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
+    )
+    real = _sp.run
+
+    def fake(args, **kwargs):
+        if args and args[0] == "git" and "diff" in args:
+            return _sp.CompletedProcess(args, 1, stdout="", stderr=nasty)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(_ctx.subprocess, "run", fake)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+
+    message = data["error"]["message"]
+    assert data["error"]["code"] == "internal_error"
+    assert len(message) < 300
+    assert "\x1b" not in message
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in message
+    # The TAIL survives: a failing command's last lines say what went wrong.
+    assert message.startswith("git failed: …")
+
+
+async def test_a_short_git_failure_is_echoed_intact(fake_claude, git_repo, monkeypatch):
+    """The bound above is only evidence if an ordinary failure still reports itself.
+
+    A cap that swallowed every diagnostic would pass the assertions above while
+    making `internal_error` useless."""
+    import subprocess as _sp
+
+    from claude_in_codex import context as _ctx
+
+    real = _sp.run
+
+    def fake(args, **kwargs):
+        if args and args[0] == "git" and "diff" in args:
+            return _sp.CompletedProcess(args, 1, stdout="", stderr="fatal: bad revision")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(_ctx.subprocess, "run", fake)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+
+    assert data["error"]["message"] == "git failed: fatal: bad revision"
+
+
+async def test_async_start_oserror_prose_is_sanitized_and_bounded(
+    fake_claude, git_repo, monkeypatch
+):
+    """The second site with the same gap: an OSError's text is the OS's, not this
+    server's, and it names paths this server did not choose."""
+    from claude_in_codex import jobs as _jobs
+    from claude_in_codex import server as _srv
+
+    def boom(*args, **kwargs):
+        raise OSError("\x1b[31m" + "state dir noise " * 500)
+
+    monkeypatch.setattr(_jobs, "start_job", boom)
+    monkeypatch.setattr(_srv.jobs, "start_job", boom, raising=False)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes_async",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+
+    assert data["ok"] is False
+    message = data["error"]["message"]
+    # Pin the BRANCH, not just the shape: without this the test also passes when the
+    # starter bails earlier with claude_not_found (which it does wherever `claude` is
+    # not on PATH, e.g. CI), and would then assert nothing about this echo site.
+    assert message.startswith("Failed to start async job: ")
+    assert len(message) < 300
+    assert "\x1b" not in message
