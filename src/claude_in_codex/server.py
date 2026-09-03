@@ -1637,7 +1637,9 @@ async def claude_review_changes(
     )
     if head is not None and scope != "branch":
         return _result(
-            _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
+            _invalid_head_error(
+                meta, f"head is only valid for scope=branch, not '{scope}'.", head=head
+            )
         )
     # Everything caller-authored that reaches Anthropic counts against the
     # operator's bound, summed: focus and the persona each fitting alone is not
@@ -1845,6 +1847,7 @@ async def claude_adversarial_review(
             _invalid_head_error(
                 meta,
                 "head requires scope=branch on claude_adversarial_review.",
+                head=head,
             )
         )
     too_large = _validate_user_text(payload_text, meta)
@@ -2353,7 +2356,9 @@ async def claude_review_changes_async(
         return _result(_legacy_key_error(legacy_job, cwd, meta))
     if head is not None and scope != "branch":
         return _result(
-            _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
+            _invalid_head_error(
+                meta, f"head is only valid for scope=branch, not '{scope}'.", head=head
+            )
         )
     # Everything caller-authored that reaches Anthropic counts against the
     # operator's bound, summed: focus and the persona each fitting alone is not
@@ -2749,7 +2754,9 @@ async def claude_adversarial_review_async(
     if head is not None and scope != "branch":
         return _result(
             _invalid_head_error(
-                meta, "head requires scope=branch on claude_adversarial_review_async."
+                meta,
+                "head requires scope=branch on claude_adversarial_review_async.",
+                head=head,
             )
         )
     too_large = _validate_user_text(payload_text, meta)
@@ -3045,7 +3052,9 @@ async def _dry_run_impl(
     )
     if head is not None and scope != "branch":
         return _result(
-            _invalid_head_error(meta, f"head is only valid for scope=branch, not '{scope}'.")
+            _invalid_head_error(
+                meta, f"head is only valid for scope=branch, not '{scope}'.", head=head
+            )
         )
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:

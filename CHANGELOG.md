@@ -27,6 +27,11 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
   `ErrorDetails` promises `message` need not be *parsed*; it never promised
   `message` is value-free.
 
+  The five call sites that reject `head` for its *scope* now name it too. Those
+  messages name the scope, not the head ("head is only valid for scope=branch,
+  not 'working_tree'"), and `meta.head` is unset for every non-branch scope, so
+  the rejected ref had appeared nowhere in the response at all.
+
   `InvalidPathsError` now carries the offending `entry` as an attribute.
   `server.py` previously recovered it only via `str(exc)`, so populating
   `details.value` from the message would have meant parsing the prose in the very

@@ -1037,6 +1037,48 @@ async def test_invalid_ref_carries_the_ref_in_details(
     assert data["error"]["details"]["value"] == expected
 
 
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("claude_review_changes", {}),
+        ("claude_review_changes_async", {}),
+        ("claude_adversarial_review", {"target": "review plan"}),
+        ("claude_adversarial_review_async", {"target": "review plan"}),
+        ("claude_dry_run", {}),
+    ],
+)
+async def test_head_rejected_for_scope_still_names_the_head(
+    tool, args, fake_claude, monkeypatch, git_repo, tmp_path
+):
+    """A head rejected for its SCOPE must still say which head (#165 review).
+
+    These messages name the scope, not the head -- "head is only valid for
+    scope=branch, not 'working_tree'" -- and `meta.head` is None here, because
+    `branch_range` leaves it unset for every non-branch scope. So without
+    details.value the rejected ref appears NOWHERE in the response, on the one
+    code whose catalog entry now advertises `value`.
+    """
+    monkeypatch.setenv("CLAUDE_IN_CODEX_STATE_DIR", str(tmp_path / "state"))
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            tool,
+            {
+                **args,
+                "scope": "working_tree",
+                "head": "feature-xyz",
+                "workspace_root": str(git_repo),
+            },
+            raise_on_error=False,
+        )
+    data = structured(result)
+    assert data["error"]["code"] == "invalid_head"
+    assert data["error"]["details"]["field"] == "head"
+    assert data["error"]["details"]["value"] == "feature-xyz"
+    # The premise the fix does NOT rest on: meta.head is unset for non-branch
+    # scope, so a fallback through it would have populated nothing.
+    assert data["meta"].get("head") is None
+
+
 async def test_invalid_workspace_root_carries_the_path_in_details(fake_claude):
     """The fourth code in the schema-48 set."""
     async with Client(mcp) as client:
