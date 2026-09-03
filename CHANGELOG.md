@@ -7,6 +7,44 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+- **`*_async` starters now return an explicit `outcome` discriminator (#80).**
+  A successful launch had three shapes -- a `JobStarted` handle, a `JobStatus`
+  for an idempotency-key replay, and, on an empty diff, a `SuccessResult` with no
+  job at all -- and nothing on the wire said which one you had. A caller told
+  them apart by guessing from which fields happened to be present, so a perfectly
+  good no-spend result read like a malformed launch. The empty-diff branch also
+  reported `tool: "claude_review_changes"` for a call made against
+  `claude_review_changes_async`, so the envelope disagreed with the call that
+  produced it.
+
+  Every ok:true response from `claude_review_changes_async`,
+  `claude_consult_async`, and `claude_adversarial_review_async` now carries
+  `outcome`: `started`, `existing_job`, or `no_changes`. All three branches also
+  carry `tool` (the `_async` surface invoked) alongside `kind` (the underlying
+  tool whose envelope `claude_job_result` returns, and on `no_changes` the job
+  that was *not* started). `outcome` is declared without a default on purpose: a
+  defaulted pydantic `Literal` is omitted from the JSON Schema `required` array,
+  which would have advertised the discriminator as optional and left a generic
+  client back on field-presence inference. A schema test pins that.
+
+  `no_changes` is advertised only by the two diff-bearing starters --
+  `claude_consult_async` has no diff to find empty and can never produce it. The
+  empty-diff shortcut itself is unchanged: it still spends nothing, still returns
+  `pass`/`high` for a change review and `unknown`/`low` for an adversarial one
+  (an absent diff does not establish that a target passes review), and a key that
+  already holds a running job still reports `idempotency_conflict` rather than a
+  no-changes all-clear. `claude_job_status` still returns a bare `JobStatus`:
+  `outcome` answers what a *launch* did, which is not a question a poll asks.
+
+  The routing for all three values is published once in
+  `claude_capabilities.async_lifecycle` (`start_outcome_field`,
+  `start_outcomes`, `start_outcome_routing`) rather than repeated in each
+  starter's description -- including the trap that an `existing_job` replay may
+  already be terminal, so its `status` and `result_available` must be read before
+  polling. Fingerprint `claude-in-codex/0.1/schema-47`.
+
+  Design reviewed by Codex, which caught the defaulted-`Literal` bug above.
+
 - **The live tests can now fail on structured-output drift (#159).** The three
   live `claude_consult` roundtrips each asked Claude to affirm a stated
   conclusion ("reply that 2+2 equals 4 and give verdict pass"), then accepted

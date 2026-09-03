@@ -22,7 +22,7 @@ from claude_in_codex.config import MAX_SYSTEM_PROMPT_APPEND_BYTES
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-46"
+FINGERPRINT = "claude-in-codex/0.1/schema-47"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -57,6 +57,19 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 # Lifecycle states for a background job. Terminal: done|failed|cancelled|timeout.
 # (TTL-expired records are deleted and reported as job_not_found, not a state.)
 JobState = Literal["running", "done", "failed", "cancelled", "timeout"]
+# What a successful *_async START did, as a value rather than a shape a caller has
+# to infer from which fields happen to be present (#80). `started` launched a new
+# paid job; `existing_job` replayed the one an idempotency_key already holds;
+# `no_changes` found an empty diff and returned a free result without launching.
+AsyncStartOutcome = Literal["started", "existing_job", "no_changes"]
+# The *_async starters, as a closed set. `tool` is typed against it rather than
+# left a bare str so the schema itself refuses the bug #80 reports: an envelope
+# that names the SYNC tool for a call the caller made against the _async one.
+AsyncStartTool = Literal[
+    "claude_review_changes_async",
+    "claude_consult_async",
+    "claude_adversarial_review_async",
+]
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 JobId = Annotated[str, Field(pattern=JOB_ID_PATTERN)]
 ModelKind = Literal["alias", "full"]
@@ -660,6 +673,15 @@ class AsyncLifecycle(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     start_tools: list[str]
+    # The discriminator on every ok:true response from a start_tool, and what each
+    # of its values means for what the caller should do next (#80). Published here
+    # so the three starters do not each pay to advertise the routing prose.
+    start_outcome_field: str
+    # Typed against the union the starters actually advertise, so the published
+    # list cannot drift from the discriminator it documents. Costs nothing to
+    # advertise: AsyncLifecycle is substubbed for discovery (_CAPABILITIES_SUBSTUBS).
+    start_outcomes: list[AsyncStartOutcome]
+    start_outcome_routing: list[str]
     status_tool: str
     result_tool: str
     consume_tool: str
@@ -741,10 +763,18 @@ class CapabilitiesResult(BaseModel):
 
 
 class JobStarted(BaseModel):
-    """Returned by the *_async tools: a handle to poll, not a result."""
+    """Returned by the *_async tools when a new paid job was launched."""
 
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
+    # The invoked surface and the underlying job kind are DIFFERENT tools and are
+    # reported separately (#80): `tool` is the *_async starter the caller called,
+    # `kind` is the tool whose envelope claude_job_result will return.
+    tool: AsyncStartTool
+    # No default: a defaulted Literal is omitted from the JSON Schema `required`
+    # array, which would leave the advertised union accepting an outcome-less
+    # envelope and put the caller straight back to field-presence inference.
+    outcome: Literal["started"]
     job_id: str
     kind: str  # the tool the job runs, e.g. claude_review_changes
     status: JobState = "running"
@@ -775,6 +805,44 @@ class JobStatus(BaseModel):
     cost_usd: float | None = None  # populated for terminal jobs that spent
     detail: str | None = None  # short human hint (e.g. failure reason)
     fingerprint: str = FINGERPRINT
+
+
+# Structurally the JobStatus the caller would have polled, plus the two fields that
+# make the async-start union self-describing (#80). claude_job_status keeps
+# returning a bare JobStatus: `outcome` answers "what did this LAUNCH do", which is
+# not a question a poll asks. Docstrings on these models are one line each because
+# pydantic copies them into the advertised schema, where every client pays for them
+# (tests/test_discovery_cost.py) -- the reasoning lives in comments like this one.
+class AsyncExistingJob(JobStatus):
+    """An *_async start that replayed the job its idempotency_key already held."""
+
+    model_config = ConfigDict(extra="forbid")
+    tool: AsyncStartTool  # the *_async surface the caller invoked
+    outcome: Literal["existing_job"]  # required and undefaulted -- see JobStarted
+
+
+# No job was started and nothing was spent, so this is a result, not a handle. It
+# subclasses SuccessResult so the answer keeps a result's shape -- verdict, summary,
+# findings -- because that is what it is: a complete, free review of an empty diff.
+# The inheritance is reuse, NOT wire compatibility: SuccessResult forbids extra
+# fields, so a strict validator for that model REJECTS this envelope over `outcome`
+# and `kind`. This is its own advertised branch of the async-start union and must be
+# handled as one.
+#
+# `outcome` is what makes it distinguishable from a launch without inspecting field
+# presence, and `kind` names the job that was NOT started, so `tool` can name the
+# *_async surface the caller actually invoked (#80).
+class AsyncNoChangesResult(SuccessResult):
+    """A diff-bearing *_async start whose empty diff was answered without spending."""
+
+    model_config = ConfigDict(extra="forbid")
+    # Narrowed to the two diff-bearing starters: claude_consult_async has no diff
+    # to find empty and so can never produce this branch.
+    tool: Literal["claude_review_changes_async", "claude_adversarial_review_async"]
+    outcome: Literal["no_changes"]  # required and undefaulted -- see JobStarted
+    # The job kind that would have run had the diff been non-empty. Present so the
+    # (tool, kind) pair means the same thing on all three branches of the union.
+    kind: str
 
 
 class DryRunResult(BaseModel):
@@ -1088,15 +1156,17 @@ RESULT_SCHEMA = _slim(_object_union_schema(TypeAdapter(SuccessResult)))
 STATUS_SCHEMA = _slim(StatusResult.model_json_schema())
 CAPABILITIES_SCHEMA = _slim(CapabilitiesResult.model_json_schema())
 # A failed *_async launch returns the error envelope; an idempotency_key match
-# returns the existing job's JobStatus instead of a new JobStarted. Advertised by
-# a starter that has no diff to find empty, so it can never answer with a result.
-JOB_START_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStarted | JobStatus)))
-# The same, plus the SuccessResult an empty diff returns without starting a job.
-# Only the diff-bearing starters advertise it: carrying the result branch on a
+# returns the existing job instead of a new one. Every ok:true branch carries an
+# `outcome` literal, so the caller branches on a VALUE rather than on which fields
+# are present (#80). Advertised by a starter that has no diff to find empty, so it
+# can never answer with a result — its reachable outcomes are started|existing_job.
+JOB_START_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStarted | AsyncExistingJob)))
+# The same, plus the no_changes result an empty diff returns without starting a
+# job. Only the diff-bearing starters advertise it: carrying the result branch on a
 # starter that cannot produce one costs ~3KB of discovery and lies about the
 # shapes the caller must handle.
 JOB_STARTED_SCHEMA = _slim(
-    _object_union_schema(TypeAdapter(JobStarted | JobStatus | SuccessResult))
+    _object_union_schema(TypeAdapter(JobStarted | AsyncExistingJob | AsyncNoChangesResult))
 )
 JOB_STATUS_SCHEMA = _slim(_object_union_schema(TypeAdapter(JobStatus)))
 # Dry-run and job-list can fail (bad scope/base/workspace), so advertise the union.

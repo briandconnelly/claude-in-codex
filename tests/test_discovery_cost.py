@@ -118,14 +118,40 @@ from claude_in_codex.server import mcp
 # to buy 900 bytes would trade a structural guarantee for a comment. Raised by
 # the smallest step that restores the ~2% this file asks for: 76,000 leaves
 # 1,899 bytes / 2.5%.
-WIRE_BUDGET_BYTES = 76_000
+#
+# Raised from 76_000 to 77_200 for the async-start `outcome` discriminator (#80):
+# measured 75,646, up 1,545 bytes / +2.1% from the 74,101 above, which left only
+# 0.5% headroom. The cost is three success branches that each now carry a
+# required `outcome` const and a `tool` reference, on three starters -- and it is
+# the point of the change, not incidental to it: the alternative the issue
+# describes is a caller inferring which of three shapes it got from which fields
+# happen to be present.
+#
+# Slimming was looked for first, and one round of it is why the number above is
+# not 77,907, which is what the change first measured. The new models' docstrings
+# were cut to one line each and their reasoning moved into comments: pydantic
+# copies a model docstring into the advertised schema, so prose that reads as an
+# internal note is in fact billed to every client on every tools/list. That gave
+# back ~2,260 bytes.
+#
+# One further attempt did not pay and was reverted: making AsyncStartTool a
+# TypeAliasType so its three-name enum became one $def the branches $ref, rather
+# than an inline enum per branch. It measured byte-for-byte identical (the $def
+# costs about what the saved inlines return) and does not compile on Python 3.11,
+# which this package still supports.
+#
+# What remains is not slimmable here: the dominant repeated cost is still the Meta
+# stub, which #143 deliberately spelled out, and the per-branch cost being paid is
+# a required discriminator whose whole value is being required. 77,200 leaves
+# 1,554 bytes / 2.0%.
+WIRE_BUDGET_BYTES = 77_200
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and moves in step with WIRE_BUDGET_BYTES (ceil(76,000/4)).
-TOKEN_PROXY_BUDGET = 19_000  # see WIRE_BUDGET_BYTES note
+# against, and moves in step with WIRE_BUDGET_BYTES (ceil(77,200/4)).
+TOKEN_PROXY_BUDGET = 19_300  # see WIRE_BUDGET_BYTES note
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -153,7 +179,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (19,000 == 76,000/4) and the proxy is
+    The budgets are currently proportional (19,300 == 77,200/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""
