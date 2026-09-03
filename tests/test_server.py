@@ -4034,20 +4034,35 @@ async def test_an_existing_job_replay_can_already_be_terminal(monkeypatch, git_r
     async with Client(mcp) as client:
         started = structured(await client.call_tool("claude_review_changes_async", call))
         assert started["outcome"] == "started"
-        deadline = _time.time() + 5
-        while _time.time() < deadline:
+        deadline = _time.monotonic() + 5
+        st = {"status": "running"}
+        while _time.monotonic() < deadline:
             st = structured(
                 await client.call_tool(
                     "claude_job_status", {"job_id": started["job_id"], "workspace_root": ws}
                 )
             )
-            if st["status"] == "done":
+            if st["status"] != "running":
                 break
             await anyio.sleep(0.05)
+        # Assert the FIXTURE finished before asserting anything about the replay.
+        # Folding the two together is what makes a slow runner or a broken canned
+        # envelope report itself as an API-contract regression: the job simply
+        # never left `running`, which says nothing about what a replay returns.
+        assert st["status"] == "done", (
+            f"fixture job did not complete (status={st['status']}); this is a test-setup "
+            "failure, not a statement about the replay contract"
+        )
         replay = structured(await client.call_tool("claude_review_changes_async", call))
 
     assert replay["outcome"] == "existing_job"
-    assert replay["status"] == "done", "the premise of the published warning no longer holds"
+    # The terminal record must be the keyed job itself, not some other one.
+    assert replay["job_id"] == started["job_id"]
+    assert replay["status"] == "done", (
+        "a keyed retry after completion no longer replays a terminal record, so "
+        "claude_capabilities.async_lifecycle's 'MAY ALREADY BE TERMINAL' warning "
+        "needs revisiting"
+    )
     assert replay["result_available"] is True
 
 
