@@ -167,7 +167,10 @@ class ContextResult:
 @dataclass(frozen=True)
 class DiffOptions:
     scope: str
-    base: str
+    # None on any scope but branch, which is the only one that compares against a
+    # base. The server refuses a base supplied elsewhere (#177), so None here
+    # means "this scope has no base", not "the caller omitted one".
+    base: str | None
     paths: list[str] | None = None
     head: str = "HEAD"
 
@@ -330,8 +333,11 @@ def _diff_args(opts: DiffOptions) -> list[str]:
         args = [*common, "--cached"]
     elif opts.scope == "branch":
         base = opts.base
-        if not _valid_ref(base):
-            raise InvalidBaseError(f"invalid base ref: {bounded_repr(base)}")
+        # None is unreachable from the server, which resolves the branch default
+        # before calling, but it is expressible in the type -- and a None that
+        # slipped through must be a refusal, never a diff against something else.
+        if base is None or not _valid_ref(base):
+            raise InvalidBaseError(f"invalid base ref: {bounded_repr(base or '')}")
         head = opts.head
         if not _valid_ref(head):
             raise InvalidHeadError(f"invalid head ref: {bounded_repr(head)}")
@@ -582,7 +588,10 @@ def _path_match_counts(cwd: str, opts: DiffOptions) -> list[int] | None:
 def gather_context(
     cwd: str,
     scope: str,
-    base: str,
+    # Optional because only scope=branch has a base at all; the server resolves
+    # the `main` default before calling, so a branch scope always arrives with a
+    # concrete ref and every other scope arrives with None (#177).
+    base: str | None,
     paths: list[str] | None = None,
     head: str | None = None,
     measure_paths: bool = True,
@@ -597,8 +606,13 @@ def gather_context(
     opts = DiffOptions(scope=scope, base=base, paths=normalize_paths(paths), head=effective_head)
     diff_args = _diff_args(opts)  # raises InvalidScopeError/InvalidBaseError/InvalidHeadError
     if scope == "branch":
-        if not _ref_exists(cwd, base):
-            raise InvalidBaseError(f"base ref does not resolve to a commit: {bounded_repr(base)}")
+        # _diff_args above already refused a None or malformed base; naming it
+        # again narrows the type rather than asserting a fact ty cannot see.
+        branch_base = base or ""
+        if not _ref_exists(cwd, branch_base):
+            raise InvalidBaseError(
+                f"base ref does not resolve to a commit: {bounded_repr(branch_base)}"
+            )
         if not _ref_exists(cwd, effective_head):
             raise InvalidHeadError(
                 f"head ref does not resolve to a commit: {bounded_repr(effective_head)}"

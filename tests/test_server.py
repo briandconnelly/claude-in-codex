@@ -7329,3 +7329,20 @@ async def test_no_emitted_call_tool_action_omits_its_tool():
     # Emitter 2: the job-state errors. Kept alongside so a new terminal state
     # cannot introduce a bare call_tool without failing here.
     assert _STATE_TO_ERROR, "no job states found — the loop above would be vacuous"
+
+
+async def test_the_invalid_base_catalog_covers_the_wrong_scope_condition():
+    """The catalog is what an agent consults to diagnose a code.
+
+    #177 gave invalid_base a third condition — base supplied outside
+    scope=branch — while the published condition still described only an
+    unresolvable or oversized ref. An agent reading the catalog would conclude
+    its REF was wrong and retry with a different one on the same wrong scope,
+    which fails identically. Raised by two independent reviews of this change."""
+    catalog = {row["code"]: row for row in _capabilities_payload()["error_catalog"]}
+
+    condition = catalog["invalid_base"]["condition"]
+    assert "scope" in condition, condition
+    # The other two conditions must survive; this is an addition, not a swap.
+    assert "resolvable" in condition
+    assert "size cap" in condition

@@ -797,8 +797,14 @@ def _branch_base(base: str | None) -> str:
 
     The default therefore resolves HERE, after scope validation, rather than in
     the signature. Only the branch path reaches this; every other scope has
-    already refused a non-null base."""
-    return base or "main"
+    already refused a non-null base.
+
+    `is None`, not `or`: an explicitly supplied empty string is a value the
+    caller sent, and `base or "main"` would silently review against `main`
+    instead -- recreating, inside the fix, the exact silent-wrong-comparison
+    class the fix exists to remove. An empty ref is invalid, so it must reach
+    git and be refused as invalid_base."""
+    return "main" if base is None else base
 
 
 def _base_scope_error(meta: Meta, scope: str | None, base: str | None) -> dict:
@@ -1924,6 +1930,13 @@ async def claude_review_changes(
     )
     if err:
         return _result(err)
+    # Resolve the branch default BEFORE meta is built, so the envelope, the
+    # prompt, and any stored job record all name the ref the diff was actually
+    # gathered against. Resolving it only at the gather call left meta
+    # reporting diff_range "None...HEAD" for an omitted base while the diff
+    # ran against main -- meta misreporting the run, which is the defect this
+    # whole change is about.
+    base = _branch_base(base) if scope == "branch" else base
     meta = _meta(
         cwd,
         r.config_mode,
@@ -1967,9 +1980,7 @@ async def claude_review_changes(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(
-                cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
-            )
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
         return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
@@ -2136,6 +2147,13 @@ async def claude_adversarial_review(
         return _result(err)
     payload_text = {"target": target, "evidence": evidence}
     payload: dict[str, object] = dict(payload_text)
+    # Resolve the branch default BEFORE meta is built, so the envelope, the
+    # prompt, and any stored job record all name the ref the diff was actually
+    # gathered against. Resolving it only at the gather call left meta
+    # reporting diff_range "None...HEAD" for an omitted base while the diff
+    # ran against main -- meta misreporting the run, which is the defect this
+    # whole change is about.
+    base = _branch_base(base) if scope == "branch" else base
     meta = _meta(
         cwd,
         r.config_mode,
@@ -2204,7 +2222,7 @@ async def claude_adversarial_review(
         try:
             ctx_data = await run_sync(
                 lambda: gather_context(
-                    cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
+                    cwd, scope=scope, base=base, paths=effective_paths, head=head
                 )
             )
         except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
@@ -2659,6 +2677,13 @@ async def claude_review_changes_async(
     # A background job is bounded by its wall-clock deadline, not the synchronous
     # timeout_seconds; report that everywhere so meta stays consistent with the job.
     job_timeout = jobs.max_seconds()
+    # Resolve the branch default BEFORE meta is built, so the envelope, the
+    # prompt, and any stored job record all name the ref the diff was actually
+    # gathered against. Resolving it only at the gather call left meta
+    # reporting diff_range "None...HEAD" for an omitted base while the diff
+    # ran against main -- meta misreporting the run, which is the defect this
+    # whole change is about.
+    base = _branch_base(base) if scope == "branch" else base
     meta = _meta(
         cwd,
         r.config_mode,
@@ -2708,9 +2733,7 @@ async def claude_review_changes_async(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(
-                cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
-            )
+            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
         return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
@@ -3062,6 +3085,11 @@ async def claude_adversarial_review_async(
     payload_text = {"target": target, "evidence": evidence}
     payload: dict[str, object] = dict(payload_text)
 
+    # Same resolution as the other four handlers, before the closure captures it:
+    # meta, the prompt, and the stored job record must all name the ref the diff
+    # was gathered against.
+    base = _branch_base(base) if scope == "branch" else base
+
     def build_meta(**overrides) -> Meta:
         return _meta(
             cwd,
@@ -3118,7 +3146,7 @@ async def claude_adversarial_review_async(
         try:
             ctx_data = await run_sync(
                 lambda: gather_context(
-                    cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
+                    cwd, scope=scope, base=base, paths=effective_paths, head=head
                 )
             )
         except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
@@ -3380,6 +3408,13 @@ async def _dry_run_impl(
     if cm_err:
         return _result(cm_err)
     assert dry_config_mode is not None
+    # Resolve the branch default BEFORE meta is built, so the envelope, the
+    # prompt, and any stored job record all name the ref the diff was actually
+    # gathered against. Resolving it only at the gather call left meta
+    # reporting diff_range "None...HEAD" for an omitted base while the diff
+    # ran against main -- meta misreporting the run, which is the defect this
+    # whole change is about.
+    base = _branch_base(base) if scope == "branch" else base
     meta = _meta(
         cwd,
         dry_config_mode,
@@ -3416,7 +3451,7 @@ async def _dry_run_impl(
             lambda: gather_context(
                 cwd,
                 scope=scope,
-                base=_branch_base(base),
+                base=base,
                 paths=effective_paths,
                 head=head,
             )
@@ -3925,7 +3960,9 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
     ),
     (
         "invalid_base",
-        "base is not a locally resolvable git ref, or is over the size cap.",
+        "base is not a locally resolvable git ref, is over the size cap, or was "
+        "supplied on a scope other than branch (which ignores it, so it is refused "
+        "rather than run).",
         False,
         ["field", "value", "reason", "limit_bytes", "actual_bytes"],
     ),

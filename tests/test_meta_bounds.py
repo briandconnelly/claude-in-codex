@@ -326,12 +326,18 @@ async def test_a_ref_within_bounds_is_still_echoed_on_the_scope_that_uses_it(
     assert meta.get("base") == "HEAD"
 
 
-@pytest.mark.parametrize(
-    "tool", ["claude_review_changes", "claude_adversarial_review", "claude_dry_run"]
-)
+# The full selector matrix, INCLUDING the two _async starters. The refusal happens
+# before launch/preflight, so these reach it without a `claude` binary -- and
+# without them, either async guard could be deleted with every test still green.
+@pytest.mark.parametrize("tool", _SELECTOR_TOOLS)
 @pytest.mark.parametrize("scope", ["working_tree", "staged"])
+# Both values, because "main" is the one that matters. It was the old signature
+# DEFAULT, so an implementation that rejects only a non-default base -- the fix
+# the issue originally proposed -- passes for origin/main and still silently
+# ignores an explicit base="main". Testing only origin/main would not notice.
+@pytest.mark.parametrize("base", ["origin/main", "main"])
 async def test_base_is_refused_rather_than_ignored_off_the_branch_scope(
-    fake_claude, git_repo, tool, scope
+    fake_claude, git_repo, tool, scope, base
 ):
     """#177: `base` was size-checked on every scope but VALUE-checked only on the
     branch path, so scope=working_tree + base=origin/main returned ok:true, ran a
@@ -345,7 +351,7 @@ async def test_base_is_refused_rather_than_ignored_off_the_branch_scope(
         tool,
         {
             "scope": scope,
-            "base": "origin/main",
+            "base": base,
             "workspace_root": str(git_repo),
             **_SELECTOR_TOOLS[tool],
         },
@@ -662,3 +668,40 @@ def test_a_pre_fix_record_does_not_resurrect_a_base_the_scope_ignored(tmp_path):
 
     assert rebuilt.base is None
     assert rebuilt.diff_range is None
+
+
+@pytest.mark.parametrize("tool", ["claude_review_changes", "claude_dry_run"])
+async def test_an_omitted_branch_base_is_reported_as_the_ref_actually_diffed(
+    fake_claude, git_repo, tool
+):
+    """meta must name the ref the diff was gathered against.
+
+    `base` is `str | None` so the server can tell omission from an explicit
+    value, and the `main` default resolves after scope validation. Resolving it
+    only at the gather call left the envelope reporting `diff_range:
+    "None...HEAD"` while the diff ran against `main` -- meta misreporting the
+    run, which is the defect this whole change is about, reintroduced one layer
+    down. Found in review of the first draft."""
+    data = await _call(
+        tool, {"scope": "branch", "workspace_root": str(git_repo), **_SELECTOR_TOOLS[tool]}
+    )
+    assert data["ok"] is True, data.get("error")
+    meta = data.get("meta", data)
+    assert meta.get("base") == "main"
+    assert meta.get("diff_range") == "main...HEAD"
+
+
+@pytest.mark.parametrize("tool", ["claude_review_changes", "claude_dry_run"])
+async def test_an_explicitly_empty_base_is_refused_not_defaulted(fake_claude, git_repo, tool):
+    """An empty string is a value the caller SENT, not an omission.
+
+    `base or "main"` would silently review against `main` instead -- recreating,
+    inside the fix, the exact silent-wrong-comparison class the fix exists to
+    remove. The resolution is `is None`, so an empty ref reaches git and is
+    refused."""
+    data = await _call(
+        tool,
+        {"scope": "branch", "base": "", "workspace_root": str(git_repo), **_SELECTOR_TOOLS[tool]},
+    )
+    assert data["ok"] is False, "an empty base must not silently become main"
+    assert data["error"]["code"] == "invalid_base"
