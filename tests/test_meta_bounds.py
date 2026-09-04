@@ -605,3 +605,60 @@ def test_an_ordinary_rejected_value_is_echoed_unchanged():
     from claude_in_codex.schemas import bounded_inert
 
     assert bounded_inert("-src/app.py") == "-src/app.py"
+
+
+def test_a_branch_job_record_keeps_its_base_through_the_rebuild(tmp_path):
+    """Nulling `base` off the branch scope must not cost the branch scope its base.
+
+    The #177 rule lives in `bounded_selectors`, which is also how jobs.py rebuilds
+    meta from an on-disk record. A rule applied one scope too widely there would
+    silently strip the ref from every stored branch review -- and the result it
+    describes was paid for."""
+    from claude_in_codex import jobs
+
+    record = {
+        "config": {
+            "config_mode": "inherit",
+            "access": "toolless",
+            "scope": "branch",
+            "base": "origin/main",
+            "timeout_seconds": 1800,
+            "workspace_source": "param",
+            "cwd": str(tmp_path),
+        },
+        "context_summary": None,
+    }
+
+    rebuilt = jobs._build_meta(record)
+
+    assert rebuilt.base == "origin/main"
+    assert rebuilt.diff_range == "origin/main...HEAD"
+
+
+def test_a_pre_fix_record_does_not_resurrect_a_base_the_scope_ignored(tmp_path):
+    """Records outlive the release that wrote them (TTL).
+
+    A working_tree job stored before #177 can carry the `base` the old server
+    accepted and ignored. Rebuilding it must apply today's rule, not replay the
+    old envelope -- otherwise the fix holds for live calls and lapses for exactly
+    the stored results a caller reads later, out of context, with no memory of
+    the call."""
+    from claude_in_codex import jobs
+
+    record = {
+        "config": {
+            "config_mode": "inherit",
+            "access": "toolless",
+            "scope": "working_tree",
+            "base": "origin/main",
+            "timeout_seconds": 1800,
+            "workspace_source": "param",
+            "cwd": str(tmp_path),
+        },
+        "context_summary": None,
+    }
+
+    rebuilt = jobs._build_meta(record)
+
+    assert rebuilt.base is None
+    assert rebuilt.diff_range is None
