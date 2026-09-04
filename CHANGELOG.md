@@ -7,14 +7,37 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-Fingerprint `claude-in-codex/0.1/schema-53` (was `schema-50`). The changes are
+Fingerprint `claude-in-codex/0.1/schema-54` (was `schema-50`). The changes are
 parameter and metadata descriptions, one added `claude_capabilities` field, and
-one **breaking** machine-semantic change to the `timeout` error (below).
-`meta_fields` is a new required property on `CapabilitiesResult`, and
-`CAPABILITIES_SCHEMA` is generated from that model, so the advertised
-output-schema shape does move; no value set changed.
+two **breaking** changes (the `timeout` error's machine semantics and `base`'s
+type and acceptance, both below). `meta_fields` is a new required property on
+`CapabilitiesResult`, and `CAPABILITIES_SCHEMA` is generated from that model, so
+the advertised output-schema shape does move; no value set changed.
 
 ### Fixed
+
+- `base` is no longer silently accepted, ignored, and echoed on a scope that
+  cannot use it. **Breaking.** `_selector_bounds_error` size-checked `base` on
+  every scope, but its *value* was validated only on the branch path, so
+  `scope=working_tree` with a bogus `base` returned `ok: true`, ran a
+  working-tree review that ignored the ref, and echoed `base` back at the
+  payload root. `head` was already rejected this way, so the guard existed for
+  one selector and not its sibling.
+
+  The combination is worse than either half: "review my changes against
+  origin/main" is naturally written as `scope=working_tree` + `base=origin/main`,
+  so the reachable case was a **paid** review of the wrong thing whose own
+  response confirmed the caller's wrong belief about what it had covered. A
+  non-branch scope now refuses a supplied `base` with `invalid_base`. (#177)
+
+- `base` is now `str | None` defaulting to `None`, rather than `str` defaulting
+  to `"main"`. The old default made "omitted" and "explicitly sent `main`"
+  indistinguishable, so the narrower fix — rejecting only a *non-default* base —
+  would have preserved the exact bug above for `base="main"` while appearing to
+  close it. The `main` default now resolves after scope validation. `meta.base`
+  is absent on any scope but `branch`, enforced in `bounded_selectors` so it also
+  governs the meta rebuilt from an on-disk job record. (#177)
+
 
 - The `timeout` error no longer advises an unguarded double spend. **Breaking
   for structural recovery.** A sync paid call that exceeded its deadline

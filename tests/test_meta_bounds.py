@@ -297,24 +297,86 @@ async def test_no_tool_reaches_a_success_envelope_with_an_over_cap_ref(
     # `_meta` this asserts on.
     ["claude_review_changes", "claude_adversarial_review", "claude_dry_run"],
 )
-async def test_a_ref_the_scope_ignores_is_still_echoed_when_it_fits(fake_claude, git_repo, tool):
-    """The negative above is only evidence if a normal ignored `base` survives.
+async def test_a_ref_within_bounds_is_still_echoed_on_the_scope_that_uses_it(
+    fake_claude, git_repo, tool
+):
+    """The negative above is only evidence if an ordinary in-bounds `base` survives.
 
-    A working_tree call does not use `base`, but it does echo it, and withholding
-    must stay distinguishable from that -- which requires the ordinary case to keep
-    showing the value."""
+    This used to probe a working_tree call, on the reasoning that such a call
+    "does not use `base`, but it does echo it". #177 established that the echo
+    was the defect, not the control: a paid working_tree review that ignored
+    `base` and then echoed it back was actively confirming the caller's wrong
+    belief about what had been reviewed. Such a call is now refused outright.
+
+    So the control moves to scope=branch, where `base` genuinely names the
+    comparison. That keeps the property this test exists for -- a withheld ref
+    must stay distinguishable from a present one -- without pinning the behavior
+    the fix removed."""
     data = await _call(
         tool,
         {
-            "scope": "working_tree",
-            "base": "main",
+            "scope": "branch",
+            "base": "HEAD",
             "workspace_root": str(git_repo),
             **_SELECTOR_TOOLS[tool],
         },
     )
     assert data["ok"] is True, data.get("error")
     meta = data.get("meta", data)
-    assert meta.get("base") == "main"
+    assert meta.get("base") == "HEAD"
+
+
+@pytest.mark.parametrize(
+    "tool", ["claude_review_changes", "claude_adversarial_review", "claude_dry_run"]
+)
+@pytest.mark.parametrize("scope", ["working_tree", "staged"])
+async def test_base_is_refused_rather_than_ignored_off_the_branch_scope(
+    fake_claude, git_repo, tool, scope
+):
+    """#177: `base` was size-checked on every scope but VALUE-checked only on the
+    branch path, so scope=working_tree + base=origin/main returned ok:true, ran a
+    working-tree review that ignored `base`, and echoed `base` back at the payload
+    root -- silent, paid, and self-reinforcing. `head` was already rejected the
+    same way, so the guard existed for one selector and not its sibling.
+
+    "Review my changes against origin/main" is naturally written exactly this
+    way, which is what made it reachable rather than exotic."""
+    data = await _call(
+        tool,
+        {
+            "scope": scope,
+            "base": "origin/main",
+            "workspace_root": str(git_repo),
+            **_SELECTOR_TOOLS[tool],
+        },
+    )
+    assert data["ok"] is False, "an ignored base must not reach a paid run"
+    assert data["error"]["code"] == "invalid_base"
+    # The refusal has to say WHY, or an agent reads it as a bad ref and retries
+    # with a different one on the same wrong scope.
+    assert "scope=branch" in data["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "tool", ["claude_review_changes", "claude_adversarial_review", "claude_dry_run"]
+)
+@pytest.mark.parametrize("scope", ["working_tree", "staged"])
+async def test_omitted_base_still_works_off_the_branch_scope(fake_claude, git_repo, tool, scope):
+    """The refusal must key on "the caller sent one", not on "it differs from the
+    default".
+
+    `base` defaulted to the STRING "main", so a rule phrased as "reject a
+    non-default base" would have let an explicit base="main" through on a
+    working_tree call -- preserving the exact ignored-argument bug for that one
+    value, and still echoing it into meta. The signature is `str | None = None`
+    for that reason, and this pins that omission is still the ordinary case."""
+    data = await _call(
+        tool,
+        {"scope": scope, "workspace_root": str(git_repo), **_SELECTOR_TOOLS[tool]},
+    )
+    assert data["ok"] is True, data.get("error")
+    meta = data.get("meta", data)
+    assert meta.get("base") is None, "a scope that ignores base must not echo one"
 
 
 async def test_an_over_cap_ref_never_reaches_a_job_record(fake_claude, git_repo):
