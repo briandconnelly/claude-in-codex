@@ -37,10 +37,18 @@ def test_live_gate_prerequisites_are_present():
         "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but the `claude` CLI is not on PATH. The "
         "release gate must not pass by skipping."
     )
-    assert os.environ.get("ANTHROPIC_API_KEY"), (
-        "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but ANTHROPIC_API_KEY is unset. The live "
-        "tests would skip or fail to authenticate, and a skipped gate is a green "
-        "that verifies nothing."
+    # Authentication, not one particular credential. The first draft asserted
+    # ANTHROPIC_API_KEY and failed on a developer machine where the live tests
+    # had just PASSED under subscription auth -- ANTHROPIC_API_KEY is only
+    # required for config_mode=bare. Probing auth covers the CI key and the
+    # subscription equally, which is what the gate actually depends on.
+    from claude_in_codex.claude import auth_status
+
+    logged_in, detail = auth_status(config_mode=None)
+    assert logged_in, (
+        "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but `claude` is not authenticated "
+        f"({detail}). The live tests would fail to reach Anthropic, and a gate "
+        "that cannot reach Anthropic verifies nothing."
     )
 
 
