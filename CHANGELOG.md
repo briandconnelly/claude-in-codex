@@ -8,8 +8,10 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 ## Unreleased
 
 Fingerprint `claude-in-codex/0.1/schema-52` (was `schema-50`). The changes are
-parameter and metadata descriptions plus one added `claude_capabilities` field,
-which the contract digest covers; no schema shape, value, or error code moved.
+parameter and metadata descriptions plus one added `claude_capabilities` field.
+`meta_fields` is a new required property on `CapabilitiesResult`, and
+`CAPABILITIES_SCHEMA` is generated from that model, so the advertised
+output-schema shape does move; no error code or value set changed.
 
 ### Changed
 
@@ -38,8 +40,10 @@ which the contract digest covers; no schema shape, value, or error code moved.
   an omission there makes a real parameter undiscoverable at exactly the
   altitude the field exists to serve. `detail` now rides the shared execution
   knob list, and a test checks every tool's entry against its own advertised
-  input schema in both directions — unlisted-but-real and listed-but-phantom —
-  so the list cannot drift from the schemas again. (#172)
+  input schema: `detail` parity in both directions, plus detection of any listed
+  parameter that does not exist. It is deliberately not a check that every
+  accepted parameter is listed — `key_optional_params` is a curated subset, not
+  the schema — so another parameter can still be omitted without failing. (#172)
 
 - `focus` on `claude_review_changes` and `claude_review_changes_async` now
   states in its own description the two construction-side rules that
