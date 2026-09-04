@@ -7135,13 +7135,31 @@ async def test_timeout_action_carries_the_callable_async_twin_call():
 
     token = _CALL_ARGUMENTS.set({"prompt": "hi", "timeout_seconds": 30, "effort": "xhigh"})
     try:
-        action = _timeout_action("claude_consult")
+        action = _timeout_action("claude_consult", "req-1")
     finally:
         _CALL_ARGUMENTS.reset(token)
 
     assert action.next_step == "call_tool"
     assert action.tool == "claude_consult_async"
-    assert action.arguments == {"prompt": "hi", "effort": "xhigh"}
+    # The launch the action proposes must obey the rule this server publishes in
+    # CAPABILITY_SUMMARY and the shipped skill: pass idempotency_key on every
+    # _async launch. An action that is literally callable AND breaks the
+    # contract's own rule is worse than one that is merely incomplete. The key
+    # does not recover the lost sync spend -- nothing can -- it dedups retries of
+    # this NEW paid launch, which can itself lose its reply.
+    assert action.arguments == {
+        "prompt": "hi",
+        "effort": "xhigh",
+        "idempotency_key": "timeout-repair-req-1",
+    }
+    # Stable, so replaying the same repair twice is a replay rather than a
+    # second job.
+    token2 = _CALL_ARGUMENTS.set({"prompt": "hi", "timeout_seconds": 30, "effort": "xhigh"})
+    try:
+        again = _timeout_action("claude_consult", "req-1")
+    finally:
+        _CALL_ARGUMENTS.reset(token2)
+    assert again.arguments == action.arguments
 
     # Oversized: the tool is still named, the arguments are dropped.
     token = _CALL_ARGUMENTS.set({"prompt": "x" * (REPAIR_ARGS_MAX_BYTES + 1)})
