@@ -168,12 +168,22 @@ def fake_claude(monkeypatch):
 #
 # So under CLAUDE_IN_CODEX_REQUIRE_LIVE the session must ALSO prove a floor of
 # integration tests actually passed.
+# Counts CONTRACT tests only. test_live_gate_prerequisites_are_present carries the
+# module-level integration marker but exercises no Claude envelope, so counting it
+# would let one real contract test be renamed, removed or skipped while the floor
+# still reported four passes -- the prerequisite plus three. That is precisely the
+# regression the floor exists to catch, so the floor would have been self-defeating.
+# Raised by review of the first draft.
 _LIVE_GATE_MIN_PASSED = 4
+_LIVE_GATE_EXCLUDED = {"test_live_gate_prerequisites_are_present"}
 
 
 def pytest_runtest_logreport(report):
-    if report.when == "call" and report.passed and "integration" in report.keywords:
-        _LIVE_GATE_PASSED.append(report.nodeid)
+    if report.when != "call" or not report.passed or "integration" not in report.keywords:
+        return
+    if any(name in report.nodeid for name in _LIVE_GATE_EXCLUDED):
+        return
+    _LIVE_GATE_PASSED.append(report.nodeid)
 
 
 _LIVE_GATE_PASSED: list[str] = []
@@ -181,6 +191,20 @@ _LIVE_GATE_PASSED: list[str] = []
 
 def pytest_sessionfinish(session, exitstatus):
     if os.environ.get("CLAUDE_IN_CODEX_REQUIRE_LIVE") != "1":
+        return
+    # The counter is process-local. Under pytest-xdist each worker would count its
+    # own share and every one of them would fall short, so the gate would fail
+    # closed rather than pass wrongly -- the safe direction, but a confusing
+    # failure. Refuse the combination explicitly instead of leaving it to be
+    # discovered during a release.
+    if getattr(session.config, "workerinput", None) is not None or session.config.getoption(
+        "numprocesses", default=None
+    ):
+        session.exitstatus = 1
+        print(
+            "\nLIVE GATE FAILED: the release gate does not support pytest-xdist; "
+            "its pass counter is process-local. Run it without -n."
+        )
         return
     passed = len(_LIVE_GATE_PASSED)
     if passed < _LIVE_GATE_MIN_PASSED:

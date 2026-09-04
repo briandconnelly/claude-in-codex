@@ -33,9 +33,13 @@ the advertised output-schema shape does move; no value set changed.
   `claude` is absent, so a runner with no CLI and no key would have exited 0 and
   reported the contract verified. `CLAUDE_IN_CODEX_REQUIRE_LIVE=1` makes it
   fail closed — a missing CLI or `ANTHROPIC_API_KEY` fails outright, and the
-  session refuses to pass unless a floor of integration tests actually ran, so
-  neither an all-skipped run nor a zero-collected one can report success. Both
-  the release gate and the manual dispatch job set it. (#170)
+  session refuses to pass unless a floor of **contract** tests actually ran, so
+  neither an all-skipped run nor a zero-collected one can report success. The
+  prerequisite check is excluded from that floor — counting it would let one real
+  contract test be removed while the count still reached four, which is the
+  regression the floor exists to catch. Both the release gate and the manual
+  dispatch job set it, and the combination with `pytest-xdist` is refused rather
+  than left to undercount. (#170)
 
 - `CAPABILITY_SUMMARY` now separates rules from context, and no longer omits two
   safety rules. It is doubly load-bearing — FastMCP's `instructions=` and the
