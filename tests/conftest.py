@@ -174,8 +174,22 @@ def fake_claude(monkeypatch):
 # still reported four passes -- the prerequisite plus three. That is precisely the
 # regression the floor exists to catch, so the floor would have been self-defeating.
 # Raised by review of the first draft.
-_LIVE_GATE_MIN_PASSED = 4
-_LIVE_GATE_EXCLUDED = {"test_live_gate_prerequisites_are_present"}
+# ENVELOPE tests only -- the ones that exercise the upstream `claude -p` result
+# contract this gate exists to verify. Two integration tests are excluded for the
+# same reason, found one review round apart:
+#
+#   test_live_gate_prerequisites_are_present  checks credentials, not the envelope
+#   test_status_live                          checks CLI readiness, not the envelope
+#
+# Counting either lets a real envelope test be renamed, removed or skipped while
+# the count still clears the floor -- precisely the regression the floor exists to
+# catch. Three envelope tests remain, so the floor is three and removing any one
+# of them fails.
+_LIVE_GATE_MIN_PASSED = 3
+_LIVE_GATE_EXCLUDED = {
+    "test_live_gate_prerequisites_are_present",
+    "test_status_live",
+}
 
 
 def pytest_runtest_logreport(report):

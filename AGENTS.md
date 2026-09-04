@@ -51,8 +51,14 @@ uv run pytest tests/test_jobs.py --no-cov
   `CLAUDE_IN_CODEX_REQUIRE_LIVE=1` whenever you run it as a gate rather than as
   a spot check. Without that flag the suite SKIPS when `claude` is absent and
   exits 0, which reports the contract verified when it was never exercised.
-  Under the flag, a missing CLI or `ANTHROPIC_API_KEY` fails, and the session
-  refuses to pass unless a floor of integration tests actually ran.
+  Under the flag, a missing CLI or an unauthenticated one fails, and the session
+  refuses to pass unless a floor of envelope tests actually ran.
+- The gate needs a Claude Code **login session**, not an API key. Its contract
+  tests run under `config_mode=inherit` and `config_mode=safe`, and those modes
+  deliberately strip `ANTHROPIC_API_KEY` (`_LOGIN_MODES` in `claude.py`), so a
+  runner holding only that key authenticates for nothing the gate measures. The
+  prerequisite probes `config_mode=inherit` for this reason and fails early
+  saying so.
 - A plain `uv run pytest` deselects the live suite (it prints `deselected`).
   That is not a signal the contract was checked — it is the signal that it was
   not.
