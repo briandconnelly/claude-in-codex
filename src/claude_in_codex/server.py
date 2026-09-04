@@ -671,6 +671,21 @@ def _ref_too_large_details(ref: str | None) -> ErrorDetails | None:
     )
 
 
+def _twin_needs_arguments(twin: str) -> RepairAction:
+    """Name the twin without claiming the call is ready to issue.
+
+    `call_tool` means "these arguments are literally callable"; RepairAction's own
+    contract documents absent `arguments` for retry_with_changes ONLY. A tool-only
+    `call_tool` would therefore tell a structural client to launch a paid tool with
+    no required arguments, which returns invalid_arguments instead of a recovery --
+    an action that is worse than no action, because it looks automatic.
+
+    retry_with_changes with the tool named is the honest shape and the one
+    `_repair_action` already uses when it cannot reconstruct a call. Reached when
+    the arguments were not captured or exceed REPAIR_ARGS_MAX_BYTES."""
+    return RepairAction(next_step="retry_with_changes", tool=twin)
+
+
 def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction | None:
     """The recovery for a sync timeout: the same call, detached.
 
@@ -723,16 +738,16 @@ def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction | 
         return None
     original = _CALL_ARGUMENTS.get()
     if not isinstance(original, dict):
-        return RepairAction(next_step="call_tool", tool=twin)
+        return _twin_needs_arguments(twin)
     remaining = {k: v for k, v in original.items() if k != "timeout_seconds"}
     if request_id:
         remaining["idempotency_key"] = f"timeout-repair-{request_id}"
     try:
         size = len(json.dumps(remaining, default=str).encode("utf-8"))
     except (TypeError, ValueError):
-        return RepairAction(next_step="call_tool", tool=twin)
+        return _twin_needs_arguments(twin)
     if size > REPAIR_ARGS_MAX_BYTES:
-        return RepairAction(next_step="call_tool", tool=twin)
+        return _twin_needs_arguments(twin)
     return RepairAction(next_step="call_tool", tool=twin, arguments=remaining)
 
 
@@ -3873,10 +3888,13 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
     ),
     (
         "timeout",
-        "claude did not finish within timeout_seconds. The call already spent and "
-        "returned nothing; the cost is not recoverable. Re-issuing the same sync "
-        "call spends again with no dedup guard, because idempotency_key exists "
-        "only on the _async starters -- the action names the _async twin instead.",
+        "claude did not finish within timeout_seconds. Whether Anthropic charged "
+        "the call is UNKNOWN -- the deadline also covers startup and workspace "
+        "hooks, and no cost envelope survives -- so treat the charge as possible "
+        "and unrecoverable. Re-issuing the same sync call risks a second charge "
+        "with no dedup guard, because idempotency_key exists only on the _async "
+        "starters; the action names the _async twin, whose key guards that NEW "
+        "launch rather than this one.",
         False,
         [],
     ),

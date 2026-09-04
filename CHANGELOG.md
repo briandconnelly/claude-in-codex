@@ -20,9 +20,12 @@ output-schema shape does move; no value set changed.
   for structural recovery.** A sync paid call that exceeded its deadline
   returned `retryable: true` with `action.next_step: "retry_same_call"`, so an
   agent recovering the way this contract tells it to — branching on `action`
-  rather than reading prose — re-issued the identical paid call. The first call
-  had already spent and returned nothing, and `idempotency_key` exists only on
-  the three `_async` starters, so that retry had no dedup guard at all.
+  rather than reading prose — re-issued the identical paid call. Whether the
+  first call was charged is *unknown* — the deadline also covers startup and
+  workspace hooks, and no cost envelope survives — and `idempotency_key` exists
+  only on the three `_async` starters, so that retry had no dedup guard at all.
+  Possible-and-unrecoverable is all the safety argument needs; asserting a
+  definite spend would be the contract claiming something it cannot observe.
 
   It was also wrong on `retryable`'s own terms: retryable means the identical
   operation may succeed later, which is false for a deterministic scope/timeout
@@ -34,7 +37,8 @@ output-schema shape does move; no value set changed.
   action names the `_async` twin — which survives the deadline — carrying the
   original arguments minus `timeout_seconds`, bounded by
   `REPAIR_ARGS_MAX_BYTES` like every other reconstructed repair. The message
-  states plainly that the spend is not recoverable. The action carries a stable
+  states that the charge is possible and unrecoverable, and that any next attempt
+  is a new paid run. The action carries a stable
   `idempotency_key` derived from the failed call's `request_id`: it does not
   recover the lost spend — nothing can — but it deduplicates retries of the new
   async launch, which is itself a fresh paid run that can lose its reply. Without

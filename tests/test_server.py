@@ -7117,9 +7117,14 @@ async def test_sync_timeout_points_at_the_async_twin_instead_of_a_second_charge(
     assert info.code == "timeout"
     assert info.retryable is False, "an identical retry is a second charge, not a retry"
     assert info.action.next_step != "retry_same_call"
-    # The prose must say the money is gone; an agent that reads only `repair`
-    # was the other half of the failure.
-    assert "spent" in info.message.lower()
+    # The prose must flag the risk WITHOUT overclaiming. `timed_out` proves only
+    # that the subprocess exceeded its wall clock -- it can expire during startup
+    # or a workspace hook before Anthropic is reached, and no cost envelope
+    # survives to settle it. "May have been charged" is what the server can
+    # actually observe, and it is all the safety argument needs.
+    assert "may already have been charged" in info.message.lower()
+    assert "second charge" in info.message.lower()
+    assert "definitely" not in info.message.lower()
     assert "_async" in info.repair
 
 
@@ -7169,6 +7174,12 @@ async def test_timeout_action_carries_the_callable_async_twin_call():
         _CALL_ARGUMENTS.reset(token)
     assert oversized.tool == "claude_consult_async"
     assert oversized.arguments is None
+    # NOT call_tool. RepairAction documents absent `arguments` for
+    # retry_with_changes only, so a tool-only call_tool would tell a structural
+    # client to launch a paid tool with no required arguments -- invalid_arguments
+    # instead of a recovery, which is worse than no action because it looks
+    # automatic.
+    assert oversized.next_step == "retry_with_changes"
 
     # A tool with no async twin gets no twin action rather than a nonsensical one
     # — e.g. a stored timeout fetched back through claude_job_result, where the
@@ -7227,3 +7238,47 @@ async def test_concurrent_calls_do_not_see_each_others_arguments():
     await asyncio.gather(*(one(f"job-{i}") for i in range(5)))
 
     assert seen == [None] * 5, seen
+
+
+async def test_a_real_timed_out_call_emits_the_async_twin_action_end_to_end(monkeypatch, git_repo):
+    """The wiring, not the pieces.
+
+    The other #178 tests exercise `classify_failure` and `_timeout_action`
+    separately, seeding the contextvar by hand — so deleting the `action=` line in
+    the failure path, or breaking the middleware capture, would leave every one of
+    them green. That is a check that cannot fail on the thing it is for.
+
+    This drives a real MCP call whose subprocess times out and asserts on the
+    emitted envelope: the twin, the caller's own arguments carried through the
+    middleware capture, the guarding key, and retryable=false."""
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
+
+    async def timing_out(*args, **kwargs):
+        return ClaudeRun(stdout="", stderr="", exit_code=-1, timed_out=True, elapsed_ms=1)
+
+    monkeypatch.setattr(srv, "run_claude_async", timing_out)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_consult",
+            {"prompt": "why is this slow", "workspace_root": str(git_repo), "effort": "high"},
+            raise_on_error=False,
+        )
+    data = result.structured_content
+
+    assert data["ok"] is False
+    error = data["error"]
+    assert error["code"] == "timeout"
+    assert error["retryable"] is False
+
+    action = error["action"]
+    assert action["next_step"] == "call_tool"
+    assert action["tool"] == "claude_consult_async"
+    # The caller's OWN arguments, which only reach here through the middleware
+    # capture — this is the half no unit test covers.
+    assert action["arguments"]["prompt"] == "why is this slow"
+    assert action["arguments"]["effort"] == "high"
+    # Guarded, and not carrying a timeout_seconds that means nothing on a job.
+    assert action["arguments"]["idempotency_key"].startswith("timeout-repair-")
+    assert "timeout_seconds" not in action["arguments"]
