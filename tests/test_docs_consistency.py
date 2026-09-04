@@ -108,3 +108,47 @@ def test_the_live_gate_runs_fail_closed_everywhere_it_runs():
                 f"{name}: the integration run does not set CLAUDE_IN_CODEX_REQUIRE_LIVE, "
                 "so it would pass by skipping"
             )
+
+
+def test_every_integration_test_is_deliberately_counted_or_excluded():
+    """The live gate's floor is only meaningful if its membership is a RULE.
+
+    #170 shipped a floor that counted a credential check; review found it, and I
+    excluded that one name. `test_status_live` had the identical defect — CLI
+    readiness, not the upstream envelope — and a later review found that too. The
+    first fix addressed an instance where the problem was a class, and a
+    hand-maintained blocklist reproduces that indefinitely: the next non-envelope
+    test added to the file silently inflates the floor and lets a real envelope
+    test be removed without failing.
+
+    This makes membership total. Every integration test must be either counted or
+    explicitly excluded, so adding one forces a deliberate decision instead of a
+    default. It also pins the floor to the number actually counted, so the two
+    cannot drift."""
+    from tests.conftest import _LIVE_GATE_EXCLUDED, _LIVE_GATE_MIN_PASSED
+
+    source = (ROOT / "tests" / "test_integration.py").read_text()
+    names = set(re.findall(r"^(?:async )?def (test_\w+)", source, re.M))
+    assert names, "no integration tests found — the assertions below would be vacuous"
+
+    unknown = _LIVE_GATE_EXCLUDED - names
+    assert not unknown, f"excluded names that no longer exist: {unknown}"
+
+    counted = names - _LIVE_GATE_EXCLUDED
+    assert len(counted) == _LIVE_GATE_MIN_PASSED, (
+        f"the floor is {_LIVE_GATE_MIN_PASSED} but {len(counted)} tests would count "
+        f"({sorted(counted)}). A new integration test must either exercise the "
+        "upstream envelope — and raise the floor — or be added to "
+        "_LIVE_GATE_EXCLUDED. Silently counting a non-envelope test lets a real "
+        "one be removed while the floor still clears."
+    )
+
+    # Counted means it pins the envelope. The two excluded tests are excluded
+    # precisely because they do not call this helper.
+    for name in sorted(counted):
+        body = source[source.index(f"def {name}") :]
+        body = body[: body.find("\nasync def ") if "\nasync def " in body[1:] else len(body)]
+        assert "_assert_structured" in body, (
+            f"{name} counts toward the envelope floor but never calls "
+            "_assert_structured, so it does not pin the upstream result contract"
+        )
