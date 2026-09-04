@@ -169,10 +169,20 @@ from claude_in_codex.server import mcp
 #
 # The budget is RATCHETED rather than left where it was. Leaving it at 76,800
 # would bank the recovery as 6,385 bytes of permission to re-inflate, which is
-# how a budget stops being a budget. 72,000 keeps 1,585 bytes / 2.2% of working
-# headroom -- deliberately similar to what the ceiling has historically left --
-# and hands the next author the same "slim it instead" prompt this file has been
-# giving since 74,101.
+# how a budget stops being a budget. 72,000 left 1,585 bytes / 2.2% of working
+# headroom at the moment of the ratchet -- deliberately similar to what the
+# ceiling has historically left -- and hands the next author the same "slim it
+# instead" prompt this file has been giving since 74,101.
+#
+# That 1,585 is NOT the margin the release ships with, and quoting it as though
+# it were is how this note would mislead. Later changes in the same release spend
+# into it: the `base` description across five tools (#177) and the
+# idempotency_key/claude_status description rewrites (#178, #180) together cost
+# ~800 bytes. Measured at the top of the stack: 71,229, leaving 771 bytes / 1.1%.
+#
+# A headroom figure is a property of a COMMIT, not of the budget, so treat any
+# number written here as historical and measure before relying on one. The
+# assertion below is the only current statement.
 WIRE_BUDGET_BYTES = 72_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
