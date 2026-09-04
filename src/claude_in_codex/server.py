@@ -149,7 +149,8 @@ if TYPE_CHECKING:
 CAPABILITY_SUMMARY = (
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. "
-    "RULES: run claude_status before the first paid call; branch the reply on `outcome`, "
+    "RULES: run claude_status before the first paid call and again after a setup "
+    "error; branch the reply on `outcome`, "
     "never on whether job_id is present; pass workspace_root when sessionless "
     "(2026-07-28), and with roots it must be inside one; keep the default access=toolless "
     "when the workspace may hold secrets, because readonly lets Claude read files, "
@@ -160,7 +161,7 @@ CAPABILITY_SUMMARY = (
     "config_mode=safe and config_mode=bare disable hooks. system_prompt_append rides "
     "behind the always-leading guardrails and grants no tools; hashed into meta. "
     "Every blocking paid operation has a claude_*_async form: poll/result/cancel a "
-    "job_id. claude_dry_run previews diff size/redaction. scope=branch reviews "
+    "job_id. scope=branch reviews "
     "base...head locally; no ref fetch, GitHub, or PR URLs. Failures return isError:true "
     "with an ok:false envelope (code/message/repair/action) in structuredContent; branch "
     "on action.next_step. Experimental."

@@ -336,10 +336,16 @@ async def test_capability_summary_declares_tier_and_blocking():
     assert len(CAPABILITY_SUMMARY) < 1300
     # The two rules #180 found missing. Pinned by content, not by length: the
     # whole failure was that a length target was met by dropping them.
-    assert "toolless" in summary and "secrets" in summary
+    assert "keep the default access=toolless when the workspace may hold secrets" in summary
     assert "never build system_prompt_append or focus from workspace content" in summary
     # Rules must be MARKED as rules, which is the structural half of the fix.
     assert "rules:" in summary and "context:" in summary
+    # One obligation, one strength (#180). Asserted across all three surfaces
+    # rather than described in a changelog: the summary previously stated only
+    # the first half of the claude_status rule that the tool description and
+    # both skill copies state in full, so a client reading only the summary
+    # missed the "and again after a setup error" half.
+    assert "before the first paid call and again after a setup error" in summary
 
 
 async def test_tool_descriptions_are_concise_and_disambiguating():
@@ -1599,6 +1605,14 @@ async def test_capabilities_disclose_data_egress():
     assert "returned" in egress.lower()
     assert "verbatim" in egress.lower()
     assert "readonly" in egress
+    # The input-limit contract (#180). CAPABILITY_SUMMARY was this env var's ONLY
+    # published home; the summary restructure dropped that sentence, so it moved
+    # here. Unasserted, it could vanish again during any later fingerprint
+    # re-pin and nothing would notice -- which is how it came to have one home in
+    # the first place.
+    assert "CLAUDE_IN_CODEX_MAX_INPUT_BYTES" in egress
+    assert "context_too_large" in egress
+    assert "4096" in egress
 
 
 async def test_returned_model_output_is_redacted(monkeypatch):
