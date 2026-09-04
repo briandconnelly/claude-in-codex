@@ -157,7 +157,7 @@ def _bounded_render(value: str, render: Callable[[str], str]) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-52"
+FINGERPRINT = "claude-in-codex/0.1/schema-53"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -725,8 +725,12 @@ DEFAULT_NEXT_STEP: dict[str, RepairStep] = {
     # so the caller must raise the cap or shrink the request (#82).
     "budget_exceeded": "retry_with_changes",
     "claude_permission_error": "retry_with_changes",
-    # Transient by nature.
-    "timeout": "retry_same_call",
+    # NOT retry_same_call, which is what it was until #178. A sync paid call that
+    # timed out has already spent and returned nothing, and `idempotency_key`
+    # exists only on the _async starters -- so "retry the same call" was the
+    # contract advising an unguarded double spend. The action names the _async
+    # twin, which survives the deadline.
+    "timeout": "call_tool",
     # Poll, list, or diagnose rather than re-issuing the failed fetch. A terminal
     # job_failed never becomes ok:true on retry, so it points at claude_status.
     "job_not_found": "call_tool",

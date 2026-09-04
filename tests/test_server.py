@@ -632,7 +632,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-52"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-53"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1527,7 +1527,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-52"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-53"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -3237,9 +3237,13 @@ def test_retryable_never_pairs_with_a_changed_call():
     """retryable=True means the IDENTICAL call may succeed — never a corrected one."""
     from claude_in_codex.schemas import DEFAULT_NEXT_STEP, ErrorInfo
 
-    assert ErrorInfo(code="timeout", message="m", repair="r", retryable=True).action.next_step == (
-        "retry_same_call"
-    )
+    # Uses a code that is genuinely ever_retryable. `timeout` was the example
+    # here until #178, which is itself the point: it read as the canonical
+    # retryable failure while being the one case where an identical retry is a
+    # second charge with no dedup guard.
+    assert ErrorInfo(
+        code="idempotency_in_progress", message="m", repair="r", retryable=True
+    ).action.next_step == ("retry_same_call")
     for code, _cond, ever_retryable, _fields in _ERROR_CATALOG:
         if DEFAULT_NEXT_STEP[code] == "retry_with_changes":
             assert not ever_retryable, f"{code} says a changed call is also a plain retry"
@@ -7090,3 +7094,78 @@ async def test_tool_details_key_optional_params_match_the_advertised_schemas():
     # Not vacuous: the tools carrying `detail` must actually be found.
     carriers = [t for t, v in tools.items() if "detail" in v.input_schema.get("properties", {})]
     assert len(carriers) >= 8, carriers
+
+
+async def test_sync_timeout_points_at_the_async_twin_instead_of_a_second_charge():
+    """#178: the contract used to recommend an unguarded double spend.
+
+    A sync paid call that blows its deadline has already spent and returned
+    nothing. The old envelope carried retryable=True and next_step
+    "retry_same_call", so an agent recovering STRUCTURALLY — reading `action`
+    rather than prose, which is what the contract tells it to do — re-issued the
+    identical paid call. `idempotency_key` exists only on the _async starters, so
+    that retry had no dedup guard at all.
+
+    Asserts the whole recovery, not just the flag: the action must name the
+    _async twin and carry callable arguments, and it must NOT be retryable."""
+    from claude_in_codex.claude import ClaudeRun, classify_failure
+
+    info = classify_failure(
+        ClaudeRun(stdout="", stderr="", exit_code=-1, timed_out=True, elapsed_ms=1)
+    )
+
+    assert info.code == "timeout"
+    assert info.retryable is False, "an identical retry is a second charge, not a retry"
+    assert info.action.next_step != "retry_same_call"
+    # The prose must say the money is gone; an agent that reads only `repair`
+    # was the other half of the failure.
+    assert "spent" in info.message.lower()
+    assert "_async" in info.repair
+
+
+async def test_timeout_action_carries_the_callable_async_twin_call():
+    """The action must be literally callable, which is the difference between a
+    machine-followable repair and prose an agent has to parse.
+
+    Also pins the two bounds: `timeout_seconds` is dropped (meaningless on a job
+    with its own deadline), and oversized arguments are omitted rather than
+    echoed, so the repair block cannot become the largest thing in the
+    response."""
+    from claude_in_codex.server import _CALL_ARGUMENTS, REPAIR_ARGS_MAX_BYTES, _timeout_action
+
+    token = _CALL_ARGUMENTS.set({"prompt": "hi", "timeout_seconds": 30, "effort": "xhigh"})
+    try:
+        action = _timeout_action("claude_consult")
+    finally:
+        _CALL_ARGUMENTS.reset(token)
+
+    assert action.next_step == "call_tool"
+    assert action.tool == "claude_consult_async"
+    assert action.arguments == {"prompt": "hi", "effort": "xhigh"}
+
+    # Oversized: the tool is still named, the arguments are dropped.
+    token = _CALL_ARGUMENTS.set({"prompt": "x" * (REPAIR_ARGS_MAX_BYTES + 1)})
+    try:
+        oversized = _timeout_action("claude_consult")
+    finally:
+        _CALL_ARGUMENTS.reset(token)
+    assert oversized.tool == "claude_consult_async"
+    assert oversized.arguments is None
+
+    # A tool with no async twin gets no twin action rather than a nonsensical one
+    # — e.g. a stored timeout fetched back through claude_job_result, where the
+    # run was already detached.
+    assert _timeout_action("claude_job_result") is None
+
+
+async def test_every_sync_paid_tool_has_an_async_twin_in_the_timeout_map():
+    """The map is the whole recovery, so a paid tool missing from it silently
+    returns to the pre-#178 behavior for that tool alone."""
+    from claude_in_codex.server import _ASYNC_TWIN
+
+    paid = _capabilities_payload()["paid_tools"]
+    sync_paid = [t for t in paid if not t.endswith("_async")]
+    assert sync_paid, "no sync paid tools found — the assertion below would be vacuous"
+    assert set(sync_paid) == set(_ASYNC_TWIN), set(sync_paid) ^ set(_ASYNC_TWIN)
+    for twin in _ASYNC_TWIN.values():
+        assert twin in paid
