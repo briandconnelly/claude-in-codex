@@ -303,18 +303,26 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     if run.timed_out:
         return ErrorInfo(
             code="timeout",
-            # The spend is stated because the recovery depends on knowing it
-            # happened: this call paid and returned nothing, so "just try again"
-            # is a second charge, not a retry (#178).
+            # MAY have spent, not did. `timed_out` proves only that the
+            # subprocess exceeded its wall clock -- it can expire during startup,
+            # a workspace hook, or request setup before Anthropic is reached, and
+            # this path has no cost envelope to settle it either way. The safety
+            # argument does not need certainty: "unknown, and retrying risks a
+            # second charge" is what makes an automatic retry wrong. Claiming a
+            # definite spend would be the contract asserting something it cannot
+            # observe, which is the failure #178 is about (#178).
             message=(
-                "claude exceeded the timeout. The call already spent; that cost is "
-                "not recoverable and re-issuing this same call spends again."
+                "claude exceeded the timeout. The call MAY already have been charged "
+                "-- a timeout cannot tell a request that was billed from one that "
+                "never reached Anthropic -- and re-issuing it risks a second charge "
+                "for work you cannot recover."
             ),
             repair=(
-                "Use the _async twin, which survives the deadline -- pass an "
-                "idempotency_key so a dropped reply replays instead of paying twice. "
-                "Only raise timeout_seconds or narrow the scope/focus if you "
-                "deliberately want to spend again synchronously."
+                "Decide whether to spend again: any next attempt is a NEW paid run, "
+                "not a recovery of this one. To retry, use the _async twin, which "
+                "survives the deadline -- its idempotency_key guards that new launch "
+                "against duplicate retries, not against this timed-out call. Raising "
+                "timeout_seconds or narrowing the scope/focus spends again too."
             ),
             # NOT retryable: retryable means the same operation unchanged may
             # succeed later, which is false for a deterministic scope/timeout
