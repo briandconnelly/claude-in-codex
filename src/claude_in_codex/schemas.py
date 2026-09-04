@@ -331,6 +331,16 @@ def bounded_selectors(
     # and this is not.
     if scope != "branch":
         base = None
+        # And clear any WITHHELD marker for it. A pre-#177 record can hold an
+        # over-cap base on a working_tree scope: the bounds check above adds
+        # "base" to `dropped`, which renders as a security warning saying the
+        # value was withheld -- telling a reader the run used a base that had to
+        # be suppressed. It used none. That is the same false confirmation this
+        # change removes on the live path, surviving in the record rebuild.
+        #
+        # Withheld and not-applicable are different states and only one of them
+        # is worth warning about.
+        dropped = [name for name in dropped if name != "base"]
     effective_head, diff_range = branch_range(scope, base, head)
     if dropped:
         # Either component withheld: the composition cannot be honest, and a

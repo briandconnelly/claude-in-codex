@@ -716,3 +716,62 @@ async def test_an_explicitly_empty_base_is_refused_not_defaulted(fake_claude, gi
     )
     assert data["ok"] is False, "an empty base must not silently become main"
     assert data["error"]["code"] == "invalid_base"
+
+
+@pytest.mark.parametrize("scope", ["working_tree", "staged"])
+def test_a_withheld_base_marker_is_cleared_on_a_scope_that_never_used_one(tmp_path, scope):
+    """Withheld and not-applicable are different states.
+
+    A pre-#177 record can hold an over-cap `base` on a non-branch scope. The
+    bounds check adds "base" to `dropped`, which renders as a security warning
+    saying the value was withheld — telling a reader the run used a base that had
+    to be suppressed. It used none. That is the same false confirmation this
+    change removes on the live path, surviving in the record rebuild.
+
+    Only one of the two states is worth warning about."""
+    from claude_in_codex import jobs
+
+    record = {
+        "config": {
+            "config_mode": "inherit",
+            "access": "toolless",
+            "scope": scope,
+            "base": "b" * (MAX_REF_BYTES + 1),
+            "timeout_seconds": 1800,
+            "workspace_source": "param",
+            "cwd": str(tmp_path),
+        },
+        "context_summary": None,
+    }
+
+    rebuilt = jobs._build_meta(record)
+
+    assert rebuilt.base is None
+    warnings = " ".join(rebuilt.security_warnings or [])
+    assert "base" not in warnings, warnings
+
+
+def test_a_withheld_base_marker_survives_on_the_scope_that_uses_one(tmp_path):
+    """The positive control: clearing the marker must not silence the real case.
+
+    On scope=branch an over-cap base WAS suppressed from a run that would have
+    used it, and that is exactly what the warning exists to report."""
+    from claude_in_codex import jobs
+
+    record = {
+        "config": {
+            "config_mode": "inherit",
+            "access": "toolless",
+            "scope": "branch",
+            "base": "b" * (MAX_REF_BYTES + 1),
+            "timeout_seconds": 1800,
+            "workspace_source": "param",
+            "cwd": str(tmp_path),
+        },
+        "context_summary": None,
+    }
+
+    rebuilt = jobs._build_meta(record)
+
+    assert rebuilt.base is None
+    assert "base" in " ".join(rebuilt.security_warnings or [])
