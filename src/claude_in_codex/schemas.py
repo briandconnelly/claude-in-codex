@@ -726,10 +726,13 @@ DEFAULT_NEXT_STEP: dict[str, RepairStep] = {
     "budget_exceeded": "retry_with_changes",
     "claude_permission_error": "retry_with_changes",
     # NOT retry_same_call, which is what it was until #178. A sync paid call that
-    # timed out has already spent and returned nothing, and `idempotency_key`
-    # exists only on the _async starters -- so "retry the same call" was the
-    # contract advising an unguarded double spend. The action names the _async
-    # twin, which survives the deadline.
+    # timed out MAY already have been charged -- a timeout cannot tell a request
+    # that was billed from one that never reached Anthropic -- and
+    # `idempotency_key` exists only on the _async starters, so "retry the same
+    # call" was the contract advising a possible double spend with no dedup
+    # guard. Possible is enough to make an automatic retry wrong; claiming a
+    # definite charge would assert something the server cannot observe. The
+    # action names the _async twin, which survives the deadline.
     "timeout": "call_tool",
     # Poll, list, or diagnose rather than re-issuing the failed fetch. A terminal
     # job_failed never becomes ok:true on retry, so it points at claude_status.
