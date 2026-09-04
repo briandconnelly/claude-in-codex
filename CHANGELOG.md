@@ -38,7 +38,9 @@ the advertised output-schema shape does move; no value set changed.
   was unconditional in the summary ("check claude_status first"), a two-branch
   conditional in the skill, and discretionary in its own tool description ("use
   first when unsure") — three readings an agent may encounter in any order and
-  cannot rank. All three now state the same rule. `idempotency_key`'s description
+  cannot rank. All three now state the same rule, including the "and again after
+  a setup error" half the summary initially still omitted; a test asserts the
+  full phrase rather than describing the intent. `idempotency_key`'s description
   no longer opens with "Optional" while the skill calls it mandatory; getting that
   one wrong means paying twice. (#180)
 
