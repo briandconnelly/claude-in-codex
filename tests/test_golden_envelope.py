@@ -12,7 +12,6 @@ from claude_in_codex.schemas import (
     FINGERPRINT,
     Meta,
 )
-from claude_in_codex.server import _capabilities_payload
 
 _GOLDEN = (Path(__file__).parent / "golden" / "claude_envelope.json").read_text()
 
@@ -68,23 +67,22 @@ def test_golden_envelope_meta_keys_are_declared_and_disclosed():
     receives to both the model and the advertised enumeration agents read to
     know what `meta` holds.
 
-    It closes the same class of drift as #143 one layer down. The published
-    enumeration is generated from `Meta.model_fields`, so model-vs-published
-    cannot diverge; this adds envelope-vs-both, which would catch a key that
-    reached `meta` without being declared -- exactly what the fingerprint digest
-    cannot see, because `meta` is advertised as an opaque stub.
+    It closes the same class of drift as #143 one layer down: a key that reached
+    `meta` without being declared on the model -- exactly what the fingerprint
+    digest cannot see, because `meta` is advertised as an opaque stub.
 
-    Reads the enumeration from the capabilities payload, which is where #179 moved
-    it when the inline copy left tools/list. The stub's description is no longer
-    the enumeration, so asserting against it would now be asserting against a
-    pointer.
+    Scoped to the MODEL, not to the published capability payload. An earlier
+    revision of this test read the enumeration from `_capabilities_payload()`,
+    which made this suite depend on a server-owned MCP response shape;
+    AGENTS.md keeps this file on the upstream CLI envelope contract and sends
+    MCP response-shape coverage to the fingerprint and per-shape tests. The
+    published-vs-model parity is asserted there instead
+    (`test_capabilities_publishes_every_meta_field`).
 
     Subset, not equality: `meta` is dumped with `exclude_none`, so a real
     envelope carries only the fields that were set."""
     out = normalize_envelope("claude_review_changes", _GOLDEN, _meta(), detail="full")
-    published = _capabilities_payload()["meta_fields"]
 
     keys = set(out["meta"])
-    assert keys, "an empty meta would make both assertions below vacuous"
+    assert keys, "an empty meta would make the assertion below vacuous"
     assert keys <= set(Meta.model_fields), keys - set(Meta.model_fields)
-    assert keys <= set(published), keys - set(published)
