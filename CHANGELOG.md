@@ -7,11 +7,44 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-Fingerprint `claude-in-codex/0.1/schema-52` (was `schema-50`). The changes are
-parameter and metadata descriptions plus one added `claude_capabilities` field.
+Fingerprint `claude-in-codex/0.1/schema-53` (was `schema-50`). The changes are
+parameter and metadata descriptions, one added `claude_capabilities` field, and
+one **breaking** machine-semantic change to the `timeout` error (below).
 `meta_fields` is a new required property on `CapabilitiesResult`, and
 `CAPABILITIES_SCHEMA` is generated from that model, so the advertised
-output-schema shape does move; no error code or value set changed.
+output-schema shape does move; no value set changed.
+
+### Fixed
+
+- The `timeout` error no longer advises an unguarded double spend. **Breaking
+  for structural recovery.** A sync paid call that exceeded its deadline
+  returned `retryable: true` with `action.next_step: "retry_same_call"`, so an
+  agent recovering the way this contract tells it to — branching on `action`
+  rather than reading prose — re-issued the identical paid call. The first call
+  had already spent and returned nothing, and `idempotency_key` exists only on
+  the three `_async` starters, so that retry had no dedup guard at all.
+
+  It was also wrong on `retryable`'s own terms: retryable means the identical
+  operation may succeed later, which is false for a deterministic scope/timeout
+  pair. With `timeout_seconds: 180` and `effort: "xhigh"` as resolved defaults,
+  a default-effort review of a real branch reaching this path is not a corner
+  case.
+
+  `timeout` is now `retryable: false` with `next_step: "call_tool"`, and the
+  action names the `_async` twin — which survives the deadline — carrying the
+  original arguments minus `timeout_seconds`, bounded by
+  `REPAIR_ARGS_MAX_BYTES` like every other reconstructed repair. The message
+  states plainly that the spend is not recoverable. No `idempotency_key` is
+  invented: a server-chosen key would imply a dedup guarantee across a retry it
+  cannot make, since the twin is a different tool. (#178)
+
+- The shipped skill pointed recovery at the wrong field. It described the error
+  envelope as `{code, message, repair}` and said "follow `repair`", never
+  mentioning `action`, `next_step`, `retryable`, or `details` — so it steered
+  agents at free prose while the machine-followable `RepairAction`, whose
+  `arguments` are literally callable, went unmentioned. The skill now branches on
+  `action.next_step` first and states that a failed paid call is not to be
+  re-issued on reflex. (#178)
 
 ### Changed
 

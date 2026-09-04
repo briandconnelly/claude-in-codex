@@ -303,9 +303,24 @@ def classify_failure(run: ClaudeRun, *, config_mode: str | None = None) -> Error
     if run.timed_out:
         return ErrorInfo(
             code="timeout",
-            message="claude exceeded the timeout.",
-            repair="Narrow the scope/focus or raise timeout_seconds.",
-            retryable=True,
+            # The spend is stated because the recovery depends on knowing it
+            # happened: this call paid and returned nothing, so "just try again"
+            # is a second charge, not a retry (#178).
+            message=(
+                "claude exceeded the timeout. The call already spent; that cost is "
+                "not recoverable and re-issuing this same call spends again."
+            ),
+            repair=(
+                "Use the _async twin, which survives the deadline -- pass an "
+                "idempotency_key so a dropped reply replays instead of paying twice. "
+                "Only raise timeout_seconds or narrow the scope/focus if you "
+                "deliberately want to spend again synchronously."
+            ),
+            # NOT retryable: retryable means the same operation unchanged may
+            # succeed later, which is false for a deterministic scope/timeout
+            # pair. The old True sent structural recoverers straight into an
+            # unguarded second charge -- sync calls take no idempotency_key.
+            retryable=False,
         )
     if isinstance(env, dict) and (
         env.get("is_error") or env.get("subtype") not in cli_contract.SUCCESS_SUBTYPES

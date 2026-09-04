@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import shutil
@@ -374,6 +375,26 @@ def _meta(
 # omitted rather than echoed, so an oversized input cannot be returned twice.
 REPAIR_ARGS_MAX_BYTES = 8192
 
+# The arguments of the call currently being handled, captured by
+# ValidationEnvelopeMiddleware so a tool body can hand back a literally callable
+# repair. A tool body receives its arguments already bound to parameters, with
+# defaults filled in; reconstructing the ORIGINAL dict from them would silently
+# turn an omitted argument into an explicit one, which for `base` is exactly the
+# distinction #177 turns on. This carries what the caller actually sent.
+_CALL_ARGUMENTS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_CALL_ARGUMENTS", default=None
+)
+
+# A sync paid tool and the _async twin that survives the same deadline. The whole
+# recovery for a sync timeout is "make this call again, detached", so the mapping
+# has to exist somewhere; putting it here keeps the timeout action from being
+# hand-written per call site and drifting.
+_ASYNC_TWIN = {
+    "claude_consult": "claude_consult_async",
+    "claude_review_changes": "claude_review_changes_async",
+    "claude_adversarial_review": "claude_adversarial_review_async",
+}
+
 
 def _render_value(value: object) -> str | None:
     """The rejected value as a bounded string, for ErrorDetails.value.
@@ -450,6 +471,9 @@ class ValidationEnvelopeMiddleware(Middleware):
     former is converted into this envelope."""
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
+        message = getattr(context, "message", None)
+        arguments = getattr(message, "arguments", None)
+        token = _CALL_ARGUMENTS.set(dict(arguments) if isinstance(arguments, dict) else None)
         try:
             return await call_next(context)
         except (ValidationError, FastMCPValidationError) as exc:
@@ -496,6 +520,8 @@ class ValidationEnvelopeMiddleware(Middleware):
                     action=self._repair_action(context, loc),
                 )
             )
+        finally:
+            _CALL_ARGUMENTS.reset(token)
 
     @staticmethod
     def _argument_error(exc: Exception) -> ValidationError | None:
@@ -643,6 +669,56 @@ def _ref_too_large_details(ref: str | None) -> ErrorDetails | None:
         limit_bytes=MAX_REF_BYTES,
         actual_bytes=len(ref.encode("utf-8", "replace")),
     )
+
+
+def _timeout_action(tool: str) -> RepairAction | None:
+    """The recovery for a sync timeout: the same call, detached.
+
+    A sync paid call that blows its deadline has ALREADY SPENT and returned
+    nothing. The old contract answered that with retryable=True and
+    next_step=retry_same_call, so an agent recovering structurally re-issued the
+    identical paid call -- and `idempotency_key` exists only on the _async
+    starters, so the retry had no dedup guard. The contract was recommending an
+    unguarded double spend (#178).
+
+    It was also wrong on retryable's own terms. Retryable means the same
+    operation unchanged may succeed later; for a deterministic scope/timeout pair
+    that is false. Raising timeout_seconds or narrowing scope is a DIFFERENT call,
+    and the repair prose still says so.
+
+    What actually survives the deadline is the _async twin, whose job runs to its
+    own much larger deadline and whose result is fetched separately. That advice
+    previously lived only in async_lifecycle.notes and the shipped skill; here it
+    becomes the machine-followable action, because an agent that reads `action`
+    and not prose is exactly the agent that was double-spending.
+
+    Two bounds, both deliberate:
+
+    * The arguments are the caller's own, minus `timeout_seconds` (meaningless on
+      a job with its own deadline). They are omitted entirely above
+      REPAIR_ARGS_MAX_BYTES, like every other reconstructed repair, so a large
+      prompt cannot make the error block the biggest thing in the response.
+    * No `idempotency_key` is invented. A key the SERVER chose would look like a
+      dedup guarantee across a retry it cannot actually make -- the twin is a
+      different tool, so nothing about this timed-out run is replayable under it.
+      The caller supplies its own; the repair prose says to."""
+    twin = _ASYNC_TWIN.get(tool)
+    if twin is None:
+        # Not a sync paid tool -- e.g. a stored `timeout` envelope fetched back
+        # through claude_job_result, where the run was already detached and
+        # pointing at an async twin would be nonsense.
+        return None
+    original = _CALL_ARGUMENTS.get()
+    if not isinstance(original, dict):
+        return RepairAction(next_step="call_tool", tool=twin)
+    remaining = {k: v for k, v in original.items() if k != "timeout_seconds"}
+    try:
+        size = len(json.dumps(remaining, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return RepairAction(next_step="call_tool", tool=twin)
+    if size > REPAIR_ARGS_MAX_BYTES:
+        return RepairAction(next_step="call_tool", tool=twin)
+    return RepairAction(next_step="call_tool", tool=twin, arguments=remaining)
 
 
 def _invalid_base_error(meta: Meta, base: str | None) -> dict:
@@ -1572,6 +1648,11 @@ async def _execute(
             meta,
             retryable=info.retryable,
             details=info.details,
+            # A timed-out sync call recovers by re-issuing DETACHED, not by
+            # re-issuing. Built here rather than in classify_failure because only
+            # this layer knows which tool was called and what it was called with
+            # (#178).
+            action=_timeout_action(tool) if info.code == "timeout" else None,
         )
     return normalize_envelope(
         tool, run.stdout, meta, detail=r.detail, context_summary=context_summary
@@ -3775,7 +3856,15 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
         False,
         ["field", "reason", "limit_bytes", "actual_bytes", "max_diff_bytes", "diff_bytes"],
     ),
-    ("timeout", "claude did not finish within timeout_seconds.", True, []),
+    (
+        "timeout",
+        "claude did not finish within timeout_seconds. The call already spent and "
+        "returned nothing; the cost is not recoverable. Re-issuing the same sync "
+        "call spends again with no dedup guard, because idempotency_key exists "
+        "only on the _async starters -- the action names the _async twin instead.",
+        False,
+        [],
+    ),
     (
         "budget_exceeded",
         "claude hit the best-effort max-budget stop threshold. Replaying it unchanged "
