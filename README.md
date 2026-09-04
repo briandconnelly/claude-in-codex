@@ -107,10 +107,18 @@ claude_review_changes_async({
 })
 ```
 
-If the call returns a `job_id`, poll with `claude_job_status`, then fetch the result with
-`claude_job_result`. A diff-bearing `_async` call whose diff turns out to be empty skips the
-spend and returns the result itself, with no `job_id` to poll — so branch on `job_id` rather
-than assuming one.
+Branch the reply on `outcome`, which every successful launch carries:
+
+- `started` — a new paid job is running. Poll with `claude_job_status`, then fetch the
+  result with `claude_job_result`.
+- `existing_job` — an `idempotency_key` replay handed back a job that already existed, so it
+  may already be finished; read `may_be_terminal` rather than assuming there is more to wait for.
+- `no_changes` — the diff was empty, so the spend was skipped and the result is inline; there
+  is no job to poll.
+
+Branch on `outcome`, not on whether `job_id` is present: both `started` and `existing_job`
+carry one, so its presence cannot tell a fresh launch from a replay. The full routing table is
+published under `claude_capabilities.async_lifecycle.start_outcome_routing`.
 
 Each of the three paid operations — `claude_consult`, `claude_review_changes`, and
 `claude_adversarial_review` — has an `_async` form. No paid tool is blocking-only.
@@ -241,7 +249,7 @@ The Python package publishes the MCP server entry point for direct use and relea
 After a PyPI release, the server can also be launched with:
 
 ```sh
-uvx --from claude-in-codex==0.8.0 claude-in-codex-mcp
+uvx --from claude-in-codex==0.9.0 claude-in-codex-mcp
 ```
 
 ## Advanced reference
