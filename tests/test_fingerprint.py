@@ -34,7 +34,7 @@ from tests.support import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "93b5b9e75ec5283d14876129dce51ffaab17c975d37e2d25c10e590464f1692d"
+EXPECTED_CONTRACT_DIGEST = "a952954a458e9f83dab3e543e73e29a103b5b75e4f3a53b8e7f8c96251f8b8ab"
 
 
 async def _contract_surface() -> dict:
@@ -177,16 +177,41 @@ async def test_contract_surface_covers_meta_field_names():
         assert name in surface["meta_fields"]
 
 
-def test_advertised_meta_description_enumerates_every_meta_field():
-    """The advertised enumeration must BE the field list, not a copy of it.
+def test_capabilities_publishes_every_meta_field():
+    """The published enumeration must BE the field list, not a copy of it.
 
-    Option (2) of #143: the sentence agents read is generated from
-    `Meta.model_fields`, so it cannot drift from the model. This test pins that
-    property against a future hand-written replacement -- if someone reverts the
-    description to prose, it fails as soon as the two disagree."""
-    described = schemas.meta_fields_from_description(schemas._META_STUB["description"])
+    #143 made the advertised `meta` description a generated enumeration so it
+    could not drift from `Meta`. #179 moved that enumeration out of tools/list --
+    it was 14 identical copies, 8.9% of the discovery payload -- and into the
+    capabilities payload, which is where the `meta` stub's description now points.
 
-    assert described == list(schemas.Meta.model_fields)
+    The anti-drift property has to move with it, or the move traded 6,818 bytes
+    for a contract an author can silently let rot. This is that property,
+    asserted at the new home."""
+    assert _capabilities_payload()["meta_fields"] == list(schemas.Meta.model_fields)
+    # Not vacuous against an empty list: these are load-bearing names an agent
+    # reads off the envelope.
+    for name in ("cwd", "paths", "paths_matched", "cost_usd", "fingerprint"):
+        assert name in _capabilities_payload()["meta_fields"]
+
+
+def test_advertised_meta_stub_does_not_re_inline_the_field_list():
+    """The 6,818 bytes #179 recovered must stay recovered.
+
+    The stub is inlined into every tool's output schema, so any enumeration here
+    is billed 14x on every tools/list. A future author restoring "helpful" detail
+    would undo the recovery silently -- tests/test_discovery_cost.py would catch
+    the total, but only after it had eaten the headroom this bought.
+
+    The stub must point at the field list, not repeat it."""
+    description = schemas._META_STUB["description"]
+
+    assert "claude_capabilities" in description
+    assert len(description) < 100, description
+    # The check that actually binds: no Meta field name may appear. Probed
+    # against the pre-#179 description, which named all 25 and fails this.
+    named = [f for f in schemas.Meta.model_fields if f in description]
+    assert not named, f"meta stub re-inlines field names: {named}"
 
 
 async def test_fingerprint_disclosure_names_the_meta_field_coverage():

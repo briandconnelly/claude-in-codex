@@ -157,7 +157,7 @@ def _bounded_render(value: str, render: Callable[[str], str]) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-51"
+FINGERPRINT = "claude-in-codex/0.1/schema-52"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -1013,6 +1013,13 @@ class CapabilitiesResult(BaseModel):
     # and tools/list is the discovery hot path (tests/test_discovery_cost.py); this
     # payload is the contract's designated home for the full rule.
     meta_focus: str
+    # Meta's field names. The advertised `meta` stub is an opaque object pointing
+    # here, so this is the enumeration's ONE home rather than a copy repeated into
+    # every tool's output schema on the discovery hot path (#179; the same
+    # argument that put meta_focus here). Generated from Meta.model_fields, so it
+    # cannot drift from the model, and digested directly (#143) so adding a field
+    # moves the fingerprint whether or not anyone edits prose.
+    meta_fields: list[str]
     prerequisites: list[str]
     deprecation_policy: str
     annotations_policy: str
@@ -1302,47 +1309,33 @@ class ModelCatalogResult(BaseModel):
 # entry, so the 25-property Meta model repeats 2-3x per tool and pydantic `title`
 # decoration rides along on every field. The slimmed schema is what agents SEE;
 # the wire payload still carries the full Meta, whose field contract
-# claude_capabilities documents. Measured effect: tools/list 113,495 -> 62,642 bytes.
-# The enumeration is GENERATED from Meta.model_fields, not hand-written (#143).
+# claude_capabilities documents.
 #
-# It used to be prose an author had to remember to edit. That made it the gate on
-# whether a new Meta field moved the contract digest -- because `meta` is
-# advertised as an opaque object, this sentence is the ONLY part of Meta that
-# reaches the digest at all. So the enforcement instrument depended on the same
-# manual step it exists to catch, and a field added without touching the sentence
-# shipped an unbumped contract behind a green test. Verified before the fix:
-# adding a field to Meta left tests/test_fingerprint.py fully green.
+# The description used to ENUMERATE Meta's field names, generated from
+# Meta.model_fields (#143). That enumeration did two jobs, and it is retired here
+# because only one of them was still its job to do:
 #
-# Generating it fixes both halves at once. The advertised list cannot drift from
-# the model, and any added field necessarily moves the description, and so the
-# digest. The names are spelled out rather than compressed ("workspace_source,
-# workspace_warning", not "workspace_source/warning"): the compressions saved
-# bytes at the cost of being un-checkable and un-greppable, and an enumeration
-# whose whole purpose is to let an agent read the field list should be the field
-# list. `meta_fields_from_description` is the inverse, so the property is
-# testable rather than merely true today.
-_META_FIELDS_PREFIX = "Execution metadata. Fields: "
-_META_FIELDS_SUFFIX = ". Full contract: claude_capabilities."
-
-
-def meta_fields_from_description(description: str) -> list[str]:
-    """Recover the enumerated field names from an advertised meta description.
-
-    The inverse of how _META_STUB's description is built. Lets a test assert the
-    advertised enumeration IS Meta's field list rather than trusting that it was
-    generated -- so a future hand-written replacement fails as soon as it
-    disagrees with the model."""
-    body = description
-    if body.startswith(_META_FIELDS_PREFIX):
-        body = body[len(_META_FIELDS_PREFIX) :]
-    if body.endswith(_META_FIELDS_SUFFIX):
-        body = body[: -len(_META_FIELDS_SUFFIX)]
-    return [name.strip() for name in body.split(",") if name.strip()]
-
-
+#  1. Force a new Meta field into the contract digest. `meta` is advertised as an
+#     opaque object, so for a while this sentence was the ONLY part of Meta that
+#     reached the digest at all -- which made the enforcement instrument depend on
+#     the same manual step it exists to catch. #143 fixed that by ALSO digesting
+#     the field names directly (tests/test_fingerprint.py `_contract_surface`,
+#     and FINGERPRINT_COVERS says so out loud). That coverage is structural and
+#     does not involve this string, so job 1 is done without it.
+#  2. Let an agent read the field list. Still a real job -- but tools/list is the
+#     wrong place to do it 14 times. Measured: 487 bytes x 14 records = 6,818
+#     bytes, 8.9% of the entire tools/list payload, to say the same thing
+#     fourteen times on the discovery hot path (#179). The field list now has one
+#     home, `claude_capabilities().meta_fields`, which is where `meta_focus`
+#     already lives for exactly this reason (see CapabilitiesResult).
+#
+# So the pointer below is now a real pointer: claude_capabilities publishes the
+# enumeration, and tests/test_fingerprint.py pins that it IS Meta.model_fields --
+# the same anti-drift property the inline sentence had, asserted once instead of
+# advertised fourteen times.
 _META_STUB = {
     "type": "object",
-    "description": (_META_FIELDS_PREFIX + ", ".join(Meta.model_fields) + _META_FIELDS_SUFFIX),
+    "description": "Execution metadata. Field list and contract: claude_capabilities.",
 }
 
 
