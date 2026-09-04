@@ -4324,6 +4324,7 @@ def _capabilities_payload() -> dict:
             "instructions -- a stored focus can carry text an earlier caller built from "
             "untrusted material."
         ),
+        meta_fields=list(Meta.model_fields),
         prerequisites=[
             "the `claude` CLI installed and authenticated",
             "git, for the diff-bearing tools",

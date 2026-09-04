@@ -7,11 +7,28 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-Fingerprint `claude-in-codex/0.1/schema-51` (was `schema-50`). The change is a
-parameter description, which the contract digest covers; no schema shape,
-value, or error code moved.
+Fingerprint `claude-in-codex/0.1/schema-52` (was `schema-50`). The changes are
+parameter and metadata descriptions plus one added `claude_capabilities` field,
+which the contract digest covers; no schema shape, value, or error code moved.
 
 ### Changed
+
+- The advertised `meta` stub no longer enumerates `Meta`'s 25 field names.
+  FastMCP inlines the stub into every tool's output schema, so the enumeration
+  was billed 14 times on `tools/list` — 6,818 bytes, 8.9% of the whole discovery
+  payload, to say one thing fourteen times. The field list moves to
+  `claude_capabilities().meta_fields`, which the stub's description now points
+  at, and `tools/list` drops from 76,224 to 70,415 bytes (−5,809, −7.6%) at a
+  cost of +468 bytes in the capabilities payload. The discovery budget in
+  `tests/test_discovery_cost.py` is ratcheted from 76,800 to 72,000 so the
+  recovery cannot be silently re-spent. (#179)
+
+  This does not weaken the #143 guarantee it may look like it reverses. That
+  enumeration existed to force a new `Meta` field into the contract digest, and
+  #143 also began digesting the field names *directly* — `FINGERPRINT_COVERS`
+  says so out loud — precisely so the coverage would survive the description not
+  carrying it. Adding a `Meta` field still moves the fingerprint, and the
+  anti-drift assertion moved with the enumeration to its new home.
 
 - `focus` on `claude_review_changes` and `claude_review_changes_async` now
   states in its own description the two construction-side rules that
