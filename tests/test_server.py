@@ -7169,3 +7169,43 @@ async def test_every_sync_paid_tool_has_an_async_twin_in_the_timeout_map():
     assert set(sync_paid) == set(_ASYNC_TWIN), set(sync_paid) ^ set(_ASYNC_TWIN)
     for twin in _ASYNC_TWIN.values():
         assert twin in paid
+
+
+async def test_captured_call_arguments_do_not_leak_between_calls():
+    """The timeout action reads caller arguments from a contextvar, so a leak
+    would put ONE caller's prompt into ANOTHER caller's error envelope.
+
+    The reset lives in a `finally` covering the success return as well as the
+    validation-error branch. That is easy to get right and easy to silently
+    break later by moving the return, so it is asserted rather than reviewed."""
+    from claude_in_codex.server import _CALL_ARGUMENTS
+
+    assert _CALL_ARGUMENTS.get() is None, "leaked in from an earlier test"
+    async with Client(mcp) as client:
+        await client.call_tool("claude_capabilities", {})
+    assert _CALL_ARGUMENTS.get() is None, "arguments survived the call that set them"
+
+    # And a call that fails argument validation must not leak either — that is
+    # the branch with its own return statement.
+    async with Client(mcp) as client:
+        await client.call_tool("claude_job_result", {"job_id": 12345}, raise_on_error=False)
+    assert _CALL_ARGUMENTS.get() is None, "arguments survived a rejected call"
+
+
+async def test_concurrent_calls_do_not_see_each_others_arguments():
+    """contextvars are per-task, but only if the set happens inside the task
+    handling that call. Probed with real concurrency rather than assumed."""
+    import asyncio
+
+    from claude_in_codex.server import _CALL_ARGUMENTS
+
+    seen: list = []
+
+    async def one(job_id: str):
+        async with Client(mcp) as client:
+            await client.call_tool("claude_job_status", {"job_id": job_id}, raise_on_error=False)
+        seen.append(_CALL_ARGUMENTS.get())
+
+    await asyncio.gather(*(one(f"job-{i}") for i in range(5)))
+
+    assert seen == [None] * 5, seen
