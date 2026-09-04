@@ -1,5 +1,6 @@
 """Integration tests — require the real `claude` CLI (gated via skipif)."""
 
+import os
 import shutil
 import subprocess
 
@@ -9,10 +10,38 @@ from tests.support import Client
 
 from claude_in_codex.server import mcp
 
+# The release gate's fail-closed switch (#170). Off, a missing `claude` SKIPS, which
+# is right for a developer machine. On, a missing prerequisite must FAIL: this suite
+# is the only check covering the upstream CLI envelope contract (ENVELOPE_KEYS,
+# SUCCESS_SUBTYPES, USAGE_KEYS), and a gate that reports green because it never ran
+# is worse than no gate -- it launders "unverified" into "verified".
+REQUIRE_LIVE = os.environ.get("CLAUDE_IN_CODEX_REQUIRE_LIVE") == "1"
+_CLAUDE_MISSING = shutil.which("claude") is None
+
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed"),
+    pytest.mark.skipif(_CLAUDE_MISSING and not REQUIRE_LIVE, reason="claude CLI not installed"),
 ]
+
+
+def test_live_gate_prerequisites_are_present():
+    """Fails, never skips, when the gate is required.
+
+    Every other test here carries a skipif on the `claude` binary. Under
+    CLAUDE_IN_CODEX_REQUIRE_LIVE that guard is lifted, but a lifted skip only
+    turns into a confusing downstream error -- this states the missing
+    prerequisite plainly instead, and is the first thing to fail."""
+    if not REQUIRE_LIVE:
+        pytest.skip("release gate not requested (set CLAUDE_IN_CODEX_REQUIRE_LIVE=1)")
+    assert not _CLAUDE_MISSING, (
+        "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but the `claude` CLI is not on PATH. The "
+        "release gate must not pass by skipping."
+    )
+    assert os.environ.get("ANTHROPIC_API_KEY"), (
+        "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but ANTHROPIC_API_KEY is unset. The live "
+        "tests would skip or fail to authenticate, and a skipped gate is a green "
+        "that verifies nothing."
+    )
 
 
 def _claude_help_advertises(flag: str) -> bool:

@@ -76,9 +76,58 @@ jobs:
     needs: release-metadata
     uses: ./.github/workflows/test.yml
 
+  # The gate for the half of the `claude` CLI contract that no-spend tests cannot
+  # cover (ENVELOPE_KEYS, SUCCESS_SUBTYPES, USAGE_KEYS). AGENTS.md and
+  # COMPATIBILITY.md have named it the pre-release gate all along, but nothing ran
+  # it: dispatch-only in ci.yml, absent here, deselected locally. So a release
+  # could be cut with the gate never having run, and nothing recorded that (#170).
+  #
+  # It runs BEFORE build/publish and they depend on it, so a failure stops the
+  # release rather than being noticed afterwards.
+  #
+  # CLAUDE_IN_CODEX_REQUIRE_LIVE=1 is what makes this a gate rather than another
+  # skippable job: the suite skips itself when `claude` is absent, so without it
+  # a runner with no CLI and no key would exit 0 and report the contract verified.
+  # Under the flag a missing prerequisite fails, and the session additionally
+  # refuses to pass unless a floor of integration tests actually ran.
+  #
+  # `environment:` keeps the paid credential behind its own protection rules
+  # rather than making it ambiently available to the release workflow.
+  live-integration:
+    name: Live Claude integration (release gate)
+    needs: test
+    runs-on: ubuntu-latest
+    environment: live-integration
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --locked --group dev
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run the live contract gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_IN_CODEX_REQUIRE_LIVE: "1"
+        run: uv run pytest -m integration --no-cov
+
   build:
     name: Build distributions
-    needs: test
+    needs: [test, live-integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
