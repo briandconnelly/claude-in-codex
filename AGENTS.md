@@ -45,6 +45,17 @@ uv run pytest tests/test_jobs.py --no-cov
   Anthropic. Run `uv run pytest -m integration --no-cov` only when changing
   Claude invocation, authentication, config-mode behavior, or before a release,
   unless a human asks for it.
+- The live suite is the release gate for the upstream `claude` CLI envelope
+  contract, and it is enforced, not remembered: `publish.yml` runs it before
+  `build`, so a tag cannot ship without it. Set
+  `CLAUDE_IN_CODEX_REQUIRE_LIVE=1` whenever you run it as a gate rather than as
+  a spot check. Without that flag the suite SKIPS when `claude` is absent and
+  exits 0, which reports the contract verified when it was never exercised.
+  Under the flag, a missing CLI or `ANTHROPIC_API_KEY` fails, and the session
+  refuses to pass unless a floor of integration tests actually ran.
+- A plain `uv run pytest` deselects the live suite (it prints `deselected`).
+  That is not a signal the contract was checked — it is the signal that it was
+  not.
 
 ## Workflows And Supply Chain
 

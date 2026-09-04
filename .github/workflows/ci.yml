@@ -161,7 +161,13 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked --group dev
 
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Same fail-closed flag as the release gate: a manual run that skipped
+      # every test used to report success, which is the state #170 is about.
       - name: Run integration tests
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_IN_CODEX_REQUIRE_LIVE: "1"
         run: uv run pytest -m integration --no-cov

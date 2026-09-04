@@ -16,6 +16,27 @@ the advertised output-schema shape does move; no value set changed.
 
 ### Fixed
 
+- The live integration suite can now fail a release. It is the gate for the half
+  of the `claude` CLI contract that no-spend tests cannot cover
+  (`ENVELOPE_KEYS`, `SUCCESS_SUBTYPES`, `USAGE_KEYS`), and #159 made its
+  assertions real — but nothing ran it: `ci.yml` ran it only on
+  `workflow_dispatch`, `publish.yml` never ran it, and locally it is
+  *deselected* by `addopts`, so a green `uv run pytest` printed `deselected` and
+  gave no signal distinguishing "ran and passed" from "never ran".
+
+  `publish.yml` now runs it before `build`, which depends on it, so a tag cannot
+  ship without it. A test asserts that dependency against the workflow file
+  rather than trusting review, because the thing being prevented is a human
+  forgetting a manual step.
+
+  Wiring it up is not sufficient on its own: the suite skips itself when
+  `claude` is absent, so a runner with no CLI and no key would have exited 0 and
+  reported the contract verified. `CLAUDE_IN_CODEX_REQUIRE_LIVE=1` makes it
+  fail closed — a missing CLI or `ANTHROPIC_API_KEY` fails outright, and the
+  session refuses to pass unless a floor of integration tests actually ran, so
+  neither an all-skipped run nor a zero-collected one can report success. Both
+  the release gate and the manual dispatch job set it. (#170)
+
 - `CAPABILITY_SUMMARY` now separates rules from context, and no longer omits two
   safety rules. It is doubly load-bearing — FastMCP's `instructions=` and the
   `claude-in-codex://capabilities` resource — so it is what a client that never

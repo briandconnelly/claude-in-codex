@@ -151,3 +151,44 @@ def fake_claude(monkeypatch):
 
     monkeypatch.setattr(srv, "run_claude_async", fake_run)
     return envelope
+
+
+# --- Live release gate (#170) -------------------------------------------------
+# AGENTS.md and COMPATIBILITY.md make `pytest -m integration` the gate for the
+# half of the `claude` CLI contract no-spend tests cannot cover. #159 made its
+# assertions real. Nothing ran it: dispatch-only in CI, absent from publish.yml,
+# and DESELECTED locally by addopts -- so a green `uv run pytest` printed
+# "4 deselected" and there was no signal distinguishing "ran and passed" from
+# "never ran".
+#
+# Lifting the skips is not enough. Every test in that suite could still be
+# skipped, or zero could be collected after a rename, and pytest would exit 0.
+# An exit code that cannot tell "verified" from "never attempted" is the exact
+# failure the gate exists to prevent, one level up.
+#
+# So under CLAUDE_IN_CODEX_REQUIRE_LIVE the session must ALSO prove a floor of
+# integration tests actually passed.
+_LIVE_GATE_MIN_PASSED = 4
+
+
+def pytest_runtest_logreport(report):
+    if report.when == "call" and report.passed and "integration" in report.keywords:
+        _LIVE_GATE_PASSED.append(report.nodeid)
+
+
+_LIVE_GATE_PASSED: list[str] = []
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if os.environ.get("CLAUDE_IN_CODEX_REQUIRE_LIVE") != "1":
+        return
+    passed = len(_LIVE_GATE_PASSED)
+    if passed < _LIVE_GATE_MIN_PASSED:
+        session.exitstatus = 1
+        print(
+            f"\nLIVE GATE FAILED: {passed} integration test(s) passed, "
+            f"expected at least {_LIVE_GATE_MIN_PASSED}.\n"
+            "A release gate that passes by skipping or collecting nothing reports "
+            "'verified' for work that was never attempted. If the suite legitimately "
+            "shrank, lower _LIVE_GATE_MIN_PASSED in tests/conftest.py deliberately."
+        )
