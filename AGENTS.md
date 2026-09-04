@@ -73,9 +73,16 @@ uv run pytest tests/test_jobs.py --no-cov
   project uses pre-1.0 semantic versioning: minor versions may change the
   agent-visible MCP surface, and patch versions are for compatible fixes.
 - Agent-visible MCP surface changes must bump `FINGERPRINT` in
-  `src/claude_in_codex/schemas.py` and update the golden-envelope tests in the
-  same PR. This includes tool names, input/output schemas, value enums, error
-  codes, and capability text.
+  `src/claude_in_codex/schemas.py` and re-pin `EXPECTED_CONTRACT_DIGEST` in
+  `tests/test_fingerprint.py` in the same PR. This includes tool names,
+  input/output schemas, value enums, error codes, `ErrorCodeDoc.detail_fields`,
+  and capability text.
+- Do not confuse the two envelope suites. `tests/test_golden_envelope.py` pins the
+  *upstream* `claude -p --output-format json` contract (`ENVELOPE_KEYS`,
+  `SUCCESS_SUBTYPES`, `USAGE_KEYS`); update it only when a CLI envelope assumption
+  or `normalize.py` changes, never merely because `FINGERPRINT` moved. This
+  server's own MCP response shapes are covered by the fingerprint digest above
+  plus the per-shape tests in `tests/test_server.py`.
 - Claude CLI compatibility assumptions belong in
   `src/claude_in_codex/cli_contract.py`. Keep guarantee-bearing flags fail-closed
   rather than silently weakening cost, access, isolation, or behavior guarantees.

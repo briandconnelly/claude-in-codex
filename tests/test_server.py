@@ -632,7 +632,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-49"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-50"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1527,7 +1527,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-49"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-50"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -2979,7 +2979,7 @@ def test_capability_summary_names_error_carrier():
 
 
 async def test_validation_middleware_reraises_internal_model_errors():
-    from pydantic import BaseModel, ValidationError
+    from pydantic import BaseModel
 
     from claude_in_codex.server import ValidationEnvelopeMiddleware
 
@@ -2989,7 +2989,7 @@ async def test_validation_middleware_reraises_internal_model_errors():
     async def call_next(context):
         Inner(x="nope")  # internal model bug, not argument coercion
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(PydanticValidationError):
         await ValidationEnvelopeMiddleware().on_call_tool(None, call_next)
 
 
@@ -3186,6 +3186,17 @@ async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo
         "field": "workspace_root",
         "reason": "roots_unavailable_on_connection",
     }
+    # `reason` is the one typed token a generic client branches on to tell this
+    # apart from "the path you passed is not a directory", so the published
+    # catalog has to name it. The autouse conftest guard asserts the same
+    # containment for every error the suite reaches; this pins the specific
+    # branch that motivated it, because the guard would go quiet if this call
+    # ever stopped emitting `reason`.
+    from claude_in_codex.server import _ERROR_CATALOG
+
+    advertised = {row[0]: set(row[3]) for row in _ERROR_CATALOG}
+    assert set(omitted["error"]["details"]) <= advertised["invalid_workspace_root"]
+    assert "reason" in advertised["invalid_workspace_root"]
     assert "workspace_root" in omitted["error"]["repair"]
     assert explicit["ok"] is True
     assert explicit["meta"]["workspace_source"] == "param"
@@ -4272,6 +4283,47 @@ async def test_start_outcome_routing_is_structural_not_prose():
         "claude_review_changes_async",
         "claude_adversarial_review_async",
     }
+
+
+async def test_the_replay_trap_is_read_from_the_reply_not_from_the_routing_entry():
+    """`may_be_terminal` says a check is NEEDED; the reply says what the state IS.
+
+    The two live in different places, and conflating them is easy to do in prose:
+    `may_be_terminal` is routing metadata on the capabilities entry, and the reply
+    that must actually be inspected is a job status carrying `status` and
+    `result_available`. Documentation that tells an agent to "read
+    `may_be_terminal`" on the launch sends it to a field the reply model forbids.
+
+    Raised by Copilot on PR #169, against docs written in that PR. The routing
+    entry names the fields to read, so this pins that those names resolve on the
+    payload an `existing_job` launch actually returns."""
+    from claude_in_codex.schemas import AsyncExistingJob
+
+    lifecycle = _capabilities_payload()["async_lifecycle"]
+    reply_fields = set(AsyncExistingJob.model_fields)
+
+    # The routing entry points at real fields on the replay payload...
+    assert lifecycle["state_field"] in reply_fields
+    assert lifecycle["result_ready_field"] in reply_fields
+
+    # ...and the flag that motivates reading them is NOT one of them. The reply
+    # model forbids extras, so a doc promising it describes an impossible read.
+    assert "may_be_terminal" not in reply_fields
+    with pytest.raises(PydanticValidationError):
+        AsyncExistingJob.model_validate(
+            {
+                "job_id": "j",
+                "kind": "claude_consult",
+                "status": "done",
+                "started_at": "t",
+                "elapsed_ms": 1,
+                "deadline_seconds": 1,
+                "ttl_seconds": 1,
+                "tool": "claude_consult_async",
+                "outcome": "existing_job",
+                "may_be_terminal": True,
+            }
+        )
 
 
 async def test_advertised_outcomes_match_what_each_starter_can_produce():
