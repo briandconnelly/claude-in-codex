@@ -20,7 +20,7 @@ from claude_in_codex import __version__
 from claude_in_codex import claude as claude_mod
 from claude_in_codex import jobs as jobs_mod
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
-from claude_in_codex.config import MAX_ECHO_PROSE_BYTES
+from claude_in_codex.config import MAX_ECHO_PROSE_BYTES, MIN_ECHO_PROSE_BYTES
 from claude_in_codex.context import bounded_echo_prose, sanitize_echo_prose
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
@@ -6936,7 +6936,7 @@ def test_bounded_echo_prose_keeps_bracketed_text_that_is_not_a_marker():
     assert "usage: git diff" in out
 
 
-@pytest.mark.parametrize("limit", [40, 60, 120, 400])
+@pytest.mark.parametrize("limit", [MIN_ECHO_PROSE_BYTES, 33, 40, 60, 120, 400])
 @pytest.mark.parametrize(
     "body",
     [
@@ -6981,3 +6981,28 @@ def test_bounded_echo_prose_is_linear_in_its_input():
     # ~0.35s measured, against 300s+ (killed) for the quadratic version: this asserts
     # the complexity class, not a benchmark.
     assert elapsed < 5.0
+
+
+@pytest.mark.parametrize("limit", [0, 1, 3, 10, MIN_ECHO_PROSE_BYTES - 1])
+def test_bounded_echo_prose_refuses_a_budget_it_cannot_honour(limit):
+    """A budget below the floor used to return the ENTIRE input.
+
+    `tail_budget` reached zero, and `encoded[-0:]` is the whole buffer -- so the
+    byte cap inverted into no cap at all exactly where the budget was tightest:
+    measured 512 bytes out for `limit_bytes=10`. Two guards now: `_cut_to_bytes`
+    treats a non-positive budget as empty, and a budget too small for the marker
+    plus a useful head is refused outright, because "bounded" would not mean
+    anything there. It is a parameter contract, so it can only fire on misuse.
+    """
+    with pytest.raises(ValueError, match="at least"):
+        bounded_echo_prose("fatal: x\n" + "y" * 500, limit_bytes=limit)
+
+
+def test_cut_to_bytes_treats_a_spent_budget_as_empty():
+    """The guard at the source, pinned directly: `encoded[-0:]` is the whole buffer,
+    which is the specific Python behaviour that made the cap invert."""
+    from claude_in_codex.context import _cut_to_bytes
+
+    assert _cut_to_bytes("abcdefghij", 0, keep_tail=True) == ""
+    assert _cut_to_bytes("abcdefghij", -5, keep_tail=True) == ""
+    assert _cut_to_bytes("abcdefghij", 4, keep_tail=True) == "ghij"

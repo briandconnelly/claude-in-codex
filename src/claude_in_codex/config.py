@@ -98,6 +98,13 @@ MAX_PATH_MATCH_COUNT = 100_000_000
 # inclusive of the truncation marker, like every other cap here.
 MAX_ECHO_PROSE_BYTES = 400
 
+# The smallest budget `bounded_echo_prose` will accept. Below it the truncation
+# marker and a useful head cannot both fit, so the result would be a bound in name
+# only. It is a floor on the PARAMETER, so it can only catch a misuse -- both call
+# sites pass MAX_ECHO_PROSE_BYTES -- and it catches it loudly rather than by
+# emitting an unbounded message.
+MIN_ECHO_PROSE_BYTES = 32
+
 
 def paths_matched_aligned(paths: list[str] | None, paths_matched: list[int] | None) -> bool:
     """True when `paths_matched` can honestly accompany `paths`.

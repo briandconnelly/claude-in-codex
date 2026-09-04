@@ -12,6 +12,7 @@ from pontonier.core import redaction as _redaction
 
 from claude_in_codex.config import (
     MAX_ECHO_PROSE_BYTES,
+    MIN_ECHO_PROSE_BYTES,
     git_timeout_seconds,
     paths_bound_violation,
     ref_within_bounds,
@@ -414,6 +415,11 @@ def _cut_to_bytes(text: str, budget: int, *, keep_tail: bool = False) -> str:
     slow error, it is every concurrent call and job poll waiting on it. Byte-slicing
     does the same job in linear time -- and it is what `gather_context` already does
     to bound the diff itself."""
+    # `budget <= 0` first, and not as a slice: `encoded[-0:]` is the WHOLE buffer,
+    # so a zero tail budget silently returned the entire input -- a byte cap that
+    # inverts into no cap at all exactly when the budget is tightest.
+    if budget <= 0:
+        return ""
     encoded = text.encode("utf-8", "replace")
     if len(encoded) <= budget:
         return text
@@ -485,6 +491,12 @@ def bounded_echo_prose(text: str, limit_bytes: int = MAX_ECHO_PROSE_BYTES) -> st
     Sanitization runs on the WHOLE text before any cutting, deliberately. Pre-cutting
     to save the redactor work would hand it a secret severed mid-value, which it can
     no longer recognize -- turning a bounded echo into a partial-secret leak."""
+    if limit_bytes < MIN_ECHO_PROSE_BYTES:
+        # A parameter contract, not an input check: it cannot depend on the text, so
+        # it can only fire on a misuse, and it fires immediately instead of quietly
+        # emitting an unbounded message. Below this floor the marker and a useful
+        # head cannot both fit, and "bounded" stops meaning anything.
+        raise ValueError(f"limit_bytes must be at least {MIN_ECHO_PROSE_BYTES}")
     sanitized = sanitize_echo_prose(text).strip()
     if utf8_len(sanitized) <= limit_bytes:
         return sanitized
