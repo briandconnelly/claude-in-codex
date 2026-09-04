@@ -7,7 +7,7 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-Fingerprint `claude-in-codex/0.1/schema-54` (was `schema-50`). The changes are
+Fingerprint `claude-in-codex/0.1/schema-55` (was `schema-50`). The changes are
 parameter and metadata descriptions, one added `claude_capabilities` field, and
 two **breaking** changes (the `timeout` error's machine semantics and `base`'s
 type and acceptance, both below). `meta_fields` is a new required property on
@@ -15,6 +15,37 @@ type and acceptance, both below). `meta_fields` is a new required property on
 the advertised output-schema shape does move; no value set changed.
 
 ### Fixed
+
+- `CAPABILITY_SUMMARY` now separates rules from context, and no longer omits two
+  safety rules. It is doubly load-bearing — FastMCP's `instructions=` and the
+  `claude-in-codex://capabilities` resource — so it is what a client that never
+  installed the skill reads first. Compression had flattened it into one
+  undifferentiated paragraph in which hard rules, load-bearing hazards, and pure
+  inventory were separated only by periods and identical typography, with nothing
+  marking which sentences bind.
+
+  Two rules the shipped skill treats as mandatory were missing entirely: keep
+  `access=toolless` when the workspace may hold secrets, and never build
+  `system_prompt_append` **or** `focus` from workspace content. The `readonly`
+  hazard shipped with its rule missing — it named the danger and stopped.
+
+  The text is now split `RULES:` / `CONTEXT:`. The ceiling moves 1,200 → 1,300:
+  the previous one was being met by dropping safety rules, which means it was not
+  measuring what it was meant to. Inventory moved to `claude_capabilities` to pay
+  for part of the increase. (#180)
+
+- One obligation no longer ships at three different strengths. `claude_status`
+  was unconditional in the summary ("check claude_status first"), a two-branch
+  conditional in the skill, and discretionary in its own tool description ("use
+  first when unsure") — three readings an agent may encounter in any order and
+  cannot rank. All three now state the same rule. `idempotency_key`'s description
+  no longer opens with "Optional" while the skill calls it mandatory; getting that
+  one wrong means paying twice. (#180)
+
+- `CLAUDE_IN_CODEX_MAX_INPUT_BYTES` is now published in
+  `claude_capabilities().data_egress`. The summary was its only home, and #180's
+  premise for dropping it from there — that all three dropped phrases remained in
+  the capabilities payload — held for the other two but not for this one.
 
 - `base` is no longer silently accepted, ignored, and echoed on a scope that
   cannot use it. **Breaking.** `_selector_bounds_error` size-checked `base` on
