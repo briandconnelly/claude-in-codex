@@ -152,3 +152,32 @@ def test_every_integration_test_is_deliberately_counted_or_excluded():
             f"{name} counts toward the envelope floor but never calls "
             "_assert_structured, so it does not pin the upstream result contract"
         )
+
+
+def test_every_job_that_installs_npm_packages_drops_the_checkout_token():
+    """A freshly fetched npm package runs lifecycle scripts in the workspace.
+
+    `actions/checkout` leaves the job's GitHub token in git config by default, so
+    those scripts can read it. The `claude-contract` job has guarded against this
+    since it was written; the two live-integration jobs added by #170 did the
+    identical `npm install` without the guard, and review caught it.
+
+    Asserted for every job rather than for the two that were named. The defect is
+    that a job installing third-party code inherits a credential it never needs —
+    which is a property of the job, not of these three, and the next one to do it
+    should fail here rather than in review."""
+    for name in ("ci.yml", "publish.yml"):
+        jobs = _workflow(name)["jobs"]
+        for job_name, job in jobs.items():
+            steps = job.get("steps") or []
+            installs = [s for s in steps if "npm install" in str(s.get("run", ""))]
+            if not installs:
+                continue
+            checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
+            assert checkouts, f"{name}:{job_name} installs npm packages without a checkout?"
+            for step in checkouts:
+                assert (step.get("with") or {}).get("persist-credentials") is False, (
+                    f"{name}:{job_name} runs `npm install` but its checkout keeps the "
+                    "GitHub token in git config, where a package's lifecycle scripts "
+                    "can read it. Set persist-credentials: false."
+                )

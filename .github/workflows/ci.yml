@@ -146,6 +146,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # This job installs a freshly fetched npm package whose install scripts
+          # run in this workspace. Don't leave the checkout token in git config for
+          # it to read; the job never pushes and only needs `contents: read`.
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1

@@ -50,6 +50,13 @@ the advertised output-schema shape does move; no value set changed.
   fail on authentication, which would look like a contract regression instead of
   a missing credential. (#170)
 
+  Both live-integration jobs check out with `persist-credentials: false`, matching
+  the `claude-contract` job: they install a freshly fetched npm package whose
+  lifecycle scripts run in the workspace, and the default checkout would leave the
+  job's GitHub token in git config for those scripts to read. A test now asserts
+  this for every job that runs `npm install`, rather than for the two that were
+  named. (#170)
+
 - `CAPABILITY_SUMMARY` now separates rules from context, and no longer omits two
   safety rules. It is doubly load-bearing — FastMCP's `instructions=` and the
   `claude-in-codex://capabilities` resource — so it is what a client that never
