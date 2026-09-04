@@ -671,7 +671,7 @@ def _ref_too_large_details(ref: str | None) -> ErrorDetails | None:
     )
 
 
-def _timeout_action(tool: str) -> RepairAction | None:
+def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction | None:
     """The recovery for a sync timeout: the same call, detached.
 
     A sync paid call that blows its deadline has ALREADY SPENT and returned
@@ -698,10 +698,23 @@ def _timeout_action(tool: str) -> RepairAction | None:
       a job with its own deadline). They are omitted entirely above
       REPAIR_ARGS_MAX_BYTES, like every other reconstructed repair, so a large
       prompt cannot make the error block the biggest thing in the response.
-    * No `idempotency_key` is invented. A key the SERVER chose would look like a
-      dedup guarantee across a retry it cannot actually make -- the twin is a
-      different tool, so nothing about this timed-out run is replayable under it.
-      The caller supplies its own; the repair prose says to."""
+    * An `idempotency_key` IS supplied, derived from this call's request_id.
+
+      The first draft omitted it, reasoning that a server-chosen key would look
+      like a dedup guarantee across a retry it cannot make -- the twin is a
+      different tool, so nothing about the timed-out run is replayable under it.
+      That reasoning was right about what the key CANNOT do and wrong about what
+      it is for. It does not recover the lost spend; it deduplicates retries of
+      the NEW async launch, which is a fresh paid run that can itself lose its
+      reply. And omitting it made the server emit a literally-callable _async
+      launch that violates the rule the same server publishes in
+      CAPABILITY_SUMMARY and the shipped skill: pass idempotency_key on every
+      _async launch. An action that breaks the contract's own rule is worse than
+      one that is merely incomplete.
+
+      Derived from request_id so it is STABLE: replaying this exact repair twice
+      is a replay, not a second job. It is namespaced so it cannot collide with
+      a caller's own keys."""
     twin = _ASYNC_TWIN.get(tool)
     if twin is None:
         # Not a sync paid tool -- e.g. a stored `timeout` envelope fetched back
@@ -712,6 +725,8 @@ def _timeout_action(tool: str) -> RepairAction | None:
     if not isinstance(original, dict):
         return RepairAction(next_step="call_tool", tool=twin)
     remaining = {k: v for k, v in original.items() if k != "timeout_seconds"}
+    if request_id:
+        remaining["idempotency_key"] = f"timeout-repair-{request_id}"
     try:
         size = len(json.dumps(remaining, default=str).encode("utf-8"))
     except (TypeError, ValueError):
@@ -1652,7 +1667,7 @@ async def _execute(
             # re-issuing. Built here rather than in classify_failure because only
             # this layer knows which tool was called and what it was called with
             # (#178).
-            action=_timeout_action(tool) if info.code == "timeout" else None,
+            action=(_timeout_action(tool, meta.request_id) if info.code == "timeout" else None),
         )
     return normalize_envelope(
         tool, run.stdout, meta, detail=r.detail, context_summary=context_summary

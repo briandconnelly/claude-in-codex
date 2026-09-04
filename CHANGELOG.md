@@ -34,9 +34,13 @@ output-schema shape does move; no value set changed.
   action names the `_async` twin — which survives the deadline — carrying the
   original arguments minus `timeout_seconds`, bounded by
   `REPAIR_ARGS_MAX_BYTES` like every other reconstructed repair. The message
-  states plainly that the spend is not recoverable. No `idempotency_key` is
-  invented: a server-chosen key would imply a dedup guarantee across a retry it
-  cannot make, since the twin is a different tool. (#178)
+  states plainly that the spend is not recoverable. The action carries a stable
+  `idempotency_key` derived from the failed call's `request_id`: it does not
+  recover the lost spend — nothing can — but it deduplicates retries of the new
+  async launch, which is itself a fresh paid run that can lose its reply. Without
+  it the server would emit a literally-callable `_async` launch that violates the
+  rule the same server publishes: pass `idempotency_key` on every `_async`
+  launch. (#178)
 
 - The shipped skill pointed recovery at the wrong field. It described the error
   envelope as `{code, message, repair}` and said "follow `repair`", never
