@@ -757,10 +757,24 @@ class RepairAction(BaseModel):
     """The single deterministic recovery instruction for an error.
 
     `tool` names a tool registered by this server and `arguments` are literally
-    callable — pass them through unchanged. Both are absent for the steps that do
-    not name a call (retry_same_call, fix_environment, no_automatic_repair), and
-    `arguments` may be absent on retry_with_changes when the corrected call could
-    not be reconstructed (see `argument_reconstruction` in claude_capabilities)."""
+    callable — pass them through unchanged.
+
+    The rule, stated so it matches what is actually emitted:
+
+    * `call_tool` ALWAYS names a `tool`. `arguments` is absent only when the named
+      tool needs none — `claude_status` on a terminal `job_failed`, for instance.
+    * `retry_with_changes` names a `tool` when it can, and omits `arguments` when
+      the corrected call could not be reconstructed (see `argument_reconstruction`
+      in claude_capabilities).
+    * `retry_same_call`, `fix_environment` and `no_automatic_repair` name no call,
+      so both fields are absent.
+
+    This used to say `arguments` may be absent "on retry_with_changes" alone,
+    which read as forbidding the argless `call_tool` that `job_failed` has always
+    shipped. The four codes whose DEFAULT action is a bare `call_tool` (timeout,
+    job_not_found, job_running, job_failed) are templates: the emitted envelope
+    fills in the tool. What binds is the envelope, and the invariant it must hold
+    is the first bullet."""
 
     model_config = ConfigDict(extra="forbid")
     next_step: RepairStep

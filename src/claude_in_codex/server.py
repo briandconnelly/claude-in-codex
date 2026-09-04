@@ -732,9 +732,12 @@ def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction:
       a caller's own keys."""
     twin = _ASYNC_TWIN.get(tool)
     if twin is None:
-        # Not a sync paid tool -- e.g. a stored `timeout` envelope fetched back
-        # through claude_job_result, where the run was already detached and
-        # pointing at an async twin would be nonsense.
+        # Not a sync paid tool. Defensive rather than reachable: `_timeout_action`
+        # has one caller, `_execute`, which only the three tools in _ASYNC_TWIN
+        # reach, and a job that blows its own deadline surfaces as `job_timeout`
+        # rather than `timeout` (normalize.py rebuilds stored envelopes with
+        # timed_out=False). An earlier revision of this comment claimed a stored
+        # timeout fetched through claude_job_result lands here; it does not.
         #
         # Returns a concrete step rather than None. None would let the envelope
         # fall back to DEFAULT_NEXT_STEP["timeout"], which is `call_tool` -- and a
@@ -746,8 +749,12 @@ def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction:
     if not isinstance(original, dict):
         return _twin_needs_arguments(twin)
     remaining = {k: v for k, v in original.items() if k != "timeout_seconds"}
-    if request_id:
-        remaining["idempotency_key"] = f"timeout-repair-{request_id}"
+    # Unconditional. `Meta.request_id` has a uuid4 default factory, so the guard
+    # this used to carry could never be false -- and if it somehow were, the
+    # branch would silently emit an UNGUARDED _async launch, which is the one
+    # outcome this whole change exists to prevent. A parameter that cannot be
+    # missing should not have a fallback that would be wrong.
+    remaining["idempotency_key"] = f"timeout-repair-{request_id}"
     try:
         size = len(json.dumps(remaining, default=str).encode("utf-8"))
     except (TypeError, ValueError):

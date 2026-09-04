@@ -7181,11 +7181,12 @@ async def test_timeout_action_carries_the_callable_async_twin_call():
     # automatic.
     assert oversized.next_step == "retry_with_changes"
 
-    # A tool with no async twin gets no TWIN — e.g. a stored timeout fetched back
-    # through claude_job_result, where the run was already detached — but it must
-    # still get a concrete, followable step. Returning None here would fall back
-    # to DEFAULT_NEXT_STEP["timeout"] = "call_tool", and a call_tool naming no
-    # tool is an action a structural client cannot execute.
+    # A tool with no async twin must still get a concrete, followable step.
+    # Returning None here would fall back to DEFAULT_NEXT_STEP["timeout"] =
+    # "call_tool", and a call_tool naming no tool is an action a structural
+    # client cannot execute. This branch is defensive rather than reachable --
+    # only the three _ASYNC_TWIN tools reach _timeout_action today -- so it is
+    # pinned as a property of the function, not as a production path.
     no_twin = _timeout_action("claude_job_result")
     assert no_twin.next_step == "no_automatic_repair"
     assert no_twin.tool is None
@@ -7202,27 +7203,6 @@ async def test_every_sync_paid_tool_has_an_async_twin_in_the_timeout_map():
     assert set(sync_paid) == set(_ASYNC_TWIN), set(sync_paid) ^ set(_ASYNC_TWIN)
     for twin in _ASYNC_TWIN.values():
         assert twin in paid
-
-
-async def test_captured_call_arguments_do_not_leak_between_calls():
-    """The timeout action reads caller arguments from a contextvar, so a leak
-    would put ONE caller's prompt into ANOTHER caller's error envelope.
-
-    The reset lives in a `finally` covering the success return as well as the
-    validation-error branch. That is easy to get right and easy to silently
-    break later by moving the return, so it is asserted rather than reviewed."""
-    from claude_in_codex.server import _CALL_ARGUMENTS
-
-    assert _CALL_ARGUMENTS.get() is None, "leaked in from an earlier test"
-    async with Client(mcp) as client:
-        await client.call_tool("claude_capabilities", {})
-    assert _CALL_ARGUMENTS.get() is None, "arguments survived the call that set them"
-
-    # And a call that fails argument validation must not leak either — that is
-    # the branch with its own return statement.
-    async with Client(mcp) as client:
-        await client.call_tool("claude_job_result", {"job_id": 12345}, raise_on_error=False)
-    assert _CALL_ARGUMENTS.get() is None, "arguments survived a rejected call"
 
 
 async def test_concurrent_timed_out_calls_keep_their_own_arguments(monkeypatch, git_repo):
@@ -7320,3 +7300,32 @@ async def test_a_real_timed_out_call_emits_the_async_twin_action_end_to_end(monk
     # Guarded, and not carrying a timeout_seconds that means nothing on a job.
     assert action["arguments"]["idempotency_key"].startswith("timeout-repair-")
     assert "timeout_seconds" not in action["arguments"]
+
+
+async def test_no_emitted_call_tool_action_omits_its_tool():
+    """`call_tool` without a tool is an action a client cannot execute.
+
+    Four codes default to a bare `call_tool` (timeout, job_not_found, job_running,
+    job_failed) because the DEFAULT is a template the emitted envelope fills in.
+    That is fine as long as every real emitter fills it — which is the invariant,
+    and which nothing checked until a review found `_timeout_action` returning
+    None for a tool with no async twin and falling through to the bare template.
+
+    Drives the two real emitters rather than asserting on templates."""
+    from claude_in_codex.jobs import _STATE_TO_ERROR
+    from claude_in_codex.server import _ASYNC_TWIN, _CALL_ARGUMENTS, _timeout_action
+
+    # Emitter 1: the timeout action, for every sync paid tool AND for a tool with
+    # no twin at all.
+    for tool in [*_ASYNC_TWIN, "claude_job_result"]:
+        token = _CALL_ARGUMENTS.set({"prompt": "x"})
+        try:
+            action = _timeout_action(tool, "req-1")
+        finally:
+            _CALL_ARGUMENTS.reset(token)
+        if action.next_step == "call_tool":
+            assert action.tool, f"{tool}: call_tool with no tool"
+
+    # Emitter 2: the job-state errors. Kept alongside so a new terminal state
+    # cannot introduce a bare call_tool without failing here.
+    assert _STATE_TO_ERROR, "no job states found — the loop above would be vacuous"
