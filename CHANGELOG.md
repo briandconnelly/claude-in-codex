@@ -36,7 +36,16 @@ the advertised output-schema shape does move; no value set changed.
   would have preserved the exact bug above for `base="main"` while appearing to
   close it. The `main` default now resolves after scope validation. `meta.base`
   is absent on any scope but `branch`, enforced in `bounded_selectors` so it also
-  governs the meta rebuilt from an on-disk job record. (#177)
+  governs the meta rebuilt from an on-disk job record.
+
+  The effective base resolves once per handler, before `meta` is built, so the
+  envelope, the prompt, and any stored job record all name the ref the diff was
+  actually gathered against. An explicitly empty `base` is refused rather than
+  defaulted — an empty string is a value the caller sent, and treating it as
+  omission would recreate the silent-wrong-comparison class this change removes.
+  `invalid_base`'s published condition now names the wrong-scope case, so an
+  agent consulting the catalog does not conclude its ref was wrong and retry on
+  the same wrong scope. (#177)
 
 
 - The `timeout` error no longer advises an unguarded double spend. **Breaking
