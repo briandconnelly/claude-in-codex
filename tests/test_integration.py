@@ -37,18 +37,29 @@ def test_live_gate_prerequisites_are_present():
         "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but the `claude` CLI is not on PATH. The "
         "release gate must not pass by skipping."
     )
-    # Authentication, not one particular credential. The first draft asserted
-    # ANTHROPIC_API_KEY and failed on a developer machine where the live tests
-    # had just PASSED under subscription auth -- ANTHROPIC_API_KEY is only
-    # required for config_mode=bare. Probing auth covers the CI key and the
-    # subscription equally, which is what the gate actually depends on.
+    # Probed under the mode the CONTRACT TESTS ACTUALLY USE, not under None.
+    #
+    # Two earlier revisions got this wrong in opposite directions. The first
+    # asserted ANTHROPIC_API_KEY and failed on a developer machine where the live
+    # tests had just passed under subscription auth. The second probed
+    # config_mode=None -- which is not a login-backed mode, so it inherits the
+    # environment and ACCEPTS a bare ANTHROPIC_API_KEY. But every paid test below
+    # runs under `inherit` or `safe`, and `_claude_subprocess_env` strips
+    # ANTHROPIC_API_KEY in exactly those modes. So a runner holding only that key
+    # would pass this prerequisite and then fail all three envelope tests on
+    # authentication -- a credential problem wearing the costume of a contract
+    # regression, which is the misleading signal this whole gate exists to remove.
+    #
+    # Probing `inherit` means a key-only runner fails HERE, first, saying so.
     from claude_in_codex.claude import auth_status
 
-    logged_in, detail = auth_status(config_mode=None)
+    logged_in, detail = auth_status(config_mode="inherit")
     assert logged_in, (
-        "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but `claude` is not authenticated "
-        f"({detail}). The live tests would fail to reach Anthropic, and a gate "
-        "that cannot reach Anthropic verifies nothing."
+        "CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but `claude` is not authenticated for the "
+        f"login-backed modes the contract tests use ({detail}). Note that "
+        "ANTHROPIC_API_KEY alone is NOT sufficient: config_mode=inherit and "
+        "config_mode=safe deliberately strip it and require a Claude Code login "
+        "session. A gate that cannot reach Anthropic verifies nothing."
     )
 
 

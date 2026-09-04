@@ -30,16 +30,25 @@ the advertised output-schema shape does move; no value set changed.
   forgetting a manual step.
 
   Wiring it up is not sufficient on its own: the suite skips itself when
-  `claude` is absent, so a runner with no CLI and no key would have exited 0 and
-  reported the contract verified. `CLAUDE_IN_CODEX_REQUIRE_LIVE=1` makes it
-  fail closed — a missing CLI or `ANTHROPIC_API_KEY` fails outright, and the
-  session refuses to pass unless a floor of **contract** tests actually ran, so
-  neither an all-skipped run nor a zero-collected one can report success. The
-  prerequisite check is excluded from that floor — counting it would let one real
-  contract test be removed while the count still reached four, which is the
+  `claude` is absent, so a runner with no CLI would have exited 0 and reported
+  the contract verified. `CLAUDE_IN_CODEX_REQUIRE_LIVE=1` makes it fail closed —
+  a missing or unauthenticated CLI fails outright, and the session refuses to
+  pass unless a floor of **envelope** tests actually ran, so neither an
+  all-skipped run nor a zero-collected one can report success. The prerequisite
+  and readiness checks are excluded from that floor — counting either would let a
+  real envelope test be removed while the count still cleared, which is the
   regression the floor exists to catch. Both the release gate and the manual
   dispatch job set it, and the combination with `pytest-xdist` is refused rather
   than left to undercount. (#170)
+
+  **The gate needs a Claude Code login session, not an API key.** Its contract
+  tests run under `config_mode=inherit` and `config_mode=safe`, and those modes
+  deliberately strip `ANTHROPIC_API_KEY`, so a runner holding only that key
+  authenticates for nothing the gate measures. The prerequisite probes
+  `config_mode=inherit` for exactly this reason: a key-only runner fails there,
+  first, naming the cause — rather than passing and letting every envelope test
+  fail on authentication, which would look like a contract regression instead of
+  a missing credential. (#170)
 
 - `CAPABILITY_SUMMARY` now separates rules from context, and no longer omits two
   safety rules. It is doubly load-bearing — FastMCP's `instructions=` and the

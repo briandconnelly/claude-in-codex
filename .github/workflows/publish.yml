@@ -119,6 +119,14 @@ jobs:
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
+      # ANTHROPIC_API_KEY alone is NOT enough for this suite. Its contract tests
+      # run under config_mode=inherit and config_mode=safe, and those modes strip
+      # ANTHROPIC_API_KEY on purpose (_LOGIN_MODES in claude.py) and require a
+      # Claude Code login session. The environment must therefore supply a
+      # login-backed credential; the key is passed through only for any
+      # bare-mode path. The prerequisite probes config_mode=inherit, so a
+      # key-only runner fails immediately and says why, rather than passing and
+      # letting three envelope tests fail on authentication.
       - name: Run the live contract gate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
