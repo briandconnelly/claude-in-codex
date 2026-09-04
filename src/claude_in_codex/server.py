@@ -686,7 +686,7 @@ def _twin_needs_arguments(twin: str) -> RepairAction:
     return RepairAction(next_step="retry_with_changes", tool=twin)
 
 
-def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction | None:
+def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction:
     """The recovery for a sync timeout: the same call, detached.
 
     A sync paid call that blows its deadline has ALREADY SPENT and returned
@@ -735,7 +735,13 @@ def _timeout_action(tool: str, request_id: str | None = None) -> RepairAction | 
         # Not a sync paid tool -- e.g. a stored `timeout` envelope fetched back
         # through claude_job_result, where the run was already detached and
         # pointing at an async twin would be nonsense.
-        return None
+        #
+        # Returns a concrete step rather than None. None would let the envelope
+        # fall back to DEFAULT_NEXT_STEP["timeout"], which is `call_tool` -- and a
+        # call_tool naming NO tool is an action a structural client cannot
+        # execute. Every emitted envelope must carry an action it can actually
+        # follow, even when the honest answer is that no call recovers this.
+        return RepairAction(next_step="no_automatic_repair")
     original = _CALL_ARGUMENTS.get()
     if not isinstance(original, dict):
         return _twin_needs_arguments(twin)
