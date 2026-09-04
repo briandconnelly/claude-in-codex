@@ -42,6 +42,48 @@ def _no_inherited_git_env():
         os.environ.update(saved)
 
 
+@pytest.fixture(autouse=True)
+def _emitted_details_are_advertised(monkeypatch):
+    """Every `details` field an error actually emits must be in its catalog entry.
+
+    `ErrorCodeDoc.detail_fields` is published as "the fields this code may
+    populate", so an agent that pre-builds a branch from the catalog never learns
+    about a field the catalog omits. `test_catalog_detail_fields_exist_on_error_details`
+    only checks the other direction -- that advertised names are real -- which is
+    why `invalid_workspace_root` could emit the `reason` carrying the whole
+    sessionless-connection contract while advertising only `field`/`value`.
+
+    Checked here, at the `_err` boundary, rather than by a static walk or by one
+    specimen per code. A static walk cannot see the codes `_workspace_error`
+    passes through a variable, the `X and ErrorDetails(...)` sites, or the shared
+    `_oversized_diff_details` helper; and one specimen per code proves nothing
+    about a code whose branches emit different shapes -- `invalid_workspace_root`
+    alone emits `field`/`value` on one branch and `field`/`reason` on another.
+    Wrapping the builder covers every branch the suite reaches, and it fails in
+    the test that reached it rather than in a summary at session end.
+
+    This is an assertion about the SERVER's own catalog, so it is keyed off the
+    envelope `_err` returns (post-merge, `exclude_none`) -- exactly the fields
+    that ship."""
+    import claude_in_codex.server as srv
+
+    advertised = {row[0]: set(row[3]) for row in srv._ERROR_CATALOG}
+    real_err = srv._err
+
+    def checked_err(code, *args, **kwargs):
+        envelope = real_err(code, *args, **kwargs)
+        emitted = set((envelope.get("error") or {}).get("details") or {})
+        unadvertised = emitted - advertised.get(code, set())
+        assert not unadvertised, (
+            f"{code} emits details {sorted(unadvertised)} that its _ERROR_CATALOG "
+            f"entry does not advertise (advertised: {sorted(advertised.get(code, set()))}). "
+            "Add them to the catalog entry and bump FINGERPRINT."
+        )
+        return envelope
+
+    monkeypatch.setattr(srv, "_err", checked_err)
+
+
 def structured(result):
     """Extract the structured payload from a FastMCP call result across versions."""
     data = getattr(result, "structured_content", None)

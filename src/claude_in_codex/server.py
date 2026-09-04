@@ -82,7 +82,6 @@ from claude_in_codex.schemas import (
     CAPABILITIES_SCHEMA,
     CONSULT_JOB_START_SCHEMA,
     DEFAULT_NEXT_STEP,
-    DETAIL_VALUE_MAX_CHARS,
     DRY_RUN_SCHEMA,
     FINGERPRINT,
     FINGERPRINT_COVERS,
@@ -122,6 +121,7 @@ from claude_in_codex.schemas import (
     SystemPromptAppend,
     ToolCapability,
     Verdict,
+    bounded_inert,
     bounded_repr,
     bounded_selectors,
     workspace_warning_for,
@@ -380,13 +380,22 @@ def _render_value(value: object) -> str | None:
 
     None is dropped rather than rendered as "None": an absent detail field means
     "not applicable", and a caller that genuinely passed null learns that from the
-    message, not from a string that is indistinguishable from a literal."""
+    message, not from a string that is indistinguishable from a literal.
+
+    `bounded_inert`, not a raw slice. This field is the one place the contract
+    promises the rejected value back (#165), and #162's input caps make it the
+    echo through which a rejected selector reaches the response -- so the response
+    stays bounded only if this rendering is. A raw slice bounded neither thing: it
+    cut CODE POINTS while `_emittable` later expands each lone surrogate to the
+    six characters `\\udddd`, so a 200-cap could ship ~1200 characters, and it left
+    control characters and terminal escapes live in a field an agent displays.
+
+    Bare, not `bounded_repr`: the ill-behaved values need defanging, but quoting
+    the well-behaved ones would change every ordinary echo from `foo` to `'foo'`
+    to fix a defect none of them had."""
     if value is None:
         return None
-    text = value if isinstance(value, str) else repr(value)
-    if len(text) > DETAIL_VALUE_MAX_CHARS:
-        return text[:DETAIL_VALUE_MAX_CHARS] + "…"
-    return text
+    return bounded_inert(value if isinstance(value, str) else repr(value))
 
 
 def _err(
@@ -3729,9 +3738,15 @@ _ERROR_CATALOG: list[tuple[str, str, bool, list[str]]] = [
     ),
     (
         "invalid_workspace_root",
-        "The resolved workspace is not an existing absolute directory.",
+        "The resolved workspace is not an existing absolute directory, or no "
+        "workspace could be resolved because the connection cannot be asked for "
+        "MCP roots (reason=roots_unavailable_on_connection).",
         False,
-        ["field", "value"],
+        # `reason` is the branch discriminator, not decoration: on a sessionless
+        # MCP 2026-07-28 connection there is no roots/list back-channel and no cwd
+        # fallback, so the repair is "pass workspace_root", not "fix the path you
+        # passed" -- and `value` is absent there because the caller passed none.
+        ["field", "value", "reason"],
     ),
     (
         "workspace_outside_roots",

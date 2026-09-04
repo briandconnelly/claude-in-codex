@@ -96,7 +96,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "claude-in-codex/0.1/schema-49"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-50"
 
 
 def test_meta_carries_head_and_diff_range():
@@ -301,7 +301,9 @@ def test_bounded_repr_marks_a_short_value_whose_repr_overflows():
 
     out = schemas.bounded_repr(value)
     assert out.endswith("…")
-    assert len(out) <= schemas.DETAIL_VALUE_MAX_CHARS + 1
+    # The marker counts against the cap; a limit it is added to afterwards is
+    # not a limit, which is the objection #163 makes to the prose helper.
+    assert len(out) <= schemas.DETAIL_VALUE_MAX_CHARS
 
 
 def test_bounded_repr_leaves_a_fitting_value_unmarked():
@@ -310,3 +312,70 @@ def test_bounded_repr_leaves_a_fitting_value_unmarked():
     assert schemas.bounded_repr("") == "''"
     exact = "a" * (schemas.DETAIL_VALUE_MAX_CHARS - 2)
     assert schemas.bounded_repr(exact) == repr(exact)
+
+
+def test_escape_inert_defangs_every_non_printable_code_point():
+    """Nothing non-printable may survive, at any code-point width.
+
+    The three escape widths are asserted individually because a value that took
+    the wrong branch would still LOOK escaped; only the exact notation shows the
+    code point was preserved rather than mangled."""
+    assert schemas.escape_inert("\x1b[31m") == "\\x1b[31m"
+    assert schemas.escape_inert("\ud800") == "\\ud800"
+    assert schemas.escape_inert("\u200b") == "\\u200b"
+    assert schemas.escape_inert("\U000e0001") == "\\U000e0001"
+
+    every_byte = "".join(chr(c) for c in range(0x100)) + "\ud800\udfff\u2028"
+    assert all(ch.isprintable() for ch in schemas.escape_inert(every_byte))
+
+
+def test_escape_inert_leaves_ordinary_values_byte_for_byte():
+    """The whole reason this is not `bounded_repr`.
+
+    `ErrorDetails.value` carries the rejected value bare, so a well-behaved echo
+    must come back exactly as sent -- no quotes, no doubled backslashes, and no
+    escaping of legitimate non-ASCII."""
+    for value in ("src/main.py", "café/naïve.py", r"C:\Users\x1b\file", 'it\'s "both"'):
+        assert schemas.escape_inert(value) == value
+
+
+def test_bounded_inert_bounds_what_ships_not_what_arrived():
+    """A cap on code points is not a cap on the wire.
+
+    `_emittable`'s `backslashreplace` pass expands each lone surrogate to the six
+    characters `\\udddd`, so a rendering cut to 200 CODE POINTS shipped ~1200
+    characters (the #162 defect). Escaping first is what makes the cap real."""
+    value = "-" + "\ud800" * 400
+    out = schemas.bounded_inert(value)
+    assert len(out) <= schemas.DETAIL_VALUE_MAX_CHARS
+    assert "\ud800" not in out  # already flattened; nothing left for _emittable
+    assert out.encode("utf-8")  # and therefore encodable, unlike the input
+
+
+def test_bounded_inert_never_renders_more_than_the_cap():
+    """The amplification guard, for the bare renderer as well as the repr one."""
+    seen: list[int] = []
+
+    class _Counting(str):
+        def isprintable(self) -> bool:
+            seen.append(len(self))
+            return str.isprintable(self)
+
+    schemas.bounded_inert(_Counting("\x1b" * 500_000))
+    assert [n for n in seen if n > schemas.DETAIL_VALUE_MAX_CHARS] == []
+
+
+def test_both_bounded_renderers_obey_the_cap_across_a_sweep():
+    """One property over both helpers, measured on what `_emittable` would ship.
+
+    A per-case assertion would pass on the inputs someone thought to write down;
+    the defect this closes was found at a width nobody had."""
+    from claude_in_codex.server import _emittable
+
+    for filler in ("a", "\x1b", "\ud800", "\U0001f600", "\n"):
+        for n in (0, 1, 199, 200, 201, 319):
+            for render in (schemas.bounded_inert, schemas.bounded_repr):
+                shipped = _emittable(render(filler * n))
+                assert len(shipped) <= schemas.DETAIL_VALUE_MAX_CHARS, (
+                    f"{render.__name__}({filler!r} * {n}) ships {len(shipped)} chars"
+                )

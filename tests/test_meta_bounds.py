@@ -484,3 +484,62 @@ async def test_job_result_and_consume_are_bounded_end_to_end(monkeypatch, git_re
             assert data["meta"].get("diff_range") is None
             assert _size(data) < ENVELOPE_CEILING_BYTES
             assert any("selector size caps" in w for w in data["meta"].get("security_warnings", []))
+
+
+async def test_details_value_ships_inert(fake_claude, git_repo):
+    """The rejected value comes back defanged, not just bounded (#163's rule, #165's field).
+
+    `details.value` is the field #165 added so recovery never requires parsing
+    prose, which makes it the echo through which a selector rejected by #162's
+    input caps reaches the response. It is displayed by agents, so a live ESC
+    byte here can recolor, reposition, or erase the surrounding output -- the
+    same reason `message` renders through `bounded_repr`.
+    """
+    entry = "-\x1b[31mRED\x1b[0m"
+    data = await _call(
+        "claude_review_changes",
+        {"scope": "working_tree", "paths": [entry], "workspace_root": str(git_repo)},
+    )
+    assert data["error"]["code"] == "invalid_paths"
+    value = data["error"]["details"]["value"]
+    assert "\x1b" not in value, "a live terminal escape reached details.value"
+    assert value == "-\\x1b[31mRED\\x1b[0m"
+    # Bare, not quoted: the field carries the value itself, and wrapping every
+    # well-behaved echo would be churn unrelated to the escaping fix.
+    assert not value.startswith("'")
+    assert "\x1b" not in json.dumps(data)
+
+
+async def test_details_value_is_bounded_after_escaping_not_before(fake_claude, git_repo):
+    """The cap must bind what SHIPS, which is what #162 established for the envelope.
+
+    A lone surrogate survives a code-point slice but is expanded to the six
+    characters `\\udddd` by the envelope's later `backslashreplace` pass, so a
+    cap applied before that pass let a 200-char budget ship ~1200 characters.
+    """
+    from claude_in_codex.schemas import DETAIL_VALUE_MAX_CHARS
+
+    data = await _call(
+        "claude_review_changes",
+        {
+            "scope": "working_tree",
+            "paths": ["-" + "\ud800" * 400],
+            "workspace_root": str(git_repo),
+        },
+    )
+    assert data["error"]["code"] == "invalid_paths"
+    value = data["error"]["details"]["value"]
+    assert len(value) <= DETAIL_VALUE_MAX_CHARS, f"details.value shipped {len(value)} chars"
+    assert _size(data) < ENVELOPE_CEILING_BYTES
+
+
+def test_an_ordinary_rejected_value_is_echoed_unchanged():
+    """Positive control for the two tests above.
+
+    Escaping that altered every value would satisfy both assertions above while
+    making the field useless for recovery, so pin that a clean value survives
+    byte-for-byte.
+    """
+    from claude_in_codex.schemas import bounded_inert
+
+    assert bounded_inert("-src/app.py") == "-src/app.py"

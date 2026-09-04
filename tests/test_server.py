@@ -632,7 +632,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-49"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-50"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1527,7 +1527,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-49"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-50"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -3186,6 +3186,17 @@ async def test_sessionless_client_must_pass_workspace_root(fake_claude, git_repo
         "field": "workspace_root",
         "reason": "roots_unavailable_on_connection",
     }
+    # `reason` is the one typed token a generic client branches on to tell this
+    # apart from "the path you passed is not a directory", so the published
+    # catalog has to name it. The autouse conftest guard asserts the same
+    # containment for every error the suite reaches; this pins the specific
+    # branch that motivated it, because the guard would go quiet if this call
+    # ever stopped emitting `reason`.
+    from claude_in_codex.server import _ERROR_CATALOG
+
+    advertised = {row[0]: set(row[3]) for row in _ERROR_CATALOG}
+    assert set(omitted["error"]["details"]) <= advertised["invalid_workspace_root"]
+    assert "reason" in advertised["invalid_workspace_root"]
     assert "workspace_root" in omitted["error"]["repair"]
     assert explicit["ok"] is True
     assert explicit["meta"]["workspace_source"] == "param"

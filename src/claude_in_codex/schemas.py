@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, cast
 from uuid import uuid4
 
 from pydantic import (
@@ -16,6 +16,9 @@ from pydantic import (
     TypeAdapter,
     model_validator,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from claude_in_codex.config import (
     MAX_SYSTEM_PROMPT_APPEND_BYTES,
@@ -63,21 +66,98 @@ def bounded_repr(value: str) -> str:
     not from the rendered length alone. Both conditions are load-bearing: a value
     shorter than the cap can still render past it once escapes expand, and that
     case must truncate and mark even though the head covered everything."""
+    return _bounded_render(value, repr)
+
+
+# The truncation marker every bounded echo in this module ends with. It counts
+# against DETAIL_VALUE_MAX_CHARS rather than being appended outside it: a cap the
+# marker is added to afterwards is not a cap, which is the objection #163 makes
+# to the prose helper's budget and applies here for the same reason.
+_TRUNCATION_MARKER = "…"
+
+
+def _escape_char(ch: str) -> str:
+    """One code point as an inert ASCII escape, in repr()'s own notation."""
+    o = ord(ch)
+    if o <= 0xFF:
+        return f"\\x{o:02x}"
+    if o <= 0xFFFF:
+        return f"\\u{o:04x}"
+    return f"\\U{o:08x}"
+
+
+def escape_inert(value: str) -> str:
+    """`value` with every non-printable code point escaped, and nothing else changed.
+
+    The same defanging `repr()` performs -- control characters and terminal escapes
+    stop being able to recolor, reposition, or erase the agent's view, and a lone
+    surrogate becomes an ASCII `\\udddd` so the envelope's later `backslashreplace`
+    pass has nothing left to expand -- but WITHOUT repr()'s surrounding quotes.
+
+    `str.isprintable()` is the test because it is the one repr() itself uses, so a
+    value routed through either helper is defanged against the same set.
+
+    Quotes are the whole reason this exists separately. `ErrorDetails.value` carries
+    the rejected value bare, and wrapping it would change every well-behaved echo --
+    `foo` to `'foo'` -- to fix a defect that only ever concerned the ill-behaved
+    ones. The safety property is the escaping, not the quoting.
+
+    A backslash is deliberately NOT escaped, so a Windows-style path survives
+    byte-for-byte. The cost is that a value containing the literal six characters
+    `\\x1b` renders identically to a real escape byte. Both are inert on arrival,
+    which is what this function promises; distinguishing them is `message`'s job,
+    and `message` uses `bounded_repr`."""
+    # The scan is linear and the overwhelming majority of values are clean, so the
+    # fast path avoids building a second string for nothing.
+    if value.isprintable():
+        return value
+    return "".join(ch if ch.isprintable() else _escape_char(ch) for ch in value)
+
+
+def bounded_inert(value: str) -> str:
+    """`value` escaped inert and bare, with the RENDERED length inside the cap.
+
+    The bare-string counterpart to `bounded_repr`, and the correct rendering for
+    `ErrorDetails.value`. Both bound the OUTPUT: escapes expand, so 200 code points
+    of input can render several times the cap, and a bound applied to the input is
+    not a bound on what ships (#150, #162)."""
+    return _bounded_render(value, escape_inert)
+
+
+def _bounded_render(value: str, render: Callable[[str], str]) -> str:
+    """Largest head of `value` whose `render()` fits the cap, marked if truncated.
+
+    Shared by `bounded_repr` and `bounded_inert` so the two echo sites cannot drift
+    into disagreeing about what "bounded" means -- the defect #163 found between the
+    prose helper and this one, one level down.
+
+    `render` is applied to at most the cap's worth of code points, never the whole
+    value. Rendering an oversized input first -- even only to ask whether it fits --
+    allocates several times that input to return ~200 characters, which is the same
+    "server work proportional to caller input" these helpers exist to stop; it moves
+    the amplification from the wire to the heap rather than removing it.
+
+    Truncation is decided from whether the head covers the WHOLE value, not from the
+    rendered length alone. Both conditions are load-bearing: a value shorter than the
+    cap can still render past it once escapes expand, and that case must truncate and
+    mark even though the head covered everything."""
     head = value[:DETAIL_VALUE_MAX_CHARS]
-    rendered = repr(head)
+    rendered = render(head)
     if len(value) <= DETAIL_VALUE_MAX_CHARS and len(rendered) <= DETAIL_VALUE_MAX_CHARS:
         return rendered
-    # Each step drops one code point, so this terminates at "''" in the worst
-    # case; the loop only ever runs over a string already cut to the cap.
-    while head and len(repr(head)) > DETAIL_VALUE_MAX_CHARS:
+    # The marker is inside the budget, so the head must fit the cap minus its width.
+    budget = DETAIL_VALUE_MAX_CHARS - len(_TRUNCATION_MARKER)
+    # Each step drops one code point, so this terminates at the empty rendering in
+    # the worst case; the loop only ever runs over a string already cut to the cap.
+    while head and len(render(head)) > budget:
         head = head[:-1]
-    return repr(head) + "…"
+    return render(head) + _TRUNCATION_MARKER
 
 
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-49"
+FINGERPRINT = "claude-in-codex/0.1/schema-50"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
