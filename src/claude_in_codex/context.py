@@ -11,12 +11,18 @@ from dataclasses import dataclass, field
 from pontonier.core import redaction as _redaction
 
 from claude_in_codex.config import (
+    MAX_ECHO_PROSE_BYTES,
+    MIN_ECHO_PROSE_BYTES,
     git_timeout_seconds,
     paths_bound_violation,
     ref_within_bounds,
     unencodable_reason,
+    utf8_len,
 )
-from claude_in_codex.schemas import ContextSummary, bounded_repr
+from claude_in_codex.schemas import (
+    ContextSummary,
+    bounded_repr,
+)
 
 MAX_DIFF_BYTES = 200_000
 
@@ -389,6 +395,118 @@ def sanitize_echo_prose(text: str) -> str:
     if not text:
         return text
     return _redaction.sanitize_echo_prose(text) or ""
+
+
+# The redaction markers this module may have to repair a cut through. Imported from
+# the engine rather than retyped: a marker whose text drifts from pontonier's would
+# make the repair below silently stop matching, which is invisible in the output.
+_REDACTION_MARKERS = (_redaction._SECRET_VALUE_MARKER, _redaction._PARTIAL_SECRET_VALUE_MARKER)
+
+
+def _cut_to_bytes(text: str, budget: int, *, keep_tail: bool = False) -> str:
+    """Trim `text` to at most `budget` UTF-8 bytes, never splitting a code point.
+
+    Slice the ENCODED bytes and let the decoder drop whatever partial code point the
+    cut severed. The obvious alternative -- dropping one code point at a time until
+    the encoding fits -- is quadratic, because each step re-copies and re-encodes the
+    whole string: measured at 0.004s for 10 KB of git stderr but 0.675s for 200 KB,
+    and it never returned for 2 MB. This function runs on the event-loop thread (the
+    `except` around `gather_context` is outside `run_sync`), so that cost is not one
+    slow error, it is every concurrent call and job poll waiting on it. Byte-slicing
+    does the same job in linear time -- and it is what `gather_context` already does
+    to bound the diff itself."""
+    # `budget <= 0` first, and not as a slice: `encoded[-0:]` is the WHOLE buffer,
+    # so a zero tail budget silently returned the entire input -- a byte cap that
+    # inverts into no cap at all exactly when the budget is tightest.
+    if budget <= 0:
+        return ""
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= budget:
+        return text
+    cut = encoded[-budget:] if keep_tail else encoded[:budget]
+    # errors="ignore" discards only the severed code point at the cut edge; every
+    # whole code point on the kept side survives.
+    return cut.decode("utf-8", "ignore")
+
+
+def _drop_severed_marker_head(text: str) -> str:
+    """Drop a redaction marker's leading fragment left at the START of a cut.
+
+    Cutting inside `[redacted: secret value]` leaves `cted: secret value]`, which
+    reads as stray prose rather than as evidence that redaction happened -- the same
+    objection `bounded_repr` makes to slicing a finished repr().
+
+    Matched against the ACTUAL markers, not by the shape "a `]` before any `[`". That
+    shape was the first attempt and it is far too eager: git usage text is full of
+    brackets (`usage: git diff [<options>] [--] [<path>...]`), and a cut landing
+    inside one would silently delete up to the whole tail budget of real diagnostics."""
+    close = text.find("]")
+    if close == -1:
+        return text
+    fragment = text[: close + 1]
+    if any(marker.endswith(fragment) for marker in _REDACTION_MARKERS):
+        return text[close + 1 :].lstrip()
+    return text
+
+
+def _drop_severed_marker_tail(text: str) -> str:
+    """Drop a redaction marker's trailing fragment left at the END of a cut.
+
+    The mirror of the above, for the head half of a head+tail bound: a cut there
+    leaves `...KEY=[reda`, which is the same fragment-as-prose problem seen from the
+    other side."""
+    opening = text.rfind("[")
+    if opening == -1 or "]" in text[opening:]:
+        return text
+    fragment = text[opening:]
+    if any(marker.startswith(fragment) for marker in _REDACTION_MARKERS):
+        return text[:opening].rstrip()
+    return text
+
+
+def bounded_echo_prose(text: str, limit_bytes: int = MAX_ECHO_PROSE_BYTES) -> str:
+    """Sanitize foreign text AND bound it, for an agent-visible error message (#163).
+
+    `sanitize_echo_prose` deliberately does not truncate -- callers own their own
+    bound -- which left the two sites that interpolate a subprocess failure into
+    `error.message` doing neither. Measured before this existed, a verbose git
+    failure produced a 12,688-byte message carrying a raw ANSI escape and a secret
+    that appeared in git's stderr.
+
+    HEAD AND TAIL, not the tail alone. Which end carries the diagnosis depends on the
+    failure: `error: unknown option` and `fatal: ambiguous argument` lead with it and
+    trail usage or hints, while a corrupt object reports `error: object file ... is
+    empty` first and the actionable `fatal: unable to read ...` last. Keeping both
+    ends covers all three; either end alone loses one of them.
+
+    The budget is in UTF-8 BYTES and INCLUDES the marker: a character limit lets 200
+    four-byte code points render at 800 bytes, and a limit the marker is added to
+    afterwards is not a limit. (The other ECHO caps in this server are still
+    character-based -- `DETAIL_VALUE_MAX_CHARS`, `jobs._stderr_tail` -- so this is
+    the stricter unit, not the house-wide one.)
+
+    Truncation ALWAYS shows the marker. An earlier version dropped it along with a
+    tail that the marker repair had emptied, so a cut message read as a complete one.
+
+    Sanitization runs on the WHOLE text before any cutting, deliberately. Pre-cutting
+    to save the redactor work would hand it a secret severed mid-value, which it can
+    no longer recognize -- turning a bounded echo into a partial-secret leak."""
+    if limit_bytes < MIN_ECHO_PROSE_BYTES:
+        # A parameter contract, not an input check: it cannot depend on the text, so
+        # it can only fire on a misuse, and it fires immediately instead of quietly
+        # emitting an unbounded message. Below this floor the marker and a useful
+        # head cannot both fit, and "bounded" stops meaning anything.
+        raise ValueError(f"limit_bytes must be at least {MIN_ECHO_PROSE_BYTES}")
+    sanitized = sanitize_echo_prose(text).strip()
+    if utf8_len(sanitized) <= limit_bytes:
+        return sanitized
+    marker = " \u2026 "
+    head = _drop_severed_marker_tail(_cut_to_bytes(sanitized.splitlines()[0], limit_bytes // 2))
+    tail_budget = limit_bytes - utf8_len(head) - utf8_len(marker)
+    tail = _drop_severed_marker_head(_cut_to_bytes(sanitized, tail_budget, keep_tail=True))
+    # `.rstrip()` so an emptied tail leaves "head …", never a bare head that reads
+    # as the complete message.
+    return f"{head}{marker}{tail}".rstrip()
 
 
 def redact_tree(value: object) -> object:

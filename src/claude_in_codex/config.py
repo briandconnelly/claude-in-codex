@@ -91,6 +91,20 @@ MAX_PATHS_TOTAL_BYTES = 32_768
 # No repository has 10**8 changed files.
 MAX_PATH_MATCH_COUNT = 100_000_000
 
+# Ceiling on foreign prose echoed into an agent-visible `error.message` -- git's
+# stderr, an OSError's text. Larger than the 200-char selector echo because this is
+# multi-line diagnostic text a reader must act on, not a single value being named,
+# and it is split between the leading diagnosis and the trailing detail. Bytes, and
+# inclusive of the truncation marker, like every other cap here.
+MAX_ECHO_PROSE_BYTES = 400
+
+# The smallest budget `bounded_echo_prose` will accept. Below it the truncation
+# marker and a useful head cannot both fit, so the result would be a bound in name
+# only. It is a floor on the PARAMETER, so it can only catch a misuse -- both call
+# sites pass MAX_ECHO_PROSE_BYTES -- and it catches it loudly rather than by
+# emitting an unbounded message.
+MIN_ECHO_PROSE_BYTES = 32
+
 
 def paths_matched_aligned(paths: list[str] | None, paths_matched: list[int] | None) -> bool:
     """True when `paths_matched` can honestly accompany `paths`.
@@ -108,7 +122,7 @@ def paths_matched_aligned(paths: list[str] | None, paths_matched: list[int] | No
     return all(type(count) is int and 0 <= count <= MAX_PATH_MATCH_COUNT for count in paths_matched)
 
 
-def _utf8_bytes(value: str) -> int:
+def utf8_len(value: str) -> int:
     """UTF-8 length, counting a lone surrogate rather than raising.
 
     The caps are in bytes because that is what the response transport and PATH_MAX
@@ -121,7 +135,7 @@ def _utf8_bytes(value: str) -> int:
 
 def ref_within_bounds(ref: str | None) -> bool:
     """True when `base`/`head` is absent or fits MAX_REF_BYTES."""
-    return ref is None or _utf8_bytes(ref) <= MAX_REF_BYTES
+    return ref is None or utf8_len(ref) <= MAX_REF_BYTES
 
 
 class PathsBoundViolation(NamedTuple):
@@ -150,7 +164,7 @@ def paths_bound_violation(paths: list[str] | None) -> PathsBoundViolation | None
         return PathsBoundViolation("too_many_entries", MAX_PATHS_ENTRIES, len(paths), False, None)
     total = 0
     for entry in paths:
-        size = _utf8_bytes(entry)
+        size = utf8_len(entry)
         if size > MAX_PATH_ENTRY_BYTES:
             return PathsBoundViolation("entry_too_large", MAX_PATH_ENTRY_BYTES, size, True, entry)
         total += size

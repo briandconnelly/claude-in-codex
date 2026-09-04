@@ -20,6 +20,8 @@ from claude_in_codex import __version__
 from claude_in_codex import claude as claude_mod
 from claude_in_codex import jobs as jobs_mod
 from claude_in_codex.cli_contract import ALWAYS_SEND_FLAGS, HELP_GATED_FLAGS
+from claude_in_codex.config import MAX_ECHO_PROSE_BYTES, MIN_ECHO_PROSE_BYTES
+from claude_in_codex.context import bounded_echo_prose, sanitize_echo_prose
 from claude_in_codex.preflight import FlagSupport
 from claude_in_codex.schemas import OUTPUT_BOUNDS, TRUNCATION_MARKER, ErrorCode, JobState
 from claude_in_codex.server import (
@@ -6755,3 +6757,252 @@ async def test_calling_a_removed_alias_fails(git_repo):
     async with Client(mcp) as client:
         with pytest.raises(ToolError):
             await client.call_tool("claude_ask", {"prompt": "hi", "workspace_root": str(git_repo)})
+
+
+async def test_git_failure_prose_is_sanitized_and_bounded(fake_claude, git_repo, monkeypatch):
+    """git's stderr is FOREIGN text, and the internal_error fallback echoed it raw.
+
+    Distinct from #150, which bounded echoes of the CALLER's own arguments. This is
+    subprocess output, so it needs the treatment every other foreign echo in this
+    server gets: control characters stripped (a terminal escape in an error message
+    can recolor, reposition or erase the agent's view of it), secrets redacted, and
+    a bound. Measured before the fix, this exact call produced a 12,688-byte message
+    carrying a live ANSI escape and an AWS key verbatim (#163).
+    """
+    import subprocess as _sp
+
+    from claude_in_codex import context as _ctx
+
+    nasty = (
+        "\x1b[31mfatal: bad object HEAD\x1b[0m\n"
+        + "hint: verbose git noise " * 700
+        + "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
+    )
+    real = _sp.run
+
+    def fake(args, **kwargs):
+        if args and args[0] == "git" and "diff" in args:
+            return _sp.CompletedProcess(args, 1, stdout="", stderr=nasty)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(_ctx.subprocess, "run", fake)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+
+    message = data["error"]["message"]
+    assert data["error"]["code"] == "internal_error"
+    assert len(message.encode()) <= len("git failed: ") + MAX_ECHO_PROSE_BYTES
+    assert "\x1b" not in message
+    # Redaction asserted in BOTH directions: the key is gone AND the marker is there.
+    # Absence alone would also hold if the message were empty or the echo removed.
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in message
+    assert "[redacted: secret value]" in message
+    # The DIAGNOSIS survives, not just the tail. git leads with `fatal:` and follows
+    # with hints, so a tail-only bound kept the noise and dropped the one line worth
+    # reading -- which is what the first version of this fix did.
+    # `fatal: bad object HEAD` is the head of the message, ahead of the marker. Not
+    # `startswith`: sanitization strips the ESC byte but leaves the printable `[31m`
+    # of the escape sequence, which is the intended outcome -- the sequence is
+    # defanged, not deleted, and asserting on its absence would be asserting the
+    # wrong property.
+    assert "fatal: bad object HEAD" in message.split("…")[0]
+
+
+async def test_a_short_git_failure_is_echoed_intact(fake_claude, git_repo, monkeypatch):
+    """The bound above is only evidence if an ordinary failure still reports itself.
+
+    A cap that swallowed every diagnostic would pass the assertions above while
+    making `internal_error` useless."""
+    import subprocess as _sp
+
+    from claude_in_codex import context as _ctx
+
+    real = _sp.run
+
+    def fake(args, **kwargs):
+        if args and args[0] == "git" and "diff" in args:
+            return _sp.CompletedProcess(args, 1, stdout="", stderr="fatal: bad revision")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(_ctx.subprocess, "run", fake)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+
+    assert data["error"]["message"] == "git failed: fatal: bad revision"
+
+
+async def test_async_start_oserror_prose_is_sanitized_and_bounded(
+    fake_claude, git_repo, monkeypatch
+):
+    """The second site with the same gap: an OSError's text is the OS's, not this
+    server's, and it names paths this server did not choose."""
+    from claude_in_codex import jobs as _jobs
+    from claude_in_codex import server as _srv
+
+    def boom(*args, **kwargs):
+        raise OSError("\x1b[31m" + "state dir noise " * 500)
+
+    monkeypatch.setattr(_jobs, "start_job", boom)
+    monkeypatch.setattr(_srv.jobs, "start_job", boom, raising=False)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "claude_review_changes_async",
+            {"scope": "working_tree", "workspace_root": str(git_repo)},
+            raise_on_error=False,
+        )
+    data = structured(result)
+
+    assert data["ok"] is False
+    message = data["error"]["message"]
+    # Pin the BRANCH, not just the shape: without this the test also passes when the
+    # starter bails earlier with claude_not_found (which it does wherever `claude` is
+    # not on PATH, e.g. CI), and would then assert nothing about this echo site.
+    assert message.startswith("Failed to start async job: ")
+    assert len(message.encode()) <= len("Failed to start async job: ") + MAX_ECHO_PROSE_BYTES
+    assert "\x1b" not in message
+
+
+def test_bounded_echo_prose_redacts_without_a_control_character_present():
+    """Redaction and control-stripping asserted independently.
+
+    The end-to-end test above feeds text carrying both, so a regression that broke
+    one while keeping the other could hide behind the other's assertion.
+    """
+    out = bounded_echo_prose("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY")
+
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in out
+    assert "[redacted: secret value]" in out
+
+
+def test_bounded_echo_prose_bounds_bytes_not_code_points():
+    """#162 moved every cap in this server to UTF-8 bytes for this reason: 200
+    four-byte code points render at 800 bytes, so a character limit is not one."""
+    out = bounded_echo_prose("中" * 5_000)
+
+    assert len(out.encode()) <= MAX_ECHO_PROSE_BYTES
+    assert len(out) < 5_000
+
+
+def test_bounded_echo_prose_counts_its_own_marker_against_the_budget():
+    """A limit the marker is added to afterwards is not a limit."""
+    out = bounded_echo_prose("fatal: bad object\n" + "n" * 5_000)
+
+    assert len(out.encode()) <= MAX_ECHO_PROSE_BYTES
+    assert "…" in out
+    assert out.startswith("fatal: bad object")
+
+
+def test_bounded_echo_prose_passes_short_text_through_untouched():
+    """The bound must not be doing its work by mangling ordinary diagnostics."""
+    assert bounded_echo_prose("fatal: bad revision") == "fatal: bad revision"
+
+
+def test_bounded_echo_prose_drops_a_redaction_marker_it_cut_into():
+    """Cutting inside `[redacted: ...]` leaves a fragment that reads as stray prose
+    rather than as evidence that redaction happened -- the same objection
+    `bounded_repr` makes to slicing a finished repr().
+
+    The padding range is not arbitrary: it is where the tail cut actually lands
+    inside the marker at this budget. An earlier version swept 150-200, where the cut
+    falls in the padding every time -- it passed with the repair deleted, which is
+    the definition of decoration."""
+    secret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE"
+    for pad in range(360, 390):
+        out = bounded_echo_prose(f"fatal: x\n{secret} " + "z" * pad)
+        tail = out.split(" … ", 1)[1]
+        # Nothing before an opening bracket may close one.
+        assert "]" not in tail.split("[")[0], (pad, tail[:40])
+
+
+def test_bounded_echo_prose_keeps_bracketed_text_that_is_not_a_marker():
+    """The repair keys on the ACTUAL redaction markers, not on the shape "a `]`
+    before any `[`". git usage text is full of brackets, and the shape rule deleted
+    up to the whole tail budget of real diagnostics."""
+    out = bounded_echo_prose(
+        "error: unknown option\n" + "usage: git diff [<options>] [<commit>] [--] [<path>...] " * 20
+    )
+
+    assert out.endswith("[<path>...]")
+    assert "usage: git diff" in out
+
+
+@pytest.mark.parametrize("limit", [MIN_ECHO_PROSE_BYTES, 33, 40, 60, 120, 400])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "y" * 600 + "]",
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE " + "z" * 380,
+        "usage: git diff [<options>] [<commit>] [--] [<path>...] " * 20,
+        "z" * 600,
+    ],
+)
+def test_bounded_echo_prose_always_marks_a_truncation(body, limit):
+    """A cut message must never read as a complete one.
+
+    An earlier version returned a bare head when the marker repair emptied the tail,
+    so a cut message read as a complete one. The guarantee is now structural -- the
+    marker is concatenated unconditionally -- so this pins the PROPERTY across
+    budgets rather than that one bug, which is no longer reachable to reproduce."""
+    text = "fatal: x\n" + body
+    out = bounded_echo_prose(text, limit_bytes=limit)
+
+    assert len(out.encode()) <= limit
+    if out != sanitize_echo_prose(text).strip():
+        assert "…" in out, out
+
+
+def test_bounded_echo_prose_is_linear_in_its_input():
+    """It runs on the event-loop thread, so a slow bound is not one slow error -- it
+    is every concurrent call and job poll waiting behind it.
+
+    Dropping one code point at a time until the encoding fit was quadratic: measured
+    0.675s for 200 KB of git stderr, and 2 MB never returned. Stderr in the hundreds
+    of KB is ordinary (one `LF will be replaced by CRLF` line per file)."""
+    import time
+
+    line = "warning: LF will be replaced by CRLF in some/file.txt\n"
+    big = "fatal: x\n" + line * (2_000_000 // len(line))
+
+    start = time.perf_counter()
+    out = bounded_echo_prose(big)
+    elapsed = time.perf_counter() - start
+
+    assert len(out.encode()) <= MAX_ECHO_PROSE_BYTES
+    # ~0.35s measured, against 300s+ (killed) for the quadratic version: this asserts
+    # the complexity class, not a benchmark.
+    assert elapsed < 5.0
+
+
+@pytest.mark.parametrize("limit", [0, 1, 3, 10, MIN_ECHO_PROSE_BYTES - 1])
+def test_bounded_echo_prose_refuses_a_budget_it_cannot_honour(limit):
+    """A budget below the floor used to return the ENTIRE input.
+
+    `tail_budget` reached zero, and `encoded[-0:]` is the whole buffer -- so the
+    byte cap inverted into no cap at all exactly where the budget was tightest:
+    measured 512 bytes out for `limit_bytes=10`. Two guards now: `_cut_to_bytes`
+    treats a non-positive budget as empty, and a budget too small for the marker
+    plus a useful head is refused outright, because "bounded" would not mean
+    anything there. It is a parameter contract, so it can only fire on misuse.
+    """
+    with pytest.raises(ValueError, match="at least"):
+        bounded_echo_prose("fatal: x\n" + "y" * 500, limit_bytes=limit)
+
+
+def test_cut_to_bytes_treats_a_spent_budget_as_empty():
+    """The guard at the source, pinned directly: `encoded[-0:]` is the whole buffer,
+    which is the specific Python behaviour that made the cap invert."""
+    from claude_in_codex.context import _cut_to_bytes
+
+    assert _cut_to_bytes("abcdefghij", 0, keep_tail=True) == ""
+    assert _cut_to_bytes("abcdefghij", -5, keep_tail=True) == ""
+    assert _cut_to_bytes("abcdefghij", 4, keep_tail=True) == "ghij"

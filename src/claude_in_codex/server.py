@@ -70,6 +70,7 @@ from claude_in_codex.context import (
     InvalidPathsError,
     InvalidScopeError,
     NotAGitRepoError,
+    bounded_echo_prose,
     gather_context,
     normalize_paths,
 )
@@ -710,9 +711,14 @@ def _context_error_result(
             "Install git and ensure it is on PATH.",
             meta,
         )
+    # The exception carries git's stderr verbatim (_classify_git_failure raises
+    # RuntimeError(stderr)). It is foreign process output, so it is sanitized -- a
+    # terminal escape in an error message can recolor or erase the agent's view of
+    # it, and git echoes back content that may carry secrets -- and bounded, like
+    # every other echo in this envelope (#163).
     return _err(
         "internal_error",
-        f"git failed: {exc}",
+        f"git failed: {bounded_echo_prose(str(exc))}",
         "Ensure cwd is a git repo and base ref exists.",
         meta,
     )
@@ -2344,7 +2350,9 @@ async def _launch_job(
     except OSError as e:
         return _err(
             "internal_error",
-            f"Failed to start async job: {e}",
+            # Same treatment as the git fallback above: an OSError's text is the
+            # OS's, not this server's, and it names paths this server did not choose.
+            f"Failed to start async job: {bounded_echo_prose(str(e))}",
             "Check the workspace/job-state directory permissions and retry.",
             meta,
         )
