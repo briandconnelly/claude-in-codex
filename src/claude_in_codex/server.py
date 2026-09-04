@@ -152,6 +152,12 @@ CAPABILITY_SUMMARY = (
     "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
 )
 
+_BASE_FIELD_DESC = (
+    "Base ref, and ONLY valid for scope=branch: any other scope rejects it with "
+    "invalid_base rather than ignoring it. Omit to compare against `main`. "
+    "Max 4096 bytes."
+)
+
 _HEAD_FIELD_DESC = (
     "Head ref for scope=branch; reviews base...head instead of base...HEAD. Only "
     "valid for scope=branch; defaults to HEAD. Must be a local-resolvable git ref "
@@ -777,6 +783,49 @@ def _invalid_base_error(meta: Meta, base: str | None) -> dict:
         meta,
         offending="base",
         details=oversize or ErrorDetails(value=_render_value(base)),
+    )
+
+
+def _branch_base(base: str | None) -> str:
+    """The ref a branch diff compares against.
+
+    `base` is `str | None` on the wire so the server can tell "omitted" from
+    "explicitly sent". It could not before #177: the parameter defaulted to the
+    STRING "main", so a rule phrased as "reject a non-default base" would have
+    let an explicit base="main" through on a working_tree call -- preserving the
+    ignored-argument bug for exactly that value, and still echoing it into meta.
+
+    The default therefore resolves HERE, after scope validation, rather than in
+    the signature. Only the branch path reaches this; every other scope has
+    already refused a non-null base."""
+    return base or "main"
+
+
+def _base_scope_error(meta: Meta, scope: str | None, base: str | None) -> dict:
+    """Refuse a `base` the scope would ignore, instead of running the call anyway.
+
+    `_selector_bounds_error` size-checks `base` on every scope, but its VALUE was
+    validated only on the branch path -- so scope=working_tree with a bogus base
+    returned ok:true, ran a working-tree review that ignored the ref, and then
+    echoed `base` back at the payload root. `head` was already rejected exactly
+    this way, so the guard existed for one selector and not its sibling (#177).
+
+    That combination is worse than either half. "Review my changes against
+    origin/main" is naturally written as scope=working_tree + base=origin/main,
+    which means the reachable case is a PAID review of the wrong thing whose own
+    response confirms the caller's wrong belief about what it covered.
+
+    Rejecting rather than silently ignoring is the same fail-closed choice the
+    rest of this surface makes: an argument that cannot do what the caller
+    plainly meant is an error, not a default."""
+    return _err(
+        "invalid_base",
+        f"base is only valid for scope=branch, not '{scope}'.",
+        "Drop base, or set scope=branch to diff base...head.",
+        meta,
+        offending="base",
+        details=ErrorDetails(value=_render_value(base)),
+        action=RepairAction(next_step="retry_with_changes"),
     )
 
 
@@ -1794,7 +1843,10 @@ async def claude_consult(
 )
 async def claude_review_changes(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch. Max 4096 bytes.")] = "main",
+    base: Annotated[
+        str | None,
+        Field(description=_BASE_FIELD_DESC),
+    ] = None,
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     focus: Annotated[str | None, Field(description=_FOCUS_DESCRIPTION)] = None,
     paths: Annotated[
@@ -1897,6 +1949,8 @@ async def claude_review_changes(
                 meta, f"head is only valid for scope=branch, not '{scope}'.", head=head
             )
         )
+    if base is not None and scope != "branch":
+        return _result(_base_scope_error(meta, scope, base))
     # Everything caller-authored that reaches Anthropic counts against the
     # operator's bound, summed: focus and the persona each fitting alone is not
     # enough. Checked before any diff gathering, so it costs nothing to refuse.
@@ -1913,7 +1967,9 @@ async def claude_review_changes(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
+            lambda: gather_context(
+                cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
+            )
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
         return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
@@ -2004,8 +2060,9 @@ async def claude_adversarial_review(
         Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
     ] = None,
     base: Annotated[
-        str, Field(description="Base ref for branch diff when scope=branch. Max 4096 bytes.")
-    ] = "main",
+        str | None,
+        Field(description=_BASE_FIELD_DESC),
+    ] = None,
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
@@ -2112,6 +2169,8 @@ async def claude_adversarial_review(
                 head=head,
             )
         )
+    if base is not None and scope != "branch":
+        return _result(_base_scope_error(meta, scope, base))
     too_large = _validate_user_text(payload_text, meta)
     if too_large:
         return _result(too_large)
@@ -2145,7 +2204,7 @@ async def claude_adversarial_review(
         try:
             ctx_data = await run_sync(
                 lambda: gather_context(
-                    cwd, scope=scope, base=base, paths=effective_paths, head=head
+                    cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
                 )
             )
         except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
@@ -2520,7 +2579,10 @@ async def _launch_job(
 )
 async def claude_review_changes_async(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch. Max 4096 bytes.")] = "main",
+    base: Annotated[
+        str | None,
+        Field(description=_BASE_FIELD_DESC),
+    ] = None,
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     focus: Annotated[str | None, Field(description=_FOCUS_DESCRIPTION)] = None,
     paths: Annotated[
@@ -2628,6 +2690,8 @@ async def claude_review_changes_async(
                 meta, f"head is only valid for scope=branch, not '{scope}'.", head=head
             )
         )
+    if base is not None and scope != "branch":
+        return _result(_base_scope_error(meta, scope, base))
     # Everything caller-authored that reaches Anthropic counts against the
     # operator's bound, summed: focus and the persona each fitting alone is not
     # enough. Checked before any diff gathering, so it costs nothing to refuse.
@@ -2644,7 +2708,9 @@ async def claude_review_changes_async(
         return _result(paths_err)
     try:
         ctx_data = await run_sync(
-            lambda: gather_context(cwd, scope=scope, base=base, paths=effective_paths, head=head)
+            lambda: gather_context(
+                cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
+            )
         )
     except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
         return _result(_context_error_result(exc, meta, scope=scope, base=base, head=head))
@@ -2924,8 +2990,9 @@ async def claude_adversarial_review_async(
         Scope | None, Field(description="Optionally attach a diff: working_tree|staged|branch")
     ] = None,
     base: Annotated[
-        str, Field(description="Base ref for branch diff when scope=branch. Max 4096 bytes.")
-    ] = "main",
+        str | None,
+        Field(description=_BASE_FIELD_DESC),
+    ] = None,
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,
@@ -3033,6 +3100,8 @@ async def claude_adversarial_review_async(
                 head=head,
             )
         )
+    if base is not None and scope != "branch":
+        return _result(_base_scope_error(meta, scope, base))
     too_large = _validate_user_text(payload_text, meta)
     if too_large:
         return _result(too_large)
@@ -3049,7 +3118,7 @@ async def claude_adversarial_review_async(
         try:
             ctx_data = await run_sync(
                 lambda: gather_context(
-                    cwd, scope=scope, base=base, paths=effective_paths, head=head
+                    cwd, scope=scope, base=_branch_base(base), paths=effective_paths, head=head
                 )
             )
         except (InvalidBaseError, InvalidHeadError, InvalidScopeError, RuntimeError) as exc:
@@ -3333,6 +3402,8 @@ async def _dry_run_impl(
                 meta, f"head is only valid for scope=branch, not '{scope}'.", head=head
             )
         )
+    if base is not None and scope != "branch":
+        return _result(_base_scope_error(meta, scope, base))
     effective_paths, paths_err = _resolve_paths(paths, meta)
     if paths_err:
         return _result(paths_err)
@@ -3345,7 +3416,7 @@ async def _dry_run_impl(
             lambda: gather_context(
                 cwd,
                 scope=scope,
-                base=base,
+                base=_branch_base(base),
                 paths=effective_paths,
                 head=head,
             )
@@ -3389,7 +3460,10 @@ async def _dry_run_impl(
 )
 async def claude_dry_run(
     scope: Annotated[Scope, Field(description="working_tree|staged|branch")],
-    base: Annotated[str, Field(description="Base ref for scope=branch. Max 4096 bytes.")] = "main",
+    base: Annotated[
+        str | None,
+        Field(description=_BASE_FIELD_DESC),
+    ] = None,
     head: Annotated[str | None, Field(description=_HEAD_FIELD_DESC)] = None,
     paths: Annotated[
         list[str] | None,

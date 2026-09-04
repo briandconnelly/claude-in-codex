@@ -157,7 +157,7 @@ def _bounded_render(value: str, render: Callable[[str], str]) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-53"
+FINGERPRINT = "claude-in-codex/0.1/schema-54"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -316,6 +316,21 @@ def bounded_selectors(
     if not ref_within_bounds(head):
         head = None
         dropped.append("head")
+    # `base` names a comparison only under scope=branch. Echoing it on a
+    # working_tree or staged call reported a base the diff never used -- and
+    # since "review my changes against origin/main" is naturally written as
+    # scope=working_tree + base=origin/main, that echo actively CONFIRMED the
+    # wrong belief on a call that had already been paid for (#177). The server
+    # now refuses such a call, so this is the second line of defence: it also
+    # governs the meta jobs.py rebuilds from an on-disk record, which may have
+    # been written by a pre-#177 version.
+    #
+    # Withheld here means "not applicable", which is the same absence `base`
+    # already has when none was sent -- correct in both readings, unlike the
+    # bounds withholding above, which is why that one is disclosed in `dropped`
+    # and this is not.
+    if scope != "branch":
+        base = None
     effective_head, diff_range = branch_range(scope, base, head)
     if dropped:
         # Either component withheld: the composition cannot be honest, and a
