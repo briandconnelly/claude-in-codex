@@ -29,7 +29,11 @@ the advertised output-schema shape does move; no value set changed.
   `system_prompt_append` **or** `focus` from workspace content. The `readonly`
   hazard shipped with its rule missing — it named the danger and stopped.
 
-  The text is now split `RULES:` / `CONTEXT:`. The ceiling moves 1,200 → 1,300:
+  The text is now split `RULES.` / `CONTEXT:`, with each rule its own imperative
+  sentence — a label alone does not make several independently checkable
+  obligations checkable, since an agent still has to parse one run-on to find the
+  one that binds it. The two `workspace_root` conditions are separate sentences
+  for the same reason. The ceiling moves 1,200 → 1,300:
   the previous one was being met by dropping safety rules, which means it was not
   measuring what it was meant to. Inventory moved to `claude_capabilities` to pay
   for part of the increase. (#180)
