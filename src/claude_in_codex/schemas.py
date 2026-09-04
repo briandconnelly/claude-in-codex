@@ -172,12 +172,17 @@ FINGERPRINT_COVERS = [
     "detail-level field density, output bounds, and the truncation contract",
     "caller-supplied system-prompt text (parameter, cap, and the meta fingerprint)",
     "the meta.focus contract (what presence and absence attest)",
-    # `meta` is advertised as an opaque stub, so its field names would otherwise
-    # reach the digest only through the description that enumerates them. They
-    # are digested directly as well (#143); disclosed separately because that
-    # coverage holds even if the description is ever hand-written again, which
-    # the "tool records ... input/output schemas" entry above does not say.
-    "meta field names (digested directly, not only via the advertised meta description)",
+    # `meta` is advertised as an opaque stub, so nothing about its FIELDS reaches
+    # the digest by way of the tool records above. They are digested directly
+    # (#143), which is what this entry discloses.
+    #
+    # The wording used to read "not only via the advertised meta description",
+    # which was accurate while that description enumerated the field names. #179
+    # removed the enumeration -- it was billed 14x on tools/list -- so the phrase
+    # now advertises a second coverage path that does not exist. This list is
+    # agent-readable contract metadata, so a stale entry here misleads exactly
+    # the reader it exists to inform.
+    "meta field names (digested directly; the advertised meta schema is opaque)",
     "capability summary and capabilities payload",
 ]
 
