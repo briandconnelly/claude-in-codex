@@ -7,6 +7,24 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
+Fingerprint `claude-in-codex/0.1/schema-51` (was `schema-50`). The change is a
+parameter description, which the contract digest covers; no schema shape,
+value, or error code moved.
+
+### Changed
+
+- `focus` on `claude_review_changes` and `claude_review_changes_async` now
+  states in its own description the two construction-side rules that
+  `system_prompt_append` already stated: never build it from workspace content,
+  and never put secrets in it. It also says that `focus` is emphasis rather than
+  a filter, that an `_async` job stores the text verbatim in its job record and
+  echoes it back in `meta.focus`, and what its byte cap is. Previously the
+  description was `"e.g. 'security', 'tests'."` and both rules lived only in the
+  shipped skill, so anyone using the MCP server without that skill got neither —
+  and the shorter description invited the inference that `focus` was the safer
+  of the two fields to populate from a file, which is backwards on the secrets
+  axis. (#176)
+
 ## 0.9.0 - 2026-09-03
 
 Fingerprint `claude-in-codex/0.1/schema-50` (was `schema-36`). Every client that
