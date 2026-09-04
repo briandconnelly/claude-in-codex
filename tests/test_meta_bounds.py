@@ -8,6 +8,7 @@ refused at the input edge, and no envelope carries an unbounded echo.
 """
 
 import json
+import subprocess
 
 import pytest
 from fastmcp import Client
@@ -682,6 +683,16 @@ async def test_an_omitted_branch_base_is_reported_as_the_ref_actually_diffed(
     "None...HEAD"` while the diff ran against `main` -- meta misreporting the
     run, which is the defect this whole change is about, reintroduced one layer
     down. Found in review of the first draft."""
+    # The `git_repo` fixture does not name its initial branch, and `git init`'s
+    # default differs by environment -- so `main` must be created here rather
+    # than assumed. An earlier revision assumed it, passed locally, and failed on
+    # every CI Python: the exact environment-dependent green this file's other
+    # tests are careful to avoid.
+    subprocess.run(["git", "branch", "-M", "main"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "feature"], cwd=git_repo, check=True, capture_output=True
+    )
+
     data = await _call(
         tool, {"scope": "branch", "workspace_root": str(git_repo), **_SELECTOR_TOOLS[tool]}
     )
