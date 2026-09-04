@@ -7058,3 +7058,35 @@ def test_cut_to_bytes_treats_a_spent_budget_as_empty():
     assert _cut_to_bytes("abcdefghij", 0, keep_tail=True) == ""
     assert _cut_to_bytes("abcdefghij", -5, keep_tail=True) == ""
     assert _cut_to_bytes("abcdefghij", 4, keep_tail=True) == "ghij"
+
+
+async def test_tool_details_key_optional_params_match_the_advertised_schemas():
+    """`key_optional_params` is routing metadata, so a gap makes a real parameter
+    undiscoverable at exactly the altitude the field exists to serve.
+
+    #172: `detail` was listed on claude_job_result and omitted from the seven
+    other tools that take it — two tools with the same parameter described
+    differently, which is the clearest possible tell that the list was
+    hand-maintained against schemas that had moved.
+
+    Asserted programmatically against each tool's own advertised inputSchema
+    rather than against a fixture, in both directions: a parameter that exists
+    and is unlisted, and a listed parameter that does not exist. A hand-written
+    expectation would just be the same drift one layer up."""
+    tools = await _tools_by_name()
+
+    missing: list[str] = []
+    phantom: list[str] = []
+    for detail in _capabilities_payload()["tool_details"]:
+        name = detail["name"]
+        properties = set(tools[name].input_schema.get("properties", {}))
+        listed = set(detail["required_params"]) | set(detail["key_optional_params"])
+        phantom += [f"{name}.{p}" for p in sorted(listed - properties)]
+        if "detail" in properties and "detail" not in listed:
+            missing.append(f"{name}.detail")
+
+    assert not phantom, f"tool_details names parameters that do not exist: {phantom}"
+    assert not missing, f"tool_details omits `detail` from tools that accept it: {missing}"
+    # Not vacuous: the tools carrying `detail` must actually be found.
+    carriers = [t for t, v in tools.items() if "detail" in v.input_schema.get("properties", {})]
+    assert len(carriers) >= 8, carriers

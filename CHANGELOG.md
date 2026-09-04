@@ -30,6 +30,17 @@ which the contract digest covers; no schema shape, value, or error code moved.
   carrying it. Adding a `Meta` field still moves the fingerprint, and the
   anti-drift assertion moved with the enumeration to its new home.
 
+- `claude_capabilities().tool_details[].key_optional_params` now lists `detail`
+  for the seven tools that accept it and did not advertise it: all six paid
+  tools and `claude_job_consume_result`. `claude_job_result` already listed it,
+  so two tools taking the same parameter described it differently. This is the
+  compact routing metadata an agent reads instead of fetching a full schema, so
+  an omission there makes a real parameter undiscoverable at exactly the
+  altitude the field exists to serve. `detail` now rides the shared execution
+  knob list, and a test checks every tool's entry against its own advertised
+  input schema in both directions — unlisted-but-real and listed-but-phantom —
+  so the list cannot drift from the schemas again. (#172)
+
 - `focus` on `claude_review_changes` and `claude_review_changes_async` now
   states in its own description the two construction-side rules that
   `system_prompt_append` already stated: never build it from workspace content,

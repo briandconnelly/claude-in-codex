@@ -29,12 +29,13 @@ import hashlib
 import json
 from typing import get_args
 
+import pydantic
 from tests.support import Client
 
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "a952954a458e9f83dab3e543e73e29a103b5b75e4f3a53b8e7f8c96251f8b8ab"
+EXPECTED_CONTRACT_DIGEST = "3495297d66343298f5aa6f966facb129c681732d603712385c6480778414fd83"
 
 
 async def _contract_surface() -> dict:
@@ -175,6 +176,41 @@ async def test_contract_surface_covers_meta_field_names():
     # agent reads off the envelope.
     for name in ("cwd", "paths", "paths_matched", "cost_usd", "fingerprint"):
         assert name in surface["meta_fields"]
+
+
+async def test_adding_a_meta_field_moves_the_digest():
+    """The premise of #179, made executable instead of merely read.
+
+    #179 removed the advertised `meta` enumeration on the grounds that #143 had
+    ALSO started digesting Meta's field names directly, so the digest would still
+    move when a field is added. Everything in that sentence was verified by
+    READING -- FINGERPRINT_COVERS says it, `_contract_surface` looks like it does
+    it. Neither is a demonstration, and a coverage claim nobody has watched fail
+    is exactly the kind of instrument that turns out to have been broken all
+    along. #143's own docstring records that the pre-fix gate was green while
+    blind, so this project has already been bitten by trusting this by inspection.
+
+    Probe it: add a field to Meta and assert the digest actually moves. If a
+    refactor ever unhooks meta_fields from the surface, this fails and #179's
+    justification fails with it -- rather than the two silently parting ways."""
+    before = _digest(await _contract_surface())
+
+    field = ("probe_field_that_is_not_in_meta", (str | None, None))
+    probed = pydantic.create_model("MetaWithProbe", __base__=schemas.Meta, **{field[0]: field[1]})
+    original = schemas.Meta
+    try:
+        schemas.Meta = probed
+        after = _digest(await _contract_surface())
+    finally:
+        schemas.Meta = original
+
+    assert after != before, (
+        "Adding a field to Meta did NOT move the contract digest. The direct "
+        "meta_fields coverage (#143) is what #179 relied on when it removed the "
+        "advertised enumeration; if this fails, that removal is no longer safe."
+    )
+    # The instrument is restored, not just claimed to be.
+    assert _digest(await _contract_surface()) == before
 
 
 def test_capabilities_publishes_every_meta_field():
