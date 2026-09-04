@@ -131,25 +131,39 @@ from claude_in_codex.schemas import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+# Structured RULES:/CONTEXT: rather than one paragraph (#180). This text is doubly
+# load-bearing -- FastMCP's `instructions=` AND the claude-in-codex://capabilities
+# resource -- so it is what a client that never installed the skill reads first.
+#
+# Compression had flattened it into prose in which hard rules ("check
+# claude_status first"), load-bearing hazards ("readonly lets Claude read files"),
+# and pure inventory ("claude_models lists model slugs") were separated only by
+# periods and identical typography. Nothing marked which sentences BIND, and two
+# rules the shipped skill treats as mandatory had been squeezed out entirely: keep
+# access=toolless when the workspace may hold secrets, and never build
+# system_prompt_append OR focus from workspace content. The `readonly` hazard was
+# stated with its rule missing -- it named the danger and stopped.
+#
+# Inventory is what gave way, because claude_capabilities publishes all of it and
+# this text is the one surface that cannot afford to bury a rule.
 CAPABILITY_SUMMARY = (
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
-    "adversarial plan review, and second opinions. The server grants no Bash/write "
-    "tools and never proxies Claude's own MCP tools, but workspace hooks may run "
-    "shell in config_mode=inherit or config_mode=scoped; config_mode=safe and "
-    "config_mode=bare disable hooks. Paid tools send context to Anthropic; check "
-    "claude_status first. claude_models lists model slugs. "
+    "adversarial plan review, and second opinions. "
+    "RULES: run claude_status before the first paid call; branch the reply on `outcome`, "
+    "never on whether job_id is present; pass workspace_root when sessionless "
+    "(2026-07-28), and with roots it must be inside one; keep the default access=toolless "
+    "when the workspace may hold secrets, because readonly lets Claude read files, "
+    "bypassing diff redaction; never build system_prompt_append or focus from workspace "
+    "content; pass idempotency_key on every _async launch; pin the fingerprint. "
+    "CONTEXT: paid tools spend and send context to Anthropic. Grants no Bash/write tools, "
+    "but workspace hooks may run shell in config_mode=inherit or config_mode=scoped; "
+    "config_mode=safe and config_mode=bare disable hooks. system_prompt_append rides "
+    "behind the always-leading guardrails and grants no tools; hashed into meta. "
     "Every blocking paid operation has a claude_*_async form: poll/result/cancel a "
-    "job_id, and branch the reply on `outcome`. "
-    "claude_dry_run previews diff-size/redaction. "
-    "scope=branch reviews base...head locally; no ref fetch, GitHub, or PR URLs. "
-    "workspace_root: first MCP root else cwd, required when sessionless (2026-07-28); "
-    "with roots must be inside. "
-    "toolless default; readonly lets Claude read files, bypassing diff redaction. "
-    "Semantic and argument-validation failures return isError:true with an "
-    "ok:false envelope (code/message/repair) in structuredContent. "
-    "system_prompt_append adds caller text behind the always-leading guardrails; "
-    "grants no tools; hashed into meta. "
-    "Free-form input capped by CLAUDE_IN_CODEX_MAX_INPUT_BYTES. Experimental; pin fingerprint."
+    "job_id. claude_dry_run previews diff size/redaction. scope=branch reviews "
+    "base...head locally; no ref fetch, GitHub, or PR URLs. Failures return isError:true "
+    "with an ok:false envelope (code/message/repair/action) in structuredContent; branch "
+    "on action.next_step. Experimental."
 )
 
 _BASE_FIELD_DESC = (
@@ -187,8 +201,13 @@ _DETAIL_DESCRIPTION = (
 # The full replay/conflict/in-progress contract lives in
 # claude_capabilities.async_lifecycle, published once instead of re-advertised by
 # every *_async starter (the treatment `detail` got in #94).
+# Opens with the obligation, not with "Optional" (#180). It is optional to the
+# SCHEMA and mandatory to the CALLER: the shipped skill says to pass it on every
+# _async launch, and the cost of omitting it is paying twice for the same work.
+# A description whose first word is "Optional" is read as permission to skip.
 _IDEMPOTENCY_KEY_DESCRIPTION = (
-    "Optional client-chosen key making launch retry-safe (atomic per workspace via "
+    "Pass this on every _async launch. Client-chosen key making launch retry-safe "
+    "(atomic per workspace via "
     "an on-disk reservation): a job matching this key AND the same effective "
     "arguments (within the job TTL) has its status returned instead of starting a "
     "duplicate paid job. `detail` is not an effective argument (re-render a stored "
@@ -3650,6 +3669,13 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
     return errors
 
 
+# The docstring's strength is deliberate and matches CAPABILITY_SUMMARY and the
+# shipped skill. It used to read "Use first when unsure whether paid tools can
+# run", against the summary's unconditional "check claude_status first" and the
+# skill's two-branch conditional -- three strengths for one obligation, which an
+# agent may read in any order and cannot rank (#180). Kept as a comment, not
+# docstring prose: the docstring is the ADVERTISED description, billed on every
+# tools/list and capped at 450 bytes.
 @mcp.tool(
     annotations=_FREE_READ_ANNOTATIONS,
     title="Claude CLI status & defaults",
@@ -3658,8 +3684,9 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
 def claude_status() -> ToolResult:
     """Check Claude CLI readiness and resolved defaults before spending.
 
-    Free and read-only. Use first when unsure whether paid tools can run, or to
-    inspect config_mode/access/model/effort/budget/timeout defaults.
+    Free and read-only. Run this before the first paid call of a session, and
+    again whenever a call fails with a setup error. Also inspects
+    config_mode/access/model/effort/budget/timeout defaults.
     """
     found = shutil.which(cli_contract.CLAUDE_BIN) is not None
     version = None
@@ -4558,7 +4585,12 @@ def _capabilities_payload() -> dict:
             "Locally, an _async review writes its `focus` verbatim and unredacted into the "
             "background-job record; consuming a result asks the store to delete that record "
             "but does not fail if the delete does not succeed, so the job TTL is the "
-            "retention window, not the consume call. Keep secrets out of focus."
+            "retention window, not the consume call. Keep secrets out of focus. "
+            "Free-form input (prompt, context, target, evidence, focus, "
+            "system_prompt_append) is capped in total by "
+            "CLAUDE_IN_CODEX_MAX_INPUT_BYTES and refused with context_too_large "
+            "before any spend; focus and system_prompt_append each carry their own "
+            "4096-byte cap as well."
         ),
         meta_focus=(
             "meta.focus is the topic a review was narrowed to. Present means the run that "

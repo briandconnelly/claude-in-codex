@@ -319,7 +319,27 @@ async def test_capability_summary_declares_tier_and_blocking():
     # prompt, so the guardrails-always-lead guarantee is a first-read security
     # disclosure, not a detail to leave to claude_capabilities. The summary measured
     # 1,062 before it; no phrasing of the guarantee fit the remaining 38 chars.
-    assert len(CAPABILITY_SUMMARY) < 1200
+    #
+    # Raised to 1300 by #180, which found the compression had cost more than it
+    # bought. At 1,195/1,200 the text had become one undifferentiated paragraph
+    # where hard rules, hazards, and pure inventory shared identical typography,
+    # and TWO rules the shipped skill treats as mandatory had been squeezed out
+    # entirely: keep access=toolless when the workspace may hold secrets, and
+    # never build system_prompt_append or focus from workspace content. The
+    # `readonly` hazard was shipped with its rule missing.
+    #
+    # A ceiling that is met by dropping safety rules is not measuring what it
+    # thinks it is. The RULES:/CONTEXT: split plus those two rules, the
+    # idempotency_key obligation, and the action.next_step pointer measure 1,278.
+    # Inventory moved to claude_capabilities to pay for part of it; the rest is
+    # the honest cost of marking which sentences bind.
+    assert len(CAPABILITY_SUMMARY) < 1300
+    # The two rules #180 found missing. Pinned by content, not by length: the
+    # whole failure was that a length target was met by dropping them.
+    assert "toolless" in summary and "secrets" in summary
+    assert "never build system_prompt_append or focus from workspace content" in summary
+    # Rules must be MARKED as rules, which is the structural half of the fix.
+    assert "rules:" in summary and "context:" in summary
 
 
 async def test_tool_descriptions_are_concise_and_disambiguating():
@@ -632,7 +652,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-54"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-55"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1527,7 +1547,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-54"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-55"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -6663,11 +6683,13 @@ async def test_capabilities_advertise_the_dry_run_paths_matched_output():
 
     assert "paths_matched" in detail["returns"]
     # Deliberately NOT also in CAPABILITY_SUMMARY. That text is the first-read
-    # instructions and carries a 1200-character ceiling for compactness; naming
-    # the field there measured 1,214, and the summary's remaining budget is
-    # better spent on security disclosures than on a field the inventory
-    # already documents one hop away.
-    assert len(CAPABILITY_SUMMARY) < 1200
+    # instructions and carries a length ceiling for compactness; the summary's
+    # budget is better spent on security disclosures than on a field the
+    # inventory already documents one hop away. #180 raised that ceiling to 1300
+    # (see the primary assertion and its note) precisely BECAUSE the previous one
+    # was being met by dropping safety rules -- which is an argument for
+    # disclosures, not for inventory, so this exclusion stands unchanged.
+    assert "paths_matched" not in CAPABILITY_SUMMARY
 
 
 async def test_advertised_dry_run_schema_describes_paths_matched():
