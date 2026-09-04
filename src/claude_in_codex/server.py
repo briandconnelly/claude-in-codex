@@ -4041,7 +4041,12 @@ def _capabilities_payload() -> dict:
             error_codes=sorted(set(_TOOL_ERROR_CODES[name])),
         )
 
-    execution_knobs = ["config_mode", "access", "model", "effort", "max_budget_usd"]
+    # `detail` rides every paid tool and both result fetchers. It was missing from
+    # this routing metadata for seven of them while claude_job_result listed it,
+    # so two tools taking the SAME parameter described it differently (#172).
+    # Carried in the shared knob list rather than per-tool so the next paid tool
+    # cannot be added without it.
+    execution_knobs = ["config_mode", "access", "model", "effort", "max_budget_usd", "detail"]
     sync_execution_knobs = [*execution_knobs, "timeout_seconds"]
 
     result = CapabilitiesResult(
@@ -4218,7 +4223,7 @@ def _capabilities_payload() -> dict:
                 "Fetch and delete a finished background job record.",
                 "same structured envelope as claude_job_result; removes terminal state",
                 required=["job_id"],
-                optional=["workspace_root"],
+                optional=["workspace_root", "detail"],
             ),
             tool_detail(
                 "claude_job_cancel",
