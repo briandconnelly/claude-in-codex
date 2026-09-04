@@ -339,7 +339,22 @@ async def test_capability_summary_declares_tier_and_blocking():
     assert "keep the default access=toolless when the workspace may hold secrets" in summary
     assert "never build system_prompt_append or focus from workspace content" in summary
     # Rules must be MARKED as rules, which is the structural half of the fix.
-    assert "rules:" in summary and "context:" in summary
+    assert "rules." in summary and "context:" in summary
+    # Individually scannable, not one semicolon-chained sentence. #180 split the
+    # rules under a label; review pointed out that a label alone does not make
+    # several independently checkable obligations checkable — an agent still has
+    # to parse one run-on to find the one that binds it. Each rule is now its own
+    # imperative sentence, and this counts them so a future edit cannot quietly
+    # re-chain them.
+    rules = CAPABILITY_SUMMARY[
+        CAPABILITY_SUMMARY.index("RULES.") + len("RULES.") : CAPABILITY_SUMMARY.index("CONTEXT:")
+    ]
+    sentences = [part.strip() for part in rules.split(". ") if part.strip()]
+    assert len(sentences) >= 8, sentences
+    # The two workspace_root conditions are distinct obligations and must not be
+    # folded back into one clause.
+    assert "Pass workspace_root when sessionless" in CAPABILITY_SUMMARY
+    assert "With MCP roots, workspace_root must be inside one" in CAPABILITY_SUMMARY
     # One obligation, one strength (#180). Asserted across all three surfaces
     # rather than described in a changelog: the summary previously stated only
     # the first half of the claude_status rule that the tool description and
