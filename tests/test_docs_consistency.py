@@ -104,9 +104,22 @@ def test_the_live_gate_runs_fail_closed_everywhere_it_runs():
         steps = [s for s in gate["steps"] if "pytest -m integration" in str(s.get("run", ""))]
         assert steps, f"{name}: no integration pytest step found"
         for step in steps:
-            assert step.get("env", {}).get("CLAUDE_IN_CODEX_REQUIRE_LIVE") == "1", (
+            env = step.get("env", {})
+            assert env.get("CLAUDE_IN_CODEX_REQUIRE_LIVE") == "1", (
                 f"{name}: the integration run does not set CLAUDE_IN_CODEX_REQUIRE_LIVE, "
                 "so it would pass by skipping"
+            )
+            # And it must be handed the credential the contract tests can
+            # actually use. The tests run under config_mode=inherit/safe, which
+            # STRIP ANTHROPIC_API_KEY, so a job passing only that key fails at
+            # the prerequisite -- correctly, but on every run, which turns a gate
+            # into a permanent release block. The first revision of this job did
+            # exactly that: its comments described a login-backed credential it
+            # never passed.
+            assert "CLAUDE_CODE_OAUTH_TOKEN" in env, (
+                f"{name}: the live gate passes no login-backed credential. "
+                "config_mode=inherit and safe strip ANTHROPIC_API_KEY, so this job "
+                "would fail its prerequisite on every run and block every release."
             )
 
 
@@ -170,14 +183,21 @@ def test_every_job_that_installs_npm_packages_drops_the_checkout_token():
         jobs = _workflow(name)["jobs"]
         for job_name, job in jobs.items():
             steps = job.get("steps") or []
-            installs = [s for s in steps if "npm install" in str(s.get("run", ""))]
+            # Every way a job can fetch and execute third-party JS, not just the
+            # one spelling this repo happens to use today. The commit that added
+            # this guard claimed it covered "EVERY job that runs npm install";
+            # matching one literal made that claim false for `npm ci`, `npx`,
+            # `pnpm` and `yarn`.
+            fetchers = ("npm install", "npm i ", "npm ci", "npx ", "pnpm ", "yarn ")
+            installs = [s for s in steps if any(f in str(s.get("run", "")) for f in fetchers)]
             if not installs:
                 continue
             checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
             assert checkouts, f"{name}:{job_name} installs npm packages without a checkout?"
             for step in checkouts:
                 assert (step.get("with") or {}).get("persist-credentials") is False, (
-                    f"{name}:{job_name} runs `npm install` but its checkout keeps the "
+                    f"{name}:{job_name} fetches and runs third-party JS but its "
+                    "checkout keeps the "
                     "GitHub token in git config, where a package's lifecycle scripts "
                     "can read it. Set persist-credentials: false."
                 )

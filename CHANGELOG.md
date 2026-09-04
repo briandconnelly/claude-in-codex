@@ -50,6 +50,11 @@ the advertised output-schema shape does move; no value set changed.
   fail on authentication, which would look like a contract regression instead of
   a missing credential. (#170)
 
+  **The `live-integration` environment must hold a `CLAUDE_CODE_OAUTH_TOKEN`**
+  (generate with `claude setup-token`) before the next tag. `ANTHROPIC_API_KEY` is
+  passed through for any bare-mode path but is not sufficient on its own, because
+  the contract tests run under `config_mode=inherit`/`safe`, which strip it.
+
   Both live-integration jobs check out with `persist-credentials: false`, matching
   the `claude-contract` job: they install a freshly fetched npm package whose
   lifecycle scripts run in the workspace, and the default checkout would leave the
@@ -177,7 +182,9 @@ the advertised output-schema shape does move; no value set changed.
   payload, to say one thing fourteen times. The field list moves to
   `claude_capabilities().meta_fields`, which the stub's description now points
   at, and `tools/list` drops from 76,224 to 70,415 bytes (−5,809, −7.6%) at a
-  cost of +468 bytes in the capabilities payload. The discovery budget in
+  cost of +468 bytes in the capabilities payload. Other changes in this release
+  spend some of that back — the whole release measures 71,229, leaving 771 bytes
+  under the ratcheted budget. The discovery budget in
   `tests/test_discovery_cost.py` is ratcheted from 76,800 to 72,000 so the
   recovery cannot be silently re-spent. (#179)
 

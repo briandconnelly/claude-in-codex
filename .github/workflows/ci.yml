@@ -143,6 +143,10 @@ jobs:
     name: Live Claude integration
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Same environment as the release gate. Same secret, same paid spend, same
+    # third-party install: the credential's protection rules should not depend on
+    # which of the two jobs reaches it.
+    environment: live-integration
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -181,6 +185,15 @@ jobs:
       # letting three envelope tests fail on authentication.
       - name: Run integration tests
         env:
+          # The credential the contract tests actually need. They run under
+          # config_mode=inherit and config_mode=safe, which strip
+          # ANTHROPIC_API_KEY (_LOGIN_CREDENTIAL_ENV_VARS in claude.py) and
+          # require a Claude Code login session. Generate with `claude
+          # setup-token`. Without it this job fails at the prerequisite -- which
+          # is correct, but it fails EVERY time, so the gate would block every
+          # release rather than gate it.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Kept for any bare-mode path; not sufficient on its own.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_IN_CODEX_REQUIRE_LIVE: "1"
         run: uv run pytest -m integration --no-cov

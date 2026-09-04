@@ -63,6 +63,19 @@ def test_live_gate_prerequisites_are_present():
     )
 
 
+def _require_or_skip(condition: bool, reason: str) -> None:
+    """Skip normally; FAIL under the release gate.
+
+    A per-test skipif that survives CLAUDE_IN_CODEX_REQUIRE_LIVE turns into a
+    floor shortfall ("2 passed, expected 3") that blames a missing envelope test
+    for what is actually a CLI-feature gap. Under the gate, say which."""
+    if condition:
+        return
+    if REQUIRE_LIVE:
+        raise AssertionError(f"CLAUDE_IN_CODEX_REQUIRE_LIVE=1 but {reason}")
+    pytest.skip(reason)
+
+
 def _claude_help_advertises(flag: str) -> bool:
     try:
         proc = subprocess.run(
@@ -163,11 +176,15 @@ async def test_ask_live_roundtrip():
     _assert_structured(data)
 
 
-@pytest.mark.skipif(
-    not _claude_help_advertises("--safe-mode"),
-    reason="installed claude CLI does not advertise --safe-mode",
-)
 async def test_ask_live_safe_mode_roundtrip():
+    # Not a plain skipif: this test COUNTS toward the release gate's floor, so a
+    # silent skip surfaces as "2 passed, expected 3" and blames a missing envelope
+    # test for what is really a CLI that stopped advertising the flag. Under the
+    # gate it fails saying that.
+    _require_or_skip(
+        _claude_help_advertises("--safe-mode"),
+        "the installed claude CLI does not advertise --safe-mode",
+    )
     async with Client(mcp) as client:
         result = await client.call_tool(
             "claude_consult",
