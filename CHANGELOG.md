@@ -33,7 +33,12 @@ output-schema shape does move; no value set changed.
   a default-effort review of a real branch reaching this path is not a corner
   case.
 
-  `timeout` is now `retryable: false` with `next_step: "call_tool"`, and the
+  `timeout` is now `retryable: false`. **Branch on `action.next_step`, not on
+  `call_tool` alone:** the action is `call_tool` with the twin and full arguments
+  when they fit, and `retry_with_changes` naming the twin when the captured
+  arguments exceed `REPAIR_ARGS_MAX_BYTES` (8 KB) — which a large prompt makes the
+  normal case for exactly the reviews that time out. A client matching only
+  `call_tool` silently loses the recovery on the calls most likely to need it. The
   action names the `_async` twin — which survives the deadline — carrying the
   original arguments minus `timeout_seconds`, bounded by
   `REPAIR_ARGS_MAX_BYTES` like every other reconstructed repair. The message
