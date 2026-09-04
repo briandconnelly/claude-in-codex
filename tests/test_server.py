@@ -7181,10 +7181,14 @@ async def test_timeout_action_carries_the_callable_async_twin_call():
     # automatic.
     assert oversized.next_step == "retry_with_changes"
 
-    # A tool with no async twin gets no twin action rather than a nonsensical one
-    # — e.g. a stored timeout fetched back through claude_job_result, where the
-    # run was already detached.
-    assert _timeout_action("claude_job_result") is None
+    # A tool with no async twin gets no TWIN — e.g. a stored timeout fetched back
+    # through claude_job_result, where the run was already detached — but it must
+    # still get a concrete, followable step. Returning None here would fall back
+    # to DEFAULT_NEXT_STEP["timeout"] = "call_tool", and a call_tool naming no
+    # tool is an action a structural client cannot execute.
+    no_twin = _timeout_action("claude_job_result")
+    assert no_twin.next_step == "no_automatic_repair"
+    assert no_twin.tool is None
 
 
 async def test_every_sync_paid_tool_has_an_async_twin_in_the_timeout_map():
@@ -7221,23 +7225,57 @@ async def test_captured_call_arguments_do_not_leak_between_calls():
     assert _CALL_ARGUMENTS.get() is None, "arguments survived a rejected call"
 
 
-async def test_concurrent_calls_do_not_see_each_others_arguments():
-    """contextvars are per-task, but only if the set happens inside the task
-    handling that call. Probed with real concurrency rather than assumed."""
+async def test_concurrent_timed_out_calls_keep_their_own_arguments(monkeypatch, git_repo):
+    """Overlapping calls must not read each other's arguments.
+
+    An earlier revision read `_CALL_ARGUMENTS` after each `call_tool` returned —
+    by which point the middleware's `finally` has always reset it — so it asserted
+    `[None] * 5` and would have passed even if concurrent requests clobbered one
+    another. A test that cannot observe the race it is named for is not evidence.
+
+    This observes the value while the calls OVERLAP: the fake subprocess blocks
+    until every request is in flight, so all five are inside the middleware at
+    once. Each repair action must then carry its own prompt. A leak puts one
+    caller's prompt into another caller's error envelope, which is both a
+    correctness and a disclosure failure."""
     import asyncio
 
-    from claude_in_codex.server import _CALL_ARGUMENTS
+    import claude_in_codex.server as srv
+    from claude_in_codex.claude import ClaudeRun
 
-    seen: list = []
+    concurrency = 5
+    all_in_flight = asyncio.Event()
+    arrived = 0
 
-    async def one(job_id: str):
+    async def timing_out(*args, **kwargs):
+        nonlocal arrived
+        arrived += 1
+        if arrived >= concurrency:
+            all_in_flight.set()
+        await asyncio.wait_for(all_in_flight.wait(), timeout=10)
+        return ClaudeRun(stdout="", stderr="", exit_code=-1, timed_out=True, elapsed_ms=1)
+
+    monkeypatch.setattr(srv, "run_claude_async", timing_out)
+
+    async def one(prompt: str) -> dict:
         async with Client(mcp) as client:
-            await client.call_tool("claude_job_status", {"job_id": job_id}, raise_on_error=False)
-        seen.append(_CALL_ARGUMENTS.get())
+            result = await client.call_tool(
+                "claude_consult",
+                {"prompt": prompt, "workspace_root": str(git_repo)},
+                raise_on_error=False,
+            )
+        return result.structured_content
 
-    await asyncio.gather(*(one(f"job-{i}") for i in range(5)))
+    prompts = [f"question-{i}" for i in range(concurrency)]
+    envelopes = await asyncio.gather(*(one(p) for p in prompts))
 
-    assert seen == [None] * 5, seen
+    assert all_in_flight.is_set(), "the calls never overlapped; the race was not exercised"
+    for prompt, data in zip(prompts, envelopes, strict=True):
+        action = data["error"]["action"]
+        assert action["arguments"]["prompt"] == prompt, (
+            f"expected {prompt}, got {action['arguments']['prompt']} — "
+            "a concurrent call's arguments leaked into this envelope"
+        )
 
 
 async def test_a_real_timed_out_call_emits_the_async_twin_action_end_to_end(monkeypatch, git_repo):
