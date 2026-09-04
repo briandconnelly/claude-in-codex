@@ -16,9 +16,17 @@ to read this section before upgrading rather than after.
 Two themes account for most of the release. **Every paid operation is now
 recoverable** — all three have background forms, and a launch says in a field
 which of the three things it did instead of leaving the caller to infer it.
-And **the response is bounded by the server rather than by whatever the caller
-sent** — in 0.8.0 a large enough argument produced a proportionally large
+And **the response is bounded by the server rather than by the caller's tool
+arguments** — in 0.8.0 a large enough argument produced a proportionally large
 envelope, on success as well as on rejection.
+
+That second guarantee is scoped to tool arguments deliberately. Two echoes are
+still proportional to data the server does not choose: `details.allowed_roots`
+on `workspace_outside_roots` serializes the client's MCP roots verbatim (200
+roots of 4 KB measure an 806 KB envelope), and the repository-derived fields
+tracked in #167. Both come from the operator's own configuration rather than
+from a tool call, so they are not reachable by an agent composing arguments —
+but neither is bounded, and this release does not claim they are.
 
 ### Breaking
 
@@ -34,7 +42,7 @@ envelope, on success as well as on rejection.
   | `outcome` | meaning | next step |
   | --- | --- | --- |
   | `started` | a new paid job is running | poll `claude_job_status` |
-  | `existing_job` | an `idempotency_key` replay — **may already be finished** | read `may_be_terminal`, then poll |
+  | `existing_job` | an `idempotency_key` replay — **may already be finished** | read `status` / `result_available`; poll only while running |
   | `no_changes` | the diff was empty, the spend was skipped, the result is inline | read the payload |
 
   `job_id`-presence was never able to express this: `started` and `existing_job`

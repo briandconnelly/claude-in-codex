@@ -2979,7 +2979,7 @@ def test_capability_summary_names_error_carrier():
 
 
 async def test_validation_middleware_reraises_internal_model_errors():
-    from pydantic import BaseModel, ValidationError
+    from pydantic import BaseModel
 
     from claude_in_codex.server import ValidationEnvelopeMiddleware
 
@@ -2989,7 +2989,7 @@ async def test_validation_middleware_reraises_internal_model_errors():
     async def call_next(context):
         Inner(x="nope")  # internal model bug, not argument coercion
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(PydanticValidationError):
         await ValidationEnvelopeMiddleware().on_call_tool(None, call_next)
 
 
@@ -4283,6 +4283,47 @@ async def test_start_outcome_routing_is_structural_not_prose():
         "claude_review_changes_async",
         "claude_adversarial_review_async",
     }
+
+
+async def test_the_replay_trap_is_read_from_the_reply_not_from_the_routing_entry():
+    """`may_be_terminal` says a check is NEEDED; the reply says what the state IS.
+
+    The two live in different places, and conflating them is easy to do in prose:
+    `may_be_terminal` is routing metadata on the capabilities entry, and the reply
+    that must actually be inspected is a job status carrying `status` and
+    `result_available`. Documentation that tells an agent to "read
+    `may_be_terminal`" on the launch sends it to a field the reply model forbids.
+
+    Raised by Copilot on PR #169, against docs written in that PR. The routing
+    entry names the fields to read, so this pins that those names resolve on the
+    payload an `existing_job` launch actually returns."""
+    from claude_in_codex.schemas import AsyncExistingJob
+
+    lifecycle = _capabilities_payload()["async_lifecycle"]
+    reply_fields = set(AsyncExistingJob.model_fields)
+
+    # The routing entry points at real fields on the replay payload...
+    assert lifecycle["state_field"] in reply_fields
+    assert lifecycle["result_ready_field"] in reply_fields
+
+    # ...and the flag that motivates reading them is NOT one of them. The reply
+    # model forbids extras, so a doc promising it describes an impossible read.
+    assert "may_be_terminal" not in reply_fields
+    with pytest.raises(PydanticValidationError):
+        AsyncExistingJob.model_validate(
+            {
+                "job_id": "j",
+                "kind": "claude_consult",
+                "status": "done",
+                "started_at": "t",
+                "elapsed_ms": 1,
+                "deadline_seconds": 1,
+                "ttl_seconds": 1,
+                "tool": "claude_consult_async",
+                "outcome": "existing_job",
+                "may_be_terminal": True,
+            }
+        )
 
 
 async def test_advertised_outcomes_match_what_each_starter_can_produce():

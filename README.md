@@ -112,7 +112,8 @@ Branch the reply on `outcome`, which every successful launch carries:
 - `started` — a new paid job is running. Poll with `claude_job_status`, then fetch the
   result with `claude_job_result`.
 - `existing_job` — an `idempotency_key` replay handed back a job that already existed, so it
-  may already be finished; read `may_be_terminal` rather than assuming there is more to wait for.
+  may already be finished. The reply is a job status: read its `status` and `result_available`,
+  and go straight to `claude_job_result` when it is already done.
 - `no_changes` — the diff was empty, so the spend was skipped and the result is inline; there
   is no job to poll.
 
