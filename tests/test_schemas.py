@@ -96,7 +96,7 @@ def test_success_result_has_next_steps():
 
 
 def test_fingerprint_value():
-    assert FINGERPRINT == "claude-in-codex/0.1/schema-55"
+    assert FINGERPRINT == "claude-in-codex/0.1/schema-56"
 
 
 def test_meta_carries_head_and_diff_range():
@@ -379,3 +379,20 @@ def test_both_bounded_renderers_obey_the_cap_across_a_sweep():
                 assert len(shipped) <= schemas.DETAIL_VALUE_MAX_CHARS, (
                     f"{render.__name__}({filler!r} * {n}) ships {len(shipped)} chars"
                 )
+
+
+def test_capabilities_substubs_name_every_field_of_their_model():
+    """A substub replaces its model's definition in the advertised schema, so its
+    summary is the only field list a schema-driven client sees. #196 added
+    ToolCapability.deprecation and the stub silently kept the old list; the
+    AsyncLifecycle stub had likewise never named #80's start_outcome* fields."""
+    for name, summary in schemas._CAPABILITIES_SUBSTUBS.items():
+        model = getattr(schemas, name)
+        missing = [field for field in model.model_fields if field not in summary]
+        assert missing == [], (name, missing)
+    tool_stub = schemas._CAPABILITIES_SUBSTUBS["ToolCapability"]
+    for field in schemas.ToolDeprecation.model_fields:
+        assert field in tool_stub, field
+    defs = schemas.CAPABILITIES_SCHEMA["$defs"]
+    assert defs["ToolCapability"]["description"] == tool_stub
+    assert "ToolDeprecation" not in defs

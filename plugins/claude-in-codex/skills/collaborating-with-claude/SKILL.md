@@ -1,9 +1,39 @@
 ---
 name: collaborating-with-claude
-description: Use when you want an independent second opinion, a code review, or an adversarial critique from Claude Code while working in Codex. Triggers include finalizing risky changes, deciding between approaches, or pressure-testing a plan. Provides the claude-in-codex MCP tools and the rules for using them well.
+description: Deprecated — claude-in-codex is superseded by amicus; when amicus is installed, use its collaborating-with-amicus skill and amicus_* tools with backend="claude" instead. Use this skill only when amicus is unavailable and you want an independent second opinion, a code review, or an adversarial critique from Claude Code while working in Codex, or to finish background jobs this server already started.
 ---
 
 # Collaborating with Claude
+
+## Deprecated: use amicus
+
+claude-in-codex is superseded by [amicus](https://github.com/briandconnelly/amicus), which
+reaches Claude Code from any MCP client, Codex included. 0.10.0 is the final release; the
+repository is archived after it ships. Installed versions keep running but get no fixes.
+
+- **When amicus is installed, use it instead of these tools.** Follow amicus's
+  `collaborating-with-amicus` skill, and run `amicus_backends` with `detail="full"` before
+  the first paid call.
+- Each `claude_*` tool's deprecation marker (its `_meta` lifecycle key, and its
+  `claude_capabilities.tool_details` entry) names its amicus successor in `replaced_by`:
+
+  | claude-in-codex | amicus | pass `backend="claude"`? |
+  |---|---|---|
+  | `claude_consult` / `_async` | `amicus_consult` / `_async` | yes |
+  | `claude_review_changes` / `_async` | `amicus_review_changes` / `_async` | yes |
+  | `claude_adversarial_review` / `_async` | `amicus_adversarial_review` / `_async` | yes |
+  | `claude_dry_run` | `amicus_review_changes_dry_run` | yes |
+  | `claude_models` | `amicus_models` | yes |
+  | `claude_status` | `amicus_backends` | no |
+  | `claude_capabilities` | `amicus_capabilities` | no |
+  | `claude_job_*` | `amicus_job_*` | no |
+
+- `access`, `config_mode`, and `max_budget_usd` (and their `CLAUDE_IN_CODEX_*` defaults)
+  move into amicus's per-call `backend_options`. Other arguments differ, so read
+  `amicus_capabilities` rather than translating a call by hand.
+- **Job ids do not carry over.** Finish any job started here with this server's
+  `claude_job_*` tools, not amicus's.
+- The rest of this skill applies only while you are still calling these tools.
 
 Use the `claude-in-codex` MCP tools to get bounded, independent critique from Claude Code.
 Claude is a reviewer, not a co-pilot: it never edits your code.
@@ -48,8 +78,9 @@ Two MCP resources are readable for clients that browse rather than call.
 `claude-in-codex://capabilities` does NOT mirror `claude_capabilities`: it is a compact prose
 summary of scope and prerequisites, while the tool returns the structured contract (tool
 inventory, per-tool routing metadata, the fingerprint to pin) -- call the tool when you need
-that. `claude://models` is a DEPRECATED alias of `claude-in-codex://models` kept for a
-compatibility window; read the canonical `claude-in-codex://` URI in new work.
+that. `claude://models` is an older alias of `claude-in-codex://models`; read the canonical
+`claude-in-codex://` URI if you read either. All three resources are deprecated along with
+the tools, and their markers name the amicus resource that replaces each.
 
 ## Steering a call
 

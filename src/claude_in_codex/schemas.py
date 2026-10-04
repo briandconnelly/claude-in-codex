@@ -157,7 +157,7 @@ def _bounded_render(value: str, render: Callable[[str], str]) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-55"
+FINGERPRINT = "claude-in-codex/0.1/schema-56"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -906,6 +906,19 @@ class StatusResult(BaseModel):
     fingerprint: str = FINGERPRINT
 
 
+class ToolDeprecation(BaseModel):
+    """A deprecation marker: the same values on claude_capabilities and in _meta lifecycle."""
+
+    # One object with a fixed field set (#196), per the lifecycle `_meta` convention.
+    # Presence is the signal. Every field is required, so `replaced_by` is always
+    # present and is null only where amicus has no successor.
+    model_config = ConfigDict(extra="forbid")
+    since: str  # the release the deprecation took effect
+    removal_at_or_after: str  # the earliest version the capability may disappear in
+    replaced_by: str | None  # the successor amicus tool name or resource URI
+    migration: str  # what an agent changes to move to the successor
+
+
 class ToolCapability(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -920,6 +933,9 @@ class ToolCapability(BaseModel):
     # StatusResult.default_errors instead. Conditions are documented once in
     # CapabilitiesResult.error_catalog rather than repeated per tool.
     error_codes: list[str] = Field(default_factory=list)
+    # Set on every tool since the project was deprecated in favor of amicus (#196).
+    # None means not deprecated.
+    deprecation: ToolDeprecation | None = None
 
 
 class ErrorCodeDoc(BaseModel):
@@ -1409,16 +1425,21 @@ _ERROR_INFO_STUB = {
 
 # Sub-blocks of CapabilitiesResult that the payload itself documents field by
 # field. Stubbed in the advertised schema only; the wire payload is unchanged.
+# Each summary names every field of its model literally, because it is the only
+# field list a schema-driven client gets; tests/test_schemas.py enforces that, so a
+# new field cannot ship undescribed.
 _CAPABILITIES_SUBSTUBS = {
     "ErrorCodeDoc": ("One error code: code, condition, next_step, ever_retryable, detail_fields."),
     "AsyncLifecycle": (
-        "Background-job lifecycle: start/status/result/consume/cancel/list tool names, "
-        "handle_param, poll_delay_field, result_ready_field, state_field, "
-        "running/terminal states, nonresult_terminal_codes, notes."
+        "Background-job lifecycle: start_tools, start_outcome_field, start_outcomes, "
+        "start_outcome_routing, status_tool, result_tool, consume_tool, cancel_tool, "
+        "list_tool, handle_param, poll_delay_field, result_ready_field, state_field, "
+        "running_states, terminal_states, nonresult_terminal_codes, notes."
     ),
     "ToolCapability": (
         "One tool: name, cost, use_when, required_params, key_optional_params, "
-        "returns, error_codes."
+        "returns, error_codes, deprecation (since, removal_at_or_after, replaced_by, "
+        "migration; the same marker as the tool's _meta lifecycle key)."
     ),
     "DetailModes": (
         "The `detail` contract: levels, default, full_only_fields, per-level "
@@ -1510,6 +1531,9 @@ def _slim(schema: dict) -> dict:
     for name, summary in _CAPABILITIES_SUBSTUBS.items():
         if name in defs:
             defs[name] = {"type": "object", "description": summary}
+    # Only ToolCapability referenced it, and that stub now describes the marker,
+    # so its full definition would ship unreachable.
+    defs.pop("ToolDeprecation", None)
     return cast("dict", _strip_titles(out))
 
 
