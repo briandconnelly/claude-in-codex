@@ -5,7 +5,7 @@ All notable changes to `claude-in-codex` will be documented in this file.
 This project uses pre-1.0 semantic versioning. Minor versions may change the
 agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
-## Unreleased
+## 0.10.0 - 2026-10-04
 
 Fingerprint `claude-in-codex/0.1/schema-56` (was `schema-50`). The changes are
 the amicus deprecation markers (below), parameter and metadata descriptions, one
@@ -18,10 +18,10 @@ the advertised output-schema shape does move; no value set changed.
 
 - **claude-in-codex is deprecated in favor of
   [amicus](https://github.com/briandconnelly/amicus)** (#196), which reaches
-  Claude Code from any MCP client, Codex included, with `backend="claude"`. The
-  next release, 0.10.0, is the final one. The repository is archived after it
-  ships. Nothing is yanked: `.mcp.json` installs from a git tag that stays
-  fetchable, so installed versions keep running, but they get no fixes.
+  Claude Code from any MCP client, Codex included, with `backend="claude"`.
+  0.10.0 is the final release, and the repository is archived after it ships.
+  Nothing is yanked: `.mcp.json` installs from a git tag that stays fetchable,
+  so installed versions keep running, but they get no fixes.
 
   Every surface an agent might read now says so:
 
