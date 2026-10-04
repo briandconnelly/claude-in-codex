@@ -260,7 +260,7 @@ The Python package publishes the MCP server entry point for direct use and relea
 After a PyPI release, the server can also be launched with:
 
 ```sh
-uvx --from claude-in-codex==0.9.0 claude-in-codex-mcp
+uvx --from claude-in-codex==0.10.0 claude-in-codex-mcp
 ```
 
 ## Advanced reference

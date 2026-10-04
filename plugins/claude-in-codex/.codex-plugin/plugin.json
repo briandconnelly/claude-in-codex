@@ -1,6 +1,6 @@
 {
   "name": "claude-in-codex",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Deprecated: superseded by amicus (https://github.com/briandconnelly/amicus); 0.10.0 is the final release. Call Claude Code from Codex for bounded, independent code review and second opinions",
   "author": { "name": "Brian Connelly", "url": "https://github.com/briandconnelly" },
   "repository": "https://github.com/briandconnelly/claude-in-codex",
