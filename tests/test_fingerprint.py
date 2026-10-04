@@ -35,7 +35,7 @@ from tests.support import Client
 from claude_in_codex import schemas
 from claude_in_codex.server import CAPABILITY_SUMMARY, _capabilities_payload, mcp
 
-EXPECTED_CONTRACT_DIGEST = "c62968960e277d06f10f5b3082ad43f9520c606a8fa03a4aeb67f5f804e85107"
+EXPECTED_CONTRACT_DIGEST = "a9d7e51e031c7c575c39595b6afce40cb2cd1eeacd8397f77da71e19afbd5878"
 
 
 async def _contract_surface() -> dict:

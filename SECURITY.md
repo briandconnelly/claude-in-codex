@@ -2,8 +2,11 @@
 
 ## Supported Versions
 
-`claude-in-codex` is pre-1.0. Security fixes are released for the latest
-published version.
+`claude-in-codex` is deprecated in favor of
+[amicus](https://github.com/briandconnelly/amicus). 0.10.0 is its final release, and
+the repository is archived after it ships. No later release follows, including
+for security fixes. Installed versions keep running, unfixed, so migrate to amicus.
+Report issues in amicus's own Claude backend to amicus.
 
 ## Reporting a Vulnerability
 

@@ -183,14 +183,28 @@ from claude_in_codex.server import mcp
 # A headroom figure is a property of a COMMIT, not of the budget, so treat any
 # number written here as historical and measure before relying on one. The
 # assertion below is the only current statement.
-WIRE_BUDGET_BYTES = 72_000
+#
+# Raised from 72,000 to 78,000 for the amicus deprecation markers (#196), measured
+# 2026-10-04: 76,292, up 5,170 bytes / +7.3% from the 71,122 measured on main just
+# before it. That buys a lifecycle `_meta` record ({stability, deprecation}) and a
+# "Deprecated: use <successor>." description prefix on all 15 tools, plus the
+# `deprecation` field in claude_capabilities' output schema. It is the release's
+# point, not incidental: the marker is how an agent reading only tools/list learns
+# the tool is dying and where to go.
+#
+# Slimming came first. The migration prose never restates the successor that
+# `replaced_by` already carries, the six paid tools share one sentence, and the
+# job tools share another; tightening that wording gave back 94 bytes. What is
+# left is the namespaced key and the convention's fixed four-field shape, repeated
+# per record, which is not ours to abbreviate. 78,000 leaves 1,708 bytes / 2.2%.
+WIRE_BUDGET_BYTES = 78_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is
 # a conservative over-estimate — it read 12,964 against a measured 12,570 (+3.1%)
 # at the previous ceiling — and never needs tiktoken in CI. The byte assertion
 # stays authoritative; this one tracks the token budget issue #90 is written
-# against, and moves in step with WIRE_BUDGET_BYTES (ceil(72,000/4)).
-TOKEN_PROXY_BUDGET = 18_000  # see WIRE_BUDGET_BYTES note (ceil(72,000/4))
+# against, and moves in step with WIRE_BUDGET_BYTES (ceil(78,000/4)).
+TOKEN_PROXY_BUDGET = 19_500  # see WIRE_BUDGET_BYTES note (ceil(78,000/4))
 
 
 def _token_proxy(wire_bytes: int) -> int:
@@ -218,7 +232,7 @@ def _per_tool_report(payload: list[dict]) -> str:
 async def test_tools_list_discovery_cost_within_budget():
     """One test, both budgets, asserted independently.
 
-    The budgets are currently proportional (18,000 == 72,000/4) and the proxy is
+    The budgets are currently proportional (19,500 == 78,000/4) and the proxy is
     a pure function of the byte count, so neither can be busted alone today. They
     are still checked separately: tightening only TOKEN_PROXY_BUDGET later must
     actually enforce the tighter bound rather than be silently ignored."""

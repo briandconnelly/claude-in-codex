@@ -7,12 +7,52 @@ agent-visible MCP surface; patch versions are reserved for compatible fixes.
 
 ## Unreleased
 
-Fingerprint `claude-in-codex/0.1/schema-55` (was `schema-50`). The changes are
-parameter and metadata descriptions, one added `claude_capabilities` field, and
-two **breaking** changes (the `timeout` error's machine semantics and `base`'s
-type and acceptance, both below). `meta_fields` is a new required property on
+Fingerprint `claude-in-codex/0.1/schema-56` (was `schema-50`). The changes are
+the amicus deprecation markers (below), parameter and metadata descriptions, one
+added `claude_capabilities` field, and two **breaking** changes (the `timeout`
+error's machine semantics and `base`'s type and acceptance, both below). `meta_fields` is a new required property on
 `CapabilitiesResult`, and `CAPABILITIES_SCHEMA` is generated from that model, so
 the advertised output-schema shape does move; no value set changed.
+
+### Deprecated
+
+- **claude-in-codex is deprecated in favor of
+  [amicus](https://github.com/briandconnelly/amicus)** (#196), which reaches
+  Claude Code from any MCP client, Codex included, with `backend="claude"`. The
+  next release, 0.10.0, is the final one. The repository is archived after it
+  ships. Nothing is yanked: `.mcp.json` installs from a git tag that stays
+  fetchable, so installed versions keep running, but they get no fixes.
+
+  Every surface an agent might read now says so:
+
+  - The server instructions open with the notice and tell agents to prefer
+    amicus's tools when both are installed.
+  - Every tool and resource carries a deprecation marker,
+    `{since, removal_at_or_after, replaced_by, migration}`, under the
+    `dev.bconnelly.claude-in-codex/lifecycle` `_meta` key beside its `stability`.
+    `since` is `0.10.0`, because no earlier release announced the deprecation.
+    `removal_at_or_after` is `0.11.0`, a version that will never be published.
+    `replaced_by` names the amicus tool, or the amicus resource URI, that
+    succeeds it. Every tool and resource here has a successor, so none is
+    `null`.
+  - `claude_capabilities.tool_details` repeats each tool's marker in a new
+    `deprecation` field, and `deprecation_policy` states the final release.
+  - Every tool and resource description opens with
+    `Deprecated: use <successor>.`
+  - The migration text names `backend="claude"` only where the amicus successor
+    requires `backend`. It maps `access`, `config_mode` and `max_budget_usd`
+    (and their `CLAUDE_IN_CODEX_*` defaults) to amicus's per-call
+    `backend_options`. For the job tools, it says job ids do not carry over:
+    finish jobs started here with this server's job tools.
+  - The shipped `collaborating-with-claude` skill points at amicus and its
+    `collaborating-with-amicus` skill, with a successor table.
+  - The README, `SECURITY.md`, both plugin manifests, and the package metadata
+    carry the notice. The package classifier is now
+    `Development Status :: 7 - Inactive`.
+
+  This is not breaking: it adds fields and wording, and every tool still works.
+  It does move the advertised `tools/list` (about 5 KB, so the discovery-cost
+  ratchet was raised deliberately) and the `claude_capabilities` output schema.
 
 ### Fixed
 

@@ -121,6 +121,7 @@ from claude_in_codex.schemas import (
     SuccessResult,
     SystemPromptAppend,
     ToolCapability,
+    ToolDeprecation,
     Verdict,
     bounded_inert,
     bounded_repr,
@@ -130,6 +131,18 @@ from claude_in_codex.schemas import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# The deprecation's facts (#196), read by the notice below, deprecation_policy, and
+# every tool's and resource's deprecation marker. FINAL is the final release, so the
+# marker's removal field -- the earliest VERSION a capability may disappear in -- is
+# the minor after it, which will never be published. There is no date: archiving
+# removes nothing, and the git tags that `.mcp.json` installs from stay fetchable.
+_AMICUS_URL = "https://github.com/briandconnelly/amicus"
+_FINAL_RELEASE = "0.10.0"
+_REMOVAL_AT_OR_AFTER = "0.11.0"
+# The server-wide tier, from the convention's closed set, which claude_capabilities
+# reports and every lifecycle `_meta` record repeats.
+_SERVER_STABILITY = "experimental"
 
 # Structured RULES:/CONTEXT: rather than one paragraph (#180). This text is doubly
 # load-bearing -- FastMCP's `instructions=` AND the claude-in-codex://capabilities
@@ -146,7 +159,18 @@ if TYPE_CHECKING:
 #
 # Inventory is what gave way, because claude_capabilities publishes all of it and
 # this text is the one surface that cannot afford to bury a rule.
+#
+# The deprecation notice leads (#196), ahead of everything else, so an agent that
+# reads only the opening learns to route to amicus. The routing rule is its own
+# imperative sentence, apart from the facts around it.
 CAPABILITY_SUMMARY = (
+    f"DEPRECATED: superseded by amicus ({_AMICUS_URL}), which reaches Claude Code "
+    'with backend="claude". '
+    "When both are installed, prefer amicus's tools. "
+    f"{_FINAL_RELEASE} is the final release; the repository is archived after it "
+    "ships, and installed versions keep running but get no fixes. Each tool's _meta "
+    "lifecycle key carries a deprecation marker naming its amicus successor, or null "
+    "where amicus has none; claude_capabilities.tool_details repeats them. "
     "claude-in-codex lets Codex ask Claude Code for bounded critique: diff reviews, "
     "adversarial plan review, and second opinions. "
     "RULES. "
@@ -229,6 +253,113 @@ _JOB_DETAIL_DESCRIPTION = (
 # application release to hosts that cache or gate on that metadata. Keep this the
 # same source claude_capabilities reports, so the two never disagree.
 mcp = FastMCP(name="claude-in-codex", version=__version__, instructions=CAPABILITY_SUMMARY)
+
+# #196: every deprecation marker comes from these two maps, so the surfaces that
+# state one -- each record's _meta lifecycle key, the tool's claude_capabilities
+# entry, and the description prefix -- cannot disagree. _deprecated_tool and
+# _deprecated_resource index them directly, so a capability registered without an
+# entry fails at import.
+_LIFECYCLE_META_KEY = "dev.bconnelly.claude-in-codex/lifecycle"
+
+# Migration prose leaves the successor's name to `replaced_by`: every byte of it
+# ships once per tool in tools/list. `backend` is named only where the amicus
+# successor requires it (checked against amicus's tools/list, 2026-10-04).
+_READ_AMICUS_FIRST = "Other arguments differ: read amicus_capabilities."
+_PAID_MIGRATION = (
+    'Pass backend="claude"; access, config_mode, max_budget_usd and their '
+    "CLAUDE_IN_CODEX_* defaults become backend_options. " + _READ_AMICUS_FIRST
+)
+_JOB_MIGRATION = "Job ids do not carry over: finish jobs started here with this server's job tools."
+
+_TOOL_SUCCESSORS: dict[str, tuple[str | None, str]] = {
+    "claude_consult": ("amicus_consult", _PAID_MIGRATION),
+    "claude_consult_async": ("amicus_consult_async", _PAID_MIGRATION),
+    "claude_review_changes": ("amicus_review_changes", _PAID_MIGRATION),
+    "claude_review_changes_async": ("amicus_review_changes_async", _PAID_MIGRATION),
+    "claude_adversarial_review": ("amicus_adversarial_review", _PAID_MIGRATION),
+    "claude_adversarial_review_async": ("amicus_adversarial_review_async", _PAID_MIGRATION),
+    "claude_dry_run": (
+        "amicus_review_changes_dry_run",
+        'Pass backend="claude"; config_mode becomes a backend_options key. ' + _READ_AMICUS_FIRST,
+    ),
+    "claude_models": ("amicus_models", 'Pass backend="claude".'),
+    "claude_status": (
+        "amicus_backends",
+        'Call it with detail="full" to check that Claude Code is installed and authenticated.',
+    ),
+    "claude_capabilities": (
+        "amicus_capabilities",
+        "It covers every amicus backend, not only Claude.",
+    ),
+    "claude_job_status": ("amicus_job_status", _JOB_MIGRATION),
+    "claude_job_result": ("amicus_job_result", _JOB_MIGRATION),
+    "claude_job_consume_result": ("amicus_job_consume_result", _JOB_MIGRATION),
+    "claude_job_cancel": ("amicus_job_cancel", _JOB_MIGRATION),
+    "claude_job_list": ("amicus_job_list", _JOB_MIGRATION),
+}
+# Resources carry the marker too ([9.tier-metadata] covers every record type), and
+# their `replaced_by` is a resource URI, not a tool name.
+_RESOURCE_SUCCESSORS: dict[str, tuple[str | None, str]] = {
+    "claude-in-codex://models": ("amicus://models/claude", "Same catalog, from amicus."),
+    "claude://models": ("amicus://models/claude", "Same catalog, from amicus."),
+    "claude-in-codex://capabilities": (
+        "amicus://capabilities",
+        "It covers every amicus backend, not only Claude.",
+    ),
+}
+
+
+def _deprecation(successor: str | None, migration: str) -> ToolDeprecation:
+    return ToolDeprecation(
+        # No earlier release announced the deprecation, so it takes effect in FINAL.
+        since=_FINAL_RELEASE,
+        removal_at_or_after=_REMOVAL_AT_OR_AFTER,
+        replaced_by=successor,
+        migration=migration,
+    )
+
+
+_TOOL_DEPRECATIONS = {name: _deprecation(*entry) for name, entry in _TOOL_SUCCESSORS.items()}
+_RESOURCE_DEPRECATIONS = {uri: _deprecation(*entry) for uri, entry in _RESOURCE_SUCCESSORS.items()}
+
+
+def _lifecycle_meta(marker: ToolDeprecation) -> dict[str, object]:
+    # Dumped without exclude_none: the marker's field set is fixed, so a null
+    # `replaced_by` must ship as null rather than vanish.
+    return {
+        _LIFECYCLE_META_KEY: {"stability": _SERVER_STABILITY, "deprecation": marker.model_dump()}
+    }
+
+
+def _deprecated_doc(marker: ToolDeprecation, doc: str | None) -> str:
+    """Lead a description with its deprecation (#196): models read descriptions even
+    where neither `instructions` nor `_meta` reach them. The prefix joins the
+    docstring's first line on purpose; a line of its own would defeat the dedent."""
+    tail = f"use {marker.replaced_by}." if marker.replaced_by else "amicus has no equivalent."
+    return f"Deprecated: {tail} {doc}"
+
+
+def _deprecated_tool(**kwargs):
+    """`@mcp.tool(**kwargs)` plus the tool's deprecation prefix and lifecycle `_meta`."""
+
+    def register(fn):
+        marker = _TOOL_DEPRECATIONS[fn.__name__]
+        fn.__doc__ = _deprecated_doc(marker, fn.__doc__)
+        return mcp.tool(meta=_lifecycle_meta(marker), **kwargs)(fn)
+
+    return register
+
+
+def _deprecated_resource(uri: str, **kwargs):
+    """`@mcp.resource(uri, **kwargs)` plus the same prefix and lifecycle `_meta`."""
+
+    def register(fn):
+        marker = _RESOURCE_DEPRECATIONS[uri]
+        fn.__doc__ = _deprecated_doc(marker, fn.__doc__)
+        return mcp.resource(uri, meta=_lifecycle_meta(marker), **kwargs)(fn)
+
+    return register
+
 
 # readOnlyHint tracks observable effects, disclosed via annotations_policy in
 # claude_capabilities. Paid tools spend money and send context to an external
@@ -1780,7 +1911,7 @@ async def _execute(
     )
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_PAID_ANNOTATIONS, title="Ask Claude (second opinion)", output_schema=RESULT_SCHEMA
 )
 async def claude_consult(
@@ -1867,7 +1998,7 @@ async def claude_consult(
     return _result(out)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_PAID_ANNOTATIONS, title="Review changes with Claude", output_schema=RESULT_SCHEMA
 )
 async def claude_review_changes(
@@ -2082,7 +2213,7 @@ async def claude_review_changes(
     return _result(out)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_PAID_ANNOTATIONS,
     title="Adversarial review with Claude",
     output_schema=RESULT_SCHEMA,
@@ -2613,7 +2744,7 @@ async def _launch_job(
     return started.model_dump(mode="json", exclude_none=True)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Review changes with Claude (background)",
     output_schema=REVIEW_JOB_START_SCHEMA,
@@ -2889,7 +3020,7 @@ async def claude_review_changes_async(
     )
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Ask Claude (background)",
     output_schema=CONSULT_JOB_START_SCHEMA,
@@ -3024,7 +3155,7 @@ async def claude_consult_async(
     )
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_ASYNC_START_ANNOTATIONS,
     title="Adversarial review with Claude (background)",
     output_schema=ADVERSARIAL_JOB_START_SCHEMA,
@@ -3268,7 +3399,7 @@ async def claude_adversarial_review_async(
     )
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_JOB_LIFECYCLE_ANNOTATIONS,
     title="Background job status",
     output_schema=JOB_STATUS_SCHEMA,
@@ -3303,7 +3434,7 @@ async def claude_job_status(
     return _result(data)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_JOB_LIFECYCLE_ANNOTATIONS,
     title="Background job result",
     output_schema=RESULT_SCHEMA,
@@ -3340,7 +3471,7 @@ async def claude_job_result(
     return _result(payload)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_JOB_CONSUME_ANNOTATIONS,
     title="Consume background job result",
     output_schema=RESULT_SCHEMA,
@@ -3374,7 +3505,7 @@ async def claude_job_consume_result(
     return _result(payload)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_JOB_CANCEL_ANNOTATIONS,
     title="Cancel background job",
     output_schema=JOB_STATUS_SCHEMA,
@@ -3511,7 +3642,7 @@ async def _dry_run_impl(
     return _result(result.model_dump(mode="json", exclude_none=True))
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_FREE_READ_ANNOTATIONS,
     title="Preview review context (no spend)",
     output_schema=DRY_RUN_SCHEMA,
@@ -3563,7 +3694,7 @@ async def claude_dry_run(
     )
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_JOB_LIFECYCLE_ANNOTATIONS,
     title="List background jobs",
     output_schema=JOB_LIST_SCHEMA,
@@ -3680,7 +3811,7 @@ def _default_config_errors(d, found, fs) -> list[ErrorInfo]:
 # agent may read in any order and cannot rank (#180). Kept as a comment, not
 # docstring prose: the docstring is the ADVERTISED description, billed on every
 # tools/list and capped at 450 bytes.
-@mcp.tool(
+@_deprecated_tool(
     annotations=_FREE_READ_ANNOTATIONS,
     title="Claude CLI status & defaults",
     output_schema=STATUS_SCHEMA,
@@ -4316,6 +4447,7 @@ def _capabilities_payload() -> dict:
             # Deduped and sorted so the branch map is stable and comparable; the
             # groups it is composed from deliberately overlap.
             error_codes=sorted(set(_TOOL_ERROR_CODES[name])),
+            deprecation=_TOOL_DEPRECATIONS[name],
         )
 
     # `detail` rides every paid tool and both result fetchers. It was missing from
@@ -4330,7 +4462,7 @@ def _capabilities_payload() -> dict:
         name="claude-in-codex",
         version=__version__,
         transport="stdio",
-        stability="experimental",
+        stability=_SERVER_STABILITY,
         paid_tools=[
             "claude_consult",
             "claude_review_changes",
@@ -4618,9 +4750,11 @@ def _capabilities_payload() -> dict:
             "ANTHROPIC_API_KEY only for config_mode=bare",
         ],
         deprecation_policy=(
-            "Deprecated tools remain discoverable during their compatibility window "
-            "with replacement guidance; removals/renames and schema/error changes "
-            "bump the fingerprint."
+            f"Deprecated in {_FINAL_RELEASE} in favor of amicus ({_AMICUS_URL}). "
+            f"{_FINAL_RELEASE} is the final release; the repository is archived after "
+            "it ships, and installed versions keep running but get no fixes. Each "
+            "tool's `deprecation` marker names its amicus successor, or null where "
+            "amicus has none."
         ),
         annotations_policy=(
             "Static annotations represent the worst case across config modes. "
@@ -4643,10 +4777,15 @@ def _capabilities_payload() -> dict:
         ),
         fingerprint_covers=list(FINGERPRINT_COVERS),
     )
-    return result.model_dump(mode="json", exclude_none=True)
+    payload = result.model_dump(mode="json", exclude_none=True)
+    # exclude_none would strip a null `replaced_by`, but the marker's field set is
+    # fixed, so re-attach each marker whole to match its `_meta` copy.
+    for entry in payload["tool_details"]:
+        entry["deprecation"] = _TOOL_DEPRECATIONS[entry["name"]].model_dump()
+    return payload
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_FREE_READ_ANNOTATIONS,
     title="Claude review capabilities",
     output_schema=CAPABILITIES_SCHEMA,
@@ -4655,8 +4794,9 @@ def claude_capabilities() -> ToolResult:
     """Return the compact capability contract for this server.
 
     Free and read-only. Call first when unsure which tool to use. Includes tool
-    inventory, scope/negative-scope, prerequisites, modes, deprecation policy, and
-    fingerprint.
+    inventory with each tool's deprecation marker (the same one as its _meta
+    lifecycle key), scope/negative-scope, prerequisites, modes, deprecation policy,
+    and fingerprint.
     """
     return _result(_capabilities_payload())
 
@@ -4667,7 +4807,7 @@ def _model_catalog_payload() -> dict:
     return read_model_catalog().model_dump(mode="json", exclude_none=True)
 
 
-@mcp.tool(
+@_deprecated_tool(
     annotations=_FREE_READ_ANNOTATIONS,
     title="List Claude model slugs",
     output_schema=MODEL_CATALOG_SCHEMA,
@@ -4684,20 +4824,19 @@ def claude_models() -> ToolResult:
     return _result(_model_catalog_payload())
 
 
-@mcp.resource("claude-in-codex://models", mime_type="application/json")
+@_deprecated_resource("claude-in-codex://models", mime_type="application/json")
 def claude_models_resource() -> dict:
     """Advisory Claude model catalog (same payload as the claude_models tool)."""
     return _model_catalog_payload()
 
 
-@mcp.resource("claude://models", mime_type="application/json")
+@_deprecated_resource("claude://models", mime_type="application/json")
 def claude_models_resource_deprecated() -> dict:
-    """DEPRECATED alias of claude-in-codex://models (same payload); it remains
-    available for a compatibility window per the deprecation policy."""
+    """Older alias of claude-in-codex://models (same payload)."""
     return _model_catalog_payload()
 
 
-@mcp.resource("claude-in-codex://capabilities")
+@_deprecated_resource("claude-in-codex://capabilities")
 def capabilities() -> str:
     """Server capability summary, negative scope, and prerequisites."""
     return CAPABILITY_SUMMARY

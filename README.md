@@ -4,6 +4,16 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
+> [!WARNING]
+> **Deprecated: superseded by [amicus](https://github.com/briandconnelly/amicus).**
+> amicus reaches Claude Code from any MCP client, Codex included: pass `backend="claude"`.
+> 0.10.0 is the final release of claude-in-codex, and the repository is archived after it
+> ships. Installed versions keep running, because `.mcp.json` installs from a git tag that
+> stays fetchable, but they get no fixes. When both are installed, prefer amicus's tools.
+> Each tool's deprecation marker (in its `_meta` lifecycle key and in `claude_capabilities`)
+> names its amicus successor. Job ids do not carry over, so finish jobs started here with
+> this server's `claude_job_*` tools.
+
 Ask Claude Code for an independent code review or second opinion, straight from Codex.
 
 `claude-in-codex` is review-only: Claude reviews, critiques, and advises. It does not edit

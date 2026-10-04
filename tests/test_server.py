@@ -333,7 +333,14 @@ async def test_capability_summary_declares_tier_and_blocking():
     # idempotency_key obligation, and the action.next_step pointer measure 1,278.
     # Inventory moved to claude_capabilities to pay for part of it; the rest is
     # the honest cost of marking which sentences bind.
-    assert len(CAPABILITY_SUMMARY) < 1300
+    #
+    # Raised to 1800 by #196 for the amicus deprecation notice, which leads the
+    # text: 1,296 -> 1,764. Every clause in it is a required disclosure (the
+    # successor, the routing rule, the final release, the archive, that installed
+    # versions keep running unfixed, and where the per-tool marker lives), and the
+    # existing rules below stay pinned by content, so this raise cannot be met by
+    # dropping one of them.
+    assert len(CAPABILITY_SUMMARY) < 1800
     # The two rules #180 found missing. Pinned by content, not by length: the
     # whole failure was that a length target was met by dropping them.
     assert "keep the default access=toolless when the workspace may hold secrets" in summary
@@ -366,7 +373,11 @@ async def test_capability_summary_declares_tier_and_blocking():
 async def test_tool_descriptions_are_concise_and_disambiguating():
     tools = await _tools_by_name()
     for tool in tools.values():
-        assert len(tool.description or "") <= 450, tool.name
+        # The cap bounds the authored description. The deprecation prefix (#196)
+        # is generated, pinned by its own test, and excluded here so the cap keeps
+        # measuring what an author can actually trim.
+        body = (tool.description or "").split(". ", 1)[1]
+        assert len(body) <= 450, tool.name
     assert "question or design choice" in tools["claude_consult"].description
     assert "git diff" in tools["claude_review_changes"].description
     assert "background" in tools["claude_review_changes_async"].description
@@ -673,7 +684,7 @@ async def test_claude_consult_returns_normalized(fake_claude):
     data = structured(result)
     assert data["ok"] is True
     assert data["verdict"] == "concerns"
-    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-55"
+    assert data["meta"]["fingerprint"] == "claude-in-codex/0.1/schema-56"
 
 
 async def test_claude_consult_rejects_oversized_prompt_before_paid_call(monkeypatch, tmp_path):
@@ -1568,7 +1579,7 @@ async def test_capabilities_tool_returns_structured_contract():
     async with Client(mcp) as client:
         result = await client.call_tool("claude_capabilities", {})
     data = structured(result)
-    assert data["fingerprint"] == "claude-in-codex/0.1/schema-55"
+    assert data["fingerprint"] == "claude-in-codex/0.1/schema-56"
     assert data["transport"] == "stdio"
     assert set(data["paid_tools"]) == {
         "claude_consult",
@@ -1605,7 +1616,10 @@ async def test_capabilities_tool_returns_structured_contract():
     assert details["claude_status"]["cost"] == "free"
     assert data["negative_scope"]  # non-empty list of what it won't do
     assert data["prerequisites"]
-    assert "fingerprint" in data["deprecation_policy"]
+    policy = data["deprecation_policy"]
+    assert "0.10.0 is the final release" in policy
+    assert "archived" in policy
+    assert "or null where amicus has none" in policy
 
 
 async def test_capabilities_disclose_data_egress():
@@ -4912,7 +4926,11 @@ async def test_no_paid_tool_ships_blocking_only():
     assert [t for t in blocking if f"{t}_async" not in starters] == []
     summary = CAPABILITY_SUMMARY.lower()
     assert "every blocking paid operation has a claude_*_async form" in summary
-    assert "deprecated" not in summary
+    # The claim stays unconditional: no exception clause reintroduced beside it.
+    # (The summary does now say "deprecated" -- the whole server is, per #196 --
+    # which is why this no longer bans that word outright.)
+    claim = summary[summary.index("every blocking paid operation") :].split(". ")[0]
+    assert "except" not in claim
     # And it must not tell a caller to assume the handle it may not get. The
     # summary used to say the job_id was "absent on an empty diff", which named
     # the one shape by what it LACKED; since #80 every start reply carries an

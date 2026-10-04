@@ -157,7 +157,7 @@ def _bounded_render(value: str, render: Callable[[str], str]) -> str:
 # Bump this whenever the agent-visible surface changes: tool names, input or
 # output schemas, the ErrorCode set, the config_mode/access/scope/detail/effort
 # value sets, or the capability guarantees in CAPABILITY_SUMMARY. Clients cache by it.
-FINGERPRINT = "claude-in-codex/0.1/schema-55"
+FINGERPRINT = "claude-in-codex/0.1/schema-56"
 
 # Agent-readable disclosure of what the fingerprint covers. Keep in sync with the
 # bump rules in the comment above and the pinned surface in tests/test_fingerprint.py.
@@ -906,6 +906,19 @@ class StatusResult(BaseModel):
     fingerprint: str = FINGERPRINT
 
 
+class ToolDeprecation(BaseModel):
+    """A deprecation marker: the same values on claude_capabilities and in _meta lifecycle."""
+
+    # One object with a fixed field set (#196), per the lifecycle `_meta` convention.
+    # Presence is the signal. Every field is required, so `replaced_by` is always
+    # present and is null only where amicus has no successor.
+    model_config = ConfigDict(extra="forbid")
+    since: str  # the release the deprecation took effect
+    removal_at_or_after: str  # the earliest version the capability may disappear in
+    replaced_by: str | None  # the successor amicus tool name or resource URI
+    migration: str  # what an agent changes to move to the successor
+
+
 class ToolCapability(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -920,6 +933,9 @@ class ToolCapability(BaseModel):
     # StatusResult.default_errors instead. Conditions are documented once in
     # CapabilitiesResult.error_catalog rather than repeated per tool.
     error_codes: list[str] = Field(default_factory=list)
+    # Set on every tool since the project was deprecated in favor of amicus (#196).
+    # None means not deprecated.
+    deprecation: ToolDeprecation | None = None
 
 
 class ErrorCodeDoc(BaseModel):
