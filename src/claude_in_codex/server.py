@@ -4650,6 +4650,13 @@ def _capabilities_payload() -> dict:
                 optional=["workspace_root"],
             ),
             tool_detail(
+                "claude_capabilities",
+                "free",
+                "Read this contract: tool inventory, per-tool routing metadata and "
+                "deprecation markers, scope, and the fingerprint to pin.",
+                "this payload",
+            ),
+            tool_detail(
                 "claude_models",
                 "free",
                 "Discover valid `model` slugs (aliases + pinned full IDs) before "

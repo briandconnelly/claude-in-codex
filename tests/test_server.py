@@ -1598,9 +1598,7 @@ async def test_capabilities_tool_returns_structured_contract():
     ):
         assert lifecycle in data["free_tools"]
     details = {item["name"]: item for item in data["tool_details"]}
-    assert set(details) == set(data["paid_tools"]) | set(data["free_tools"]) - {
-        "claude_capabilities",
-    }
+    assert set(details) == set(data["paid_tools"]) | set(data["free_tools"])
     assert details["claude_review_changes"]["cost"] == "paid"
     assert details["claude_review_changes"]["required_params"] == ["scope"]
     assert {"config_mode", "access", "model", "max_budget_usd"} <= set(

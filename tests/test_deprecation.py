@@ -161,7 +161,8 @@ async def test_capabilities_repeat_each_tools_wire_marker():
     async with Client(mcp) as client:
         data = (await client.call_tool("claude_capabilities", {})).structured_content
     details = {entry["name"]: entry for entry in data["tool_details"]}
-    assert details, "an empty tool_details would make the loop below vacuous"
+    # Every wire tool, claude_capabilities included: the docs promise each one.
+    assert set(details) == set(tools)
     for name, entry in details.items():
         assert entry["deprecation"] == _lifecycle(tools[name])["deprecation"], name
 

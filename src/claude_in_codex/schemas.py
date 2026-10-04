@@ -1425,16 +1425,21 @@ _ERROR_INFO_STUB = {
 
 # Sub-blocks of CapabilitiesResult that the payload itself documents field by
 # field. Stubbed in the advertised schema only; the wire payload is unchanged.
+# Each summary names every field of its model literally, because it is the only
+# field list a schema-driven client gets; tests/test_schemas.py enforces that, so a
+# new field cannot ship undescribed.
 _CAPABILITIES_SUBSTUBS = {
     "ErrorCodeDoc": ("One error code: code, condition, next_step, ever_retryable, detail_fields."),
     "AsyncLifecycle": (
-        "Background-job lifecycle: start/status/result/consume/cancel/list tool names, "
-        "handle_param, poll_delay_field, result_ready_field, state_field, "
-        "running/terminal states, nonresult_terminal_codes, notes."
+        "Background-job lifecycle: start_tools, start_outcome_field, start_outcomes, "
+        "start_outcome_routing, status_tool, result_tool, consume_tool, cancel_tool, "
+        "list_tool, handle_param, poll_delay_field, result_ready_field, state_field, "
+        "running_states, terminal_states, nonresult_terminal_codes, notes."
     ),
     "ToolCapability": (
         "One tool: name, cost, use_when, required_params, key_optional_params, "
-        "returns, error_codes."
+        "returns, error_codes, deprecation (since, removal_at_or_after, replaced_by, "
+        "migration; the same marker as the tool's _meta lifecycle key)."
     ),
     "DetailModes": (
         "The `detail` contract: levels, default, full_only_fields, per-level "
@@ -1526,6 +1531,9 @@ def _slim(schema: dict) -> dict:
     for name, summary in _CAPABILITIES_SUBSTUBS.items():
         if name in defs:
             defs[name] = {"type": "object", "description": summary}
+    # Only ToolCapability referenced it, and that stub now describes the marker,
+    # so its full definition would ship unreachable.
+    defs.pop("ToolDeprecation", None)
     return cast("dict", _strip_titles(out))
 
 

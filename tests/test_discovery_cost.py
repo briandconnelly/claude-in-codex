@@ -185,10 +185,11 @@ from claude_in_codex.server import mcp
 # assertion below is the only current statement.
 #
 # Raised from 72,000 to 78,000 for the amicus deprecation markers (#196), measured
-# 2026-10-04: 76,292, up 5,170 bytes / +7.3% from the 71,122 measured on main just
+# 2026-10-04: 76,502, up 5,380 bytes / +7.6% from the 71,122 measured on main just
 # before it. That buys a lifecycle `_meta` record ({stability, deprecation}) and a
 # "Deprecated: use <successor>." description prefix on all 15 tools, plus the
-# `deprecation` field in claude_capabilities' output schema. It is the release's
+# `deprecation` field in claude_capabilities' output schema, whose ToolCapability
+# and AsyncLifecycle stubs now name every field (+210 of the total). It is the release's
 # point, not incidental: the marker is how an agent reading only tools/list learns
 # the tool is dying and where to go.
 #
@@ -196,7 +197,7 @@ from claude_in_codex.server import mcp
 # `replaced_by` already carries, the six paid tools share one sentence, and the
 # job tools share another; tightening that wording gave back 94 bytes. What is
 # left is the namespaced key and the convention's fixed four-field shape, repeated
-# per record, which is not ours to abbreviate. 78,000 leaves 1,708 bytes / 2.2%.
+# per record, which is not ours to abbreviate. 78,000 leaves 1,498 bytes / 1.9%.
 WIRE_BUDGET_BYTES = 78_000
 # Deterministic, dependency-free stand-in for a real tokenizer. JSON schema text
 # is ASCII-dense and packs ~4.13 bytes per o200k_base token, so ceil(bytes/4) is

@@ -56,6 +56,12 @@ the advertised output-schema shape does move; no value set changed.
 
 ### Fixed
 
+- The advertised `claude_capabilities` output schema now names every field of the
+  blocks it stubs. The `AsyncLifecycle` stub had never listed #80's
+  `start_outcome_field`, `start_outcomes`, and `start_outcome_routing`, so a
+  schema-driven client could not discover them. A test now requires each stub to
+  name every field of its model.
+
 - The live integration suite can now fail a release. It is the gate for the half
   of the `claude` CLI contract that no-spend tests cannot cover
   (`ENVELOPE_KEYS`, `SUCCESS_SUBTYPES`, `USAGE_KEYS`), and #159 made its
